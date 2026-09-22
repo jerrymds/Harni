@@ -1,0 +1,41 @@
+{
+  "name": "harni-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "Harni Coding Agent",
+  "scripts": {
+    "dev": "concurrently -n \"SERVER,WEB\" -c \"bgBlue.bold,bgMagenta.bold\" \"pnpm --filter @harni/server dev\" \"pnpm --filter @harni/web dev\"",
+    "dev:server": "pnpm --filter @harni/server dev",
+    "dev:web": "pnpm --filter @harni/web dev",
+    "build": "pnpm -r build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:core": "vitest run --project agent-core",
+    "test:server": "vitest run --project server",
+    "test:web": "vitest run --project web",
+    "test:llm": "tsx scripts/test-llm.ts",
+    "lint": "eslint .",
+    "typecheck": "tsc -b packages/types packages/agent-core apps/server apps/web",
+    "package:desktop": "powershell -ExecutionPolicy Bypass -File scripts/package-desktop.ps1",
+    "clean": "pnpm -r exec rimraf dist"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.6",
+    "@vitest/coverage-v8": "^4.1.11",
+    "concurrently": "^9.1.2",
+    "eslint": "^10.9.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "jsdom": "^30.0.1",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.69.0",
+    "vitest": "^4.1.11"
+  },
+  "packageManager": "pnpm@9.15.4"
+}

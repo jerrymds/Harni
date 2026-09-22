@@ -1,0 +1,23 @@
+{
+  "name": "@harni/agent-core",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Headless Autonomous Coding Agent Engine for Harni",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@harni/types": "workspace:*",
+    "typescript": "^5.7.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.5",
+    "typescript": "^5.7.3"
+  }
+}

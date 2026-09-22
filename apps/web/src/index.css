@@ -1,0 +1,365 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ==========================================================================
+   CODING AGENT EYE-FRIENDLY THEME SYSTEM (Soft, Low-Saturation Light Theme)
+   ========================================================================== */
+
+/* 1. Default & Eye-Friendly Light (晨霧灰 & 柔霧淺色系 - 護眼低飽和度) */
+/* 1. Default & Eye-Friendly Light (晨霧灰 & 莫蘭迪靛青 - 護眼低飽和度) */
+:root, .theme-eye-friendly, .theme-void {
+  --ag-void-rgb: 248 250 252;       /* #F8FAFC 晨霧灰主底色 */
+  --ag-bg-rgb: 248 250 252;         /* #F8FAFC 應用程式基底 */
+  --ag-sidebar-rgb: 241 245 249;    /* #F1F5F9 側邊欄淺灰白 */
+  --ag-panel-rgb: 255 255 255;      /* #FFFFFF 區塊/卡片純白 */
+  --ag-surface-rgb: 248 250 252;    /* #F8FAFC 表面微層次 */
+  --ag-elevated-rgb: 255 255 255;   /* #FFFFFF 懸浮卡片 */
+  --ag-border-rgb: 226 232 240;     /* #E2E8F0 柔霧邊框線條 */
+  --ag-border-hover-rgb: 203 213 225; /* #CBD5E1 懸停邊框線條 */
+  --ag-primary-rgb: 99 102 241;     /* #6366F1 晨霧莫蘭迪靛青 */
+  --ag-primary-glow: rgba(99, 102, 241, 0.2);
+  --ag-shadow-glow: 0 2px 8px -2px rgba(99, 102, 241, 0.25);
+  --ag-text-primary: #334155;       /* #334155 深石墨灰主要文字 */
+  --ag-text-secondary: #64748b;     /* #64748b 次要文字 */
+  --ag-text-muted: #94a3b8;         /* #94a3b8 輔助文字 */
+  --ag-grad-from: #6366f1;
+  --ag-grad-to: #8b7fd9;
+}
+
+/* 2. Soft Lavender (柔霧薰衣草紫調) */
+.theme-lavender {
+  --ag-void-rgb: 248 247 254;
+  --ag-bg-rgb: 248 247 254;
+  --ag-sidebar-rgb: 243 240 252;
+  --ag-panel-rgb: 255 255 255;
+  --ag-surface-rgb: 243 240 252;
+  --ag-elevated-rgb: 255 255 255;
+  --ag-border-rgb: 233 228 248;
+  --ag-border-hover-rgb: 216 208 242;
+  --ag-primary-rgb: 139 127 217;     /* #8B7FD9 柔霧薰衣草紫 */
+  --ag-primary-glow: rgba(139, 127, 217, 0.2);
+  --ag-shadow-glow: 0 2px 8px -2px rgba(139, 127, 217, 0.25);
+  --ag-text-primary: #334155;
+  --ag-text-secondary: #64748b;
+  --ag-text-muted: #94a3b8;
+  --ag-grad-from: #8b7fd9;
+  --ag-grad-to: #60a5fa;
+}
+
+/* 3. Sage Green (鼠尾草綠調) */
+.theme-grass {
+  --ag-void-rgb: 242 251 247;
+  --ag-bg-rgb: 242 251 247;
+  --ag-sidebar-rgb: 235 247 241;
+  --ag-panel-rgb: 255 255 255;
+  --ag-surface-rgb: 235 247 241;
+  --ag-elevated-rgb: 255 255 255;
+  --ag-border-rgb: 215 241 230;
+  --ag-border-hover-rgb: 185 233 214;
+  --ag-primary-rgb: 16 185 129;     /* #10B981 鼠尾草綠 */
+  --ag-primary-glow: rgba(16, 185, 129, 0.2);
+  --ag-shadow-glow: 0 2px 8px -2px rgba(16, 185, 129, 0.25);
+  --ag-text-primary: #334155;
+  --ag-text-secondary: #64748b;
+  --ag-text-muted: #94a3b8;
+  --ag-grad-from: #10b981;
+  --ag-grad-to: #3b82f6;
+}
+
+/* 4. Butter Warmth (奶油杏黃調) */
+.theme-khaki {
+  --ag-void-rgb: 254 253 246;
+  --ag-bg-rgb: 254 253 246;
+  --ag-sidebar-rgb: 253 250 236;
+  --ag-panel-rgb: 255 255 255;
+  --ag-surface-rgb: 253 250 236;
+  --ag-elevated-rgb: 255 255 255;
+  --ag-border-rgb: 247 240 212;
+  --ag-border-hover-rgb: 238 227 184;
+  --ag-primary-rgb: 217 119 6;      /* #D97706 奶油杏黃琥珀 */
+  --ag-primary-glow: rgba(217, 119, 6, 0.2);
+  --ag-shadow-glow: 0 2px 8px -2px rgba(217, 119, 6, 0.25);
+  --ag-text-primary: #334155;
+  --ag-text-secondary: #64748b;
+  --ag-text-muted: #94a3b8;
+  --ag-grad-from: #d97706;
+  --ag-grad-to: #8b7fd9;
+}
+
+/* 5. Cornflower Blue (恬淡矢車菊藍調 - 澄澈天藍) */
+.theme-indigo {
+  --ag-void-rgb: 240 247 255;
+  --ag-bg-rgb: 240 247 255;
+  --ag-sidebar-rgb: 232 243 255;
+  --ag-panel-rgb: 255 255 255;
+  --ag-surface-rgb: 232 243 255;
+  --ag-elevated-rgb: 255 255 255;
+  --ag-border-rgb: 219 234 254;
+  --ag-border-hover-rgb: 191 219 254;
+  --ag-primary-rgb: 37 99 235;      /* #2563EB 澄澈恬淡矢車菊藍 */
+  --ag-primary-glow: rgba(37, 99, 235, 0.2);
+  --ag-shadow-glow: 0 2px 8px -2px rgba(37, 99, 235, 0.25);
+  --ag-text-primary: #334155;
+  --ag-text-secondary: #64748b;
+  --ag-text-muted: #94a3b8;
+  --ag-grad-from: #2563eb;
+  --ag-grad-to: #60a5fa;
+}
+
+/* 6. Slate Minimalist (沉穩極簡灰階) */
+.theme-slate {
+  --ag-void-rgb: 248 250 252;
+  --ag-bg-rgb: 248 250 252;
+  --ag-sidebar-rgb: 241 245 249;
+  --ag-panel-rgb: 255 255 255;
+  --ag-surface-rgb: 241 245 249;
+  --ag-elevated-rgb: 255 255 255;
+  --ag-border-rgb: 226 232 240;
+  --ag-border-hover-rgb: 203 213 225;
+  --ag-primary-rgb: 71 85 105;      /* #475569 曜石深石墨灰 */
+  --ag-primary-glow: rgba(71, 85, 105, 0.2);
+  --ag-shadow-glow: 0 2px 8px -2px rgba(71, 85, 105, 0.25);
+  --ag-text-primary: #334155;
+  --ag-text-secondary: #64748b;
+  --ag-text-muted: #94a3b8;
+  --ag-grad-from: #475569;
+  --ag-grad-to: #334155;
+}
+
+/* 7. Dark Slate & Charcoal (深炭黑曜 - 專業石墨藍黑高對比) */
+.theme-dark, .theme-charcoal {
+  --ag-void-rgb: 15 23 42;          /* #0F172A 深炭藍黑基底 (Dark Slate) */
+  --ag-bg-rgb: 15 23 42;            /* #0F172A 應用程式基底 */
+  --ag-sidebar-rgb: 30 41 59;       /* #1E293B 石墨黑次級底 (Charcoal) */
+  --ag-panel-rgb: 30 41 59;         /* #1E293B 區塊與卡片底色 */
+  --ag-surface-rgb: 15 23 42;       /* #0F172A 表面微層次 */
+  --ag-elevated-rgb: 51 65 85;      /* #334155 懸浮選單與提示框 */
+  --ag-border-rgb: 51 65 85;        /* #334155 邊框線條 */
+  --ag-border-hover-rgb: 71 85 105; /* #475569 懸停邊框線條 */
+  --ag-primary-rgb: 56 189 248;     /* #38BDF8 曜藍天青高光 */
+  --ag-primary-glow: rgba(56, 189, 248, 0.25);
+  --ag-shadow-glow: 0 4px 14px -2px rgba(15, 23, 42, 0.5);
+  --ag-text-primary: #F8FAFC;       /* #F8FAFC 晨霧純白主要文字 */
+  --ag-text-secondary: #CBD5E1;     /* #CBD5E1 淺灰次要文字 */
+  --ag-text-muted: #94A3B8;         /* #94A3B8 輔助文字 */
+  --ag-grad-from: #38bdf8;
+  --ag-grad-to: #a78bfa;
+}
+
+/* Root, HTML, Body Base Styles */
+html, body, #root {
+  background-color: rgb(var(--ag-void-rgb)) !important;
+  color: var(--ag-text-primary);
+  font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  min-height: 100vh;
+  width: 100vw;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+/* Smooth Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgb(var(--ag-border-rgb));
+  border-radius: 4px;
+  transition: background-color 0.2s;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgb(var(--ag-border-hover-rgb));
+}
+
+/* Eye-Friendly Markdown Prose Typography (Theme Adaptive) */
+.prose {
+  color: var(--ag-text-primary);
+  line-height: 1.65;
+}
+
+.prose h1, .prose h2, .prose h3, .prose h4 {
+  color: var(--ag-text-primary);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.prose p {
+  color: var(--ag-text-primary);
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+.prose strong {
+  color: var(--ag-text-primary);
+  font-weight: 600;
+}
+
+/* Theme Adaptive Code Blocks */
+.prose pre {
+  background-color: rgb(var(--ag-void-rgb) / 0.8) !important;
+  border: 1px solid rgb(var(--ag-border-rgb)) !important;
+  color: var(--ag-text-primary) !important;
+  border-radius: 0.85rem;
+  padding: 0.85rem;
+  box-shadow: var(--ag-shadow-glow);
+}
+
+.prose pre code {
+  color: inherit !important;
+  background-color: transparent !important;
+  padding: 0;
+  border: none !important;
+}
+
+/* Theme Adaptive Inline Code Badge (目錄、程式名稱、路徑、變數) */
+.prose code {
+  color: rgb(var(--ag-primary-rgb));
+  background-color: rgb(var(--ag-primary-rgb) / 0.12);
+  padding: 0.16em 0.42em;
+  border-radius: 0.375rem;
+  font-size: 0.875em;
+  font-weight: 600;
+  border: 1px solid rgb(var(--ag-primary-rgb) / 0.25);
+  font-family: inherit;
+}
+
+.prose a {
+  color: rgb(var(--ag-primary-rgb));
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  font-weight: 500;
+}
+
+.prose a:hover {
+  opacity: 0.85;
+}
+
+.prose ul, .prose ol {
+  padding-left: 1.25rem;
+  margin-top: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.prose li {
+  margin-top: 0.25rem;
+  margin-bottom: 0.25rem;
+}
+
+/* Theme Adaptive Blockquotes */
+.prose blockquote {
+  border-left: 4px solid rgb(var(--ag-primary-rgb));
+  color: var(--ag-text-secondary);
+  background-color: rgb(var(--ag-primary-rgb) / 0.08);
+  padding: 0.65rem 1rem;
+  border-radius: 0 0.65rem 0.65rem 0;
+  margin-top: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+/* Theme Adaptive Tables (目錄與資訊表格) */
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 0.85rem;
+  margin-bottom: 0.85rem;
+  font-size: 0.875rem;
+  border-radius: 0.75rem;
+  overflow: hidden;
+  border: 1px solid rgb(var(--ag-border-rgb));
+}
+
+.prose thead {
+  background-color: rgb(var(--ag-sidebar-rgb));
+  border-bottom: 2px solid rgb(var(--ag-border-rgb));
+}
+
+.prose th {
+  color: var(--ag-text-primary);
+  font-weight: 600;
+  padding: 0.6rem 0.85rem;
+  text-align: left;
+  border: 1px solid rgb(var(--ag-border-rgb));
+}
+
+.prose td {
+  color: var(--ag-text-primary);
+  padding: 0.55rem 0.85rem;
+  border: 1px solid rgb(var(--ag-border-rgb));
+}
+
+.prose tbody tr:nth-child(even) {
+  background-color: rgb(var(--ag-surface-rgb) / 0.5);
+}
+
+.prose tbody tr:hover {
+  background-color: rgb(var(--ag-primary-rgb) / 0.06);
+}
+
+/* Font Size Options */
+html.font-size-sm, body.font-size-sm { font-size: 13px; }
+html.font-size-base, body.font-size-base { font-size: 14px; }
+html.font-size-lg, body.font-size-lg { font-size: 16px; }
+
+/* Code Font Options */
+.font-code-fira code, .font-code-fira pre, .font-code-fira kbd, .font-code-fira .font-mono {
+  font-family: 'Fira Code', 'JetBrains Mono', Consolas, monospace !important;
+}
+.font-code-jetbrains code, .font-code-jetbrains pre, .font-code-jetbrains kbd, .font-code-jetbrains .font-mono {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace !important;
+}
+.font-code-consolas code, .font-code-consolas pre, .font-code-consolas kbd, .font-code-consolas .font-mono {
+  font-family: Consolas, 'Courier New', monospace !important;
+}
+.font-code-system code, .font-code-system pre, .font-code-system kbd, .font-code-system .font-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
+}
+
+/* Compact Density */
+.density-compact .py-6 { padding-top: 0.75rem !important; padding-bottom: 0.75rem !important; }
+.density-compact .space-y-6 > :not([hidden]) ~ :not([hidden]) { margin-top: 0.75rem !important; margin-bottom: 0 !important; }
+.density-compact .p-4 { padding: 0.65rem !important; }
+.density-compact .p-5 { padding: 0.75rem !important; }
+
+/* Xterm Terminal Eye-Friendly Dynamic Theme */
+.xterm {
+  padding: 10px;
+  height: 100%;
+}
+
+.xterm-viewport {
+  overflow-y: auto !important;
+  background-color: rgb(var(--ag-void-rgb)) !important;
+}
+
+/* Subtle glowing pulse animations */
+@keyframes pulse-subtle {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.85; transform: scale(0.99); }
+}
+
+.animate-pulse-subtle {
+  animation: pulse-subtle 2.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+/* User Text Selection & Highlight */
+.select-text,
+.select-text *,
+.prose,
+.prose * {
+  -webkit-user-select: text !important;
+  -moz-user-select: text !important;
+  user-select: text !important;
+}
+
+::selection {
+  background-color: rgba(99, 102, 241, 0.25);
+  color: inherit;
+}

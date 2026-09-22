@@ -1,0 +1,16 @@
+{
+  "name": "@harni/types",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Shared TypeScript types and schemas for Harni",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "rimraf dist"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}
