@@ -1,0 +1,30 @@
+{
+  "name": "@harni/server",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Backend API, WebSocket & PTY Terminal server for Harni",
+  "main": "./dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -b",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@harni/agent-core": "workspace:*",
+    "@harni/types": "workspace:*",
+    "chokidar": "^4.0.3",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.1",
+    "node-pty": "^1.1.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.5",
+    "@types/ws": "^8.5.14",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "./src",
+    "outDir": "./dist",
+    "types": ["node"],
+    "composite": true,
+    "tsBuildInfoFile": "./dist/tsconfig.tsbuildinfo"
+  },
+  "references": [
+    { "path": "../types" }
+  ],
+  "include": ["src/**/*"]
+}
