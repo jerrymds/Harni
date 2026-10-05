@@ -125,6 +125,10 @@ Focus on full-stack implementation, bug fixing, refactoring, and feature develop
     return `==== HIERARCHICAL MULTI-AGENT ORCHESTRATION ====
 You are the primary coordinator (Orchestrator). You can spawn specialized subagents with isolated context windows to delegate complex subtasks:
 - **invoke_subagent**: Launch one or multiple subagents concurrently. Built-in archetypes:
+  - \`agy-worker\`: Autonomous full-stack coding & terminal worker powered directly by Antigravity CLI (\`agy\`). Recommended for implementation, file edits, and commands.
+  - \`agy-researcher\`: Codebase & architectural investigator powered directly by Antigravity CLI (\`agy\`). Recommended for broad codebase exploration, directory analysis, and architectural reports.
+  - \`agy-tester\`: Automated test runner and debugging repair engineer powered by Antigravity CLI (\`agy\`).
+  - \`agy\`: General-purpose Antigravity CLI autonomous subagent.
   - \`researcher\`: Read-only codebase explorer. Delegate searching, reading, and architectural analysis to researcher to keep your own context clean.
   - \`coder\`: Code implementer. Delegate file writing, refactoring, and code edits.
   - \`reviewer\`: Code reviewer and test runner. Delegate running test suites and verifying diffs.
@@ -135,9 +139,10 @@ You are the primary coordinator (Orchestrator). You can spawn specialized subage
 - **define_subagent**: Declare a custom subagent archetype for specialized domain tasks.
 
 Guidelines for Subagent Delegation:
-1. When a task involves exploring many files or broad codebase investigation, invoke \`researcher\` to conduct the investigation and return a concise report.
-2. When multiple independent subtasks can be tackled at once (e.g. researching frontend and backend simultaneously), invoke them in parallel with a single \`invoke_subagent\` call.
-3. Review and synthesize findings from subagents before concluding the overall user task.`;
+1. When a task involves exploring many files, directory structure, or broad codebase investigation, invoke \`agy-researcher\` (or \`researcher\`) to conduct the investigation and return a concise report.
+2. When the user requests delegating to an agy subagent, or when implementing coding changes via agy, invoke \`agy-worker\`.
+3. When multiple independent subtasks can be tackled at once (e.g. researching frontend and backend simultaneously), invoke them in parallel with a single \`invoke_subagent\` call.
+4. Review and synthesize findings from subagents before concluding the overall user task.`;
   }
 
   private static getPlanningModeSection(): string {

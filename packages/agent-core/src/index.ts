@@ -20,6 +20,8 @@ export * from './subagents/subagentTypes.js';
 export * from './subagents/subagentRegistry.js';
 export * from './subagents/clinerulesParser.js';
 export * from './subagents/subagentInstance.js';
+export * from './subagents/runners/agyProcessRunner.js';
+export * from './subagents/runners/agySubagentInstance.js';
 export * from './subagents/subagentManager.js';
 export * from './mcp/mcpClient.js';
 export * from './mcp/mcpServerManager.js';

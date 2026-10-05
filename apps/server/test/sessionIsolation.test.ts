@@ -52,10 +52,19 @@ describe('Server Session Pub/Sub & Workspace Isolation', () => {
       new Promise<void>((res) => wsClientB.on('open', () => res())),
     ]);
 
+    const waitForCondition = async (fn: () => boolean | Promise<boolean>, timeout = 2000) => {
+      const start = Date.now();
+      while (Date.now() - start < timeout) {
+        if (await fn()) return true;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      return false;
+    };
+
     // Client A subscribes to session_alpha, Client B subscribes to session_beta
     wsClientA.send(JSON.stringify({ type: 'session:subscribe', payload: { sessionId: 'session_alpha' } }));
     wsClientB.send(JSON.stringify({ type: 'session:subscribe', payload: { sessionId: 'session_beta' } }));
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 50));
 
     clientAMessages.length = 0;
     clientBMessages.length = 0;
@@ -75,7 +84,7 @@ describe('Server Session Pub/Sub & Workspace Isolation', () => {
       customProvider: isolatedMockProvider,
     });
 
-    await new Promise((r) => setTimeout(r, 800));
+    await waitForCondition(() => clientAMessages.some((m) => m.type === 'chat:token'));
 
     const clientATokens = clientAMessages.filter((m) => m.type === 'chat:token' && (m.payload as any).sessionId === 'session_alpha');
     const clientAThoughts = clientAMessages.filter((m) => m.type === 'chat:thinking' && (m.payload as any).sessionId === 'session_alpha');
@@ -90,7 +99,7 @@ describe('Server Session Pub/Sub & Workspace Isolation', () => {
     // Test dynamic subscription: Client B subscribes to session_alpha, Client A unsubscribes
     wsClientB.send(JSON.stringify({ type: 'session:subscribe', payload: { sessionId: 'session_alpha' } }));
     wsClientA.send(JSON.stringify({ type: 'session:unsubscribe', payload: { sessionId: 'session_alpha' } }));
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 50));
 
     clientAMessages.length = 0;
     clientBMessages.length = 0;
@@ -110,7 +119,7 @@ describe('Server Session Pub/Sub & Workspace Isolation', () => {
       customProvider: dynamicMockProvider,
     });
 
-    await new Promise((r) => setTimeout(r, 800));
+    await waitForCondition(() => clientBMessages.some((m) => m.type === 'chat:token'));
 
     const clientATokensAfterUnsub = clientAMessages.filter((m) => m.type === 'chat:token');
     const clientBTokensAfterSub = clientBMessages.filter((m) => m.type === 'chat:token' && (m.payload as any).sessionId === 'session_alpha');
@@ -153,13 +162,27 @@ describe('Server Session Pub/Sub & Workspace Isolation', () => {
       new Promise<void>((res) => ws2.on('open', () => res())),
     ]);
 
-    await new Promise((r) => setTimeout(r, 200));
+    const waitForCondition = async (fn: () => boolean | Promise<boolean>, timeout = 3000) => {
+      const start = Date.now();
+      while (Date.now() - start < timeout) {
+        if (await fn()) return true;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      return false;
+    };
+
+    // Wait for initial connection messages and clear
+    await new Promise((r) => setTimeout(r, 100));
     ws1Messages.length = 0;
     ws2Messages.length = 0;
 
     ws1.send(JSON.stringify({ type: 'workspace:set', payload: { path: client1Dir } }));
     ws2.send(JSON.stringify({ type: 'workspace:set', payload: { path: client2Dir } }));
-    await new Promise((r) => setTimeout(r, 400));
+    
+    await waitForCondition(() => 
+      ws1Messages.some((m) => m.type === 'workspace:info' && (m.payload as any)?.rootPath === client1Dir) &&
+      ws2Messages.some((m) => m.type === 'workspace:info' && (m.payload as any)?.rootPath === client2Dir)
+    );
 
     const c1Info = ws1Messages.filter((m) => m.type === 'workspace:info').pop();
     const c2Info = ws2Messages.filter((m) => m.type === 'workspace:info').pop();
@@ -169,7 +192,12 @@ describe('Server Session Pub/Sub & Workspace Isolation', () => {
 
     ws1.send(JSON.stringify({ type: 'file:save', payload: { path: 'c1_saved.txt', content: 'C1_SAVED_CONTENT' } }));
     ws2.send(JSON.stringify({ type: 'file:save', payload: { path: 'c2_saved.txt', content: 'C2_SAVED_CONTENT' } }));
-    await new Promise((r) => setTimeout(r, 300));
+    
+    await waitForCondition(async () => {
+      const f1 = await fs.readFile(path.join(client1Dir, 'c1_saved.txt'), 'utf-8').catch(() => '');
+      const f2 = await fs.readFile(path.join(client2Dir, 'c2_saved.txt'), 'utf-8').catch(() => '');
+      return f1 === 'C1_SAVED_CONTENT' && f2 === 'C2_SAVED_CONTENT';
+    });
 
     const c1Saved = await fs.readFile(path.join(client1Dir, 'c1_saved.txt'), 'utf-8').catch(() => '');
     const c2Saved = await fs.readFile(path.join(client2Dir, 'c2_saved.txt'), 'utf-8').catch(() => '');

@@ -12,12 +12,15 @@ import { ReplaceFileContentTool } from '../tools/replaceFileContent.js';
 import { SearchFilesTool } from '../tools/searchFiles.js';
 import { ToolRegistry } from '../tools/toolRegistry.js';
 import { WriteFileTool } from '../tools/writeFile.js';
+import { AgySubagentInstance } from './runners/agySubagentInstance.js';
 import { SubagentInstance } from './subagentInstance.js';
 import { SubagentRegistry } from './subagentRegistry.js';
 import type {
   SpawnSubagentParams,
   SubagentExecutionResult,
 } from './subagentTypes.js';
+
+export type SupportedSubagentInstance = SubagentInstance | AgySubagentInstance;
 
 export interface SubagentManagerConfig {
   workspaceRoot: string;
@@ -35,7 +38,7 @@ export interface SubagentManagerConfig {
 
 export class SubagentManager extends EventEmitter {
   private registry: SubagentRegistry;
-  private instances = new Map<string, SubagentInstance>();
+  private instances = new Map<string, SupportedSubagentInstance>();
   private workspaceRoot: string;
   private defaultProvider: LLMProviderType;
   private defaultModel?: string;
@@ -68,7 +71,7 @@ export class SubagentManager extends EventEmitter {
     this.workspaceRoot = newRoot;
   }
 
-  public getInstance(id: string): SubagentInstance | undefined {
+  public getInstance(id: string): SupportedSubagentInstance | undefined {
     return this.instances.get(id);
   }
 
@@ -109,48 +112,99 @@ export class SubagentManager extends EventEmitter {
         );
       }
 
-      const definition =
-        this.registry.get(params.typeName) ||
-        this.registry.get('self') ||
-        {
-          name: params.typeName,
-          description: `Dynamic subagent ${params.typeName}`,
-          role: params.role,
-          systemPrompt: `You are a specialized subagent for ${params.role}. Complete the assigned task.`,
-          maxTurns: 15,
-        };
+      let resolvedTypeName = params.typeName;
+      let definition = this.registry.get(resolvedTypeName);
+
+      // Smart Fallback:
+      // If the archetype is an internal runner archetype (e.g. 'researcher', 'coder', 'reviewer'),
+      // but effective provider is 'antigravity', OR there is no Anthropic API key available:
+      // automatically route to the corresponding agy archetype ('agy-researcher', 'agy-worker', 'agy-tester')
+      const effectiveProvider = params.provider || this.defaultProvider;
+      const hasAnthropicKey = Boolean(params.apiKey || this.apiKey || process.env.ANTHROPIC_API_KEY);
+
+      if (
+        !params.customProvider &&
+        definition &&
+        (!definition.runnerType || definition.runnerType === 'internal') &&
+        (effectiveProvider === 'antigravity' || (!hasAnthropicKey && effectiveProvider === 'anthropic'))
+      ) {
+        const lower = resolvedTypeName.toLowerCase();
+        if (lower === 'researcher' && this.registry.has('agy-researcher')) {
+          resolvedTypeName = 'agy-researcher';
+          definition = this.registry.get('agy-researcher');
+        } else if (lower === 'coder' && this.registry.has('agy-worker')) {
+          resolvedTypeName = 'agy-worker';
+          definition = this.registry.get('agy-worker');
+        } else if (lower === 'reviewer' && this.registry.has('agy-tester')) {
+          resolvedTypeName = 'agy-tester';
+          definition = this.registry.get('agy-tester');
+        }
+      }
+
+      if (!definition) {
+        definition =
+          this.registry.get('self') ||
+          {
+            name: resolvedTypeName,
+            description: `Dynamic subagent ${resolvedTypeName}`,
+            role: params.role,
+            systemPrompt: `You are a specialized subagent for ${params.role}. Complete the assigned task.`,
+            maxTurns: 15,
+          };
+      }
 
       const subagentId = `sub_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
       const workspace = params.workspaceRoot || this.workspaceRoot;
+      const runnerType = params.runnerType || definition.runnerType || 'internal';
 
-      // Restrict tools based on definition
-      const subagentToolRegistry = this.createScopedToolRegistry(definition);
+      let instance: SupportedSubagentInstance;
 
-      // Create provider for subagent
-      const provider =
-        params.customProvider ||
-        ProviderFactory.create(params.provider || this.defaultProvider, {
-          apiKey: params.apiKey || this.apiKey,
-          baseURL: params.baseURL || this.baseURL,
+      if (runnerType === 'agy') {
+        instance = new AgySubagentInstance({
+          id: subagentId,
+          parentId: params.parentId,
+          sessionId: params.sessionId,
+          depth,
+          definition,
+          role: params.role || definition.role || definition.name,
+          prompt: params.prompt,
           model: params.model || definition.model || this.defaultModel,
-          thinkingDepth: params.thinkingDepth,
           workspaceRoot: workspace,
+          conversationId: params.conversationId,
+          binaryPath: params.agyOptions?.binaryPath,
+          effort: params.agyOptions?.effort,
+          timeoutMs: params.agyOptions?.timeoutMs,
         });
+      } else {
+        // Restrict tools based on definition
+        const subagentToolRegistry = this.createScopedToolRegistry(definition);
 
-      const instance = new SubagentInstance({
-        id: subagentId,
-        parentId: params.parentId,
-        sessionId: params.sessionId,
-        depth,
-        definition,
-        role: params.role || definition.role || definition.name,
-        prompt: params.prompt,
-        model: params.model || definition.model || this.defaultModel,
-        workspaceRoot: workspace,
-        provider,
-        toolRegistry: subagentToolRegistry,
-        executeTerminalCommand: this.executeTerminalCommand,
-      });
+        // Create provider for subagent
+        const provider =
+          params.customProvider ||
+          ProviderFactory.create(params.provider || this.defaultProvider, {
+            apiKey: params.apiKey || this.apiKey,
+            baseURL: params.baseURL || this.baseURL,
+            model: params.model || definition.model || this.defaultModel,
+            thinkingDepth: params.thinkingDepth,
+            workspaceRoot: workspace,
+          });
+
+        instance = new SubagentInstance({
+          id: subagentId,
+          parentId: params.parentId,
+          sessionId: params.sessionId,
+          depth,
+          definition,
+          role: params.role || definition.role || definition.name,
+          prompt: params.prompt,
+          model: params.model || definition.model || this.defaultModel,
+          workspaceRoot: workspace,
+          provider,
+          toolRegistry: subagentToolRegistry,
+          executeTerminalCommand: this.executeTerminalCommand,
+        });
+      }
 
       this.instances.set(subagentId, instance);
 

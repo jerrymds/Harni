@@ -5,6 +5,10 @@ export interface ToolExecutionContext {
   workspaceRoot: string;
   sessionId?: string;
   taskId?: string;
+  provider?: import('@harni/types').LLMProviderType;
+  model?: string;
+  apiKey?: string;
+  baseURL?: string;
   subagentManager?: import('../subagents/subagentManager.js').SubagentManager;
   onFileDiff?: (diff: FileDiff) => void;
   onTerminalData?: (data: string) => void;

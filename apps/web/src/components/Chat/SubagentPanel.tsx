@@ -11,6 +11,8 @@ import {
   Wrench,
   XCircle,
   Sparkles,
+  Terminal,
+  Cpu,
 } from 'lucide-react';
 import type { SubagentInstanceInfo, SubagentStatus } from '@harni/types';
 import { useAgentStore } from '../../store/useAgentStore.js';
@@ -25,6 +27,13 @@ const getRoleIcon = (typeName: string) => {
       return <CheckCircle2 className="w-4 h-4 text-amber-400" />;
     case 'architect':
       return <Sparkles className="w-4 h-4 text-purple-400" />;
+    case 'agy':
+    case 'agy-worker':
+      return <Terminal className="w-4 h-4 text-violet-400" />;
+    case 'agy-researcher':
+      return <Search className="w-4 h-4 text-violet-400" />;
+    case 'agy-tester':
+      return <CheckCircle2 className="w-4 h-4 text-violet-400" />;
     default:
       return <Bot className="w-4 h-4 text-indigo-400" />;
   }
@@ -149,7 +158,19 @@ export const SubagentPanel: React.FC = () => {
                         <span className="text-xs px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono">
                           {sub.typeName}
                         </span>
+                        {(sub.runnerType === 'agy' || sub.typeName.startsWith('agy')) && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-violet-500/20 text-violet-300 border border-violet-500/30 font-semibold tracking-wide flex items-center gap-1">
+                            <Cpu className="w-2.5 h-2.5" />
+                            AGY CLI
+                          </span>
+                        )}
                       </div>
+                      {sub.status === 'running' && sub.currentToolSummary && (
+                        <div className="flex items-center gap-1.5 text-[11px] text-sky-400 font-mono truncate mt-0.5">
+                          <Wrench className="w-3 h-3 shrink-0 animate-spin" />
+                          <span className="truncate">{sub.currentToolSummary}</span>
+                        </div>
+                      )}
                     </div>
                   </button>
 
@@ -176,6 +197,16 @@ export const SubagentPanel: React.FC = () => {
                         <Clock className="w-3 h-3 text-zinc-500" />
                         ID: <span className="text-zinc-300">{sub.id}</span>
                       </span>
+                      {sub.runnerType && (
+                        <span>
+                          執行器: <span className="text-violet-300 font-semibold">{sub.runnerType.toUpperCase()}</span>
+                        </span>
+                      )}
+                      {sub.conversationId && (
+                        <span className="truncate max-w-[200px]" title={sub.conversationId}>
+                          會話: <span className="text-violet-300">{sub.conversationId.slice(0, 8)}...</span>
+                        </span>
+                      )}
                       {sub.toolCallCount !== undefined && (
                         <span className="flex items-center gap-1">
                           <Wrench className="w-3 h-3 text-zinc-500" />

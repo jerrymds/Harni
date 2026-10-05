@@ -1,6 +1,8 @@
 import type {
+  AgyRunnerOptions,
   LLMProviderType,
   SubagentInstanceInfo,
+  SubagentRunnerType,
   SubagentStatus,
   ThinkingDepth,
 } from '@harni/types';
@@ -20,6 +22,9 @@ export interface SpawnSubagentParams {
   apiKey?: string;
   baseURL?: string;
   thinkingDepth?: ThinkingDepth;
+  runnerType?: SubagentRunnerType;
+  agyOptions?: AgyRunnerOptions;
+  conversationId?: string;
 }
 
 export interface SubagentExecutionResult {

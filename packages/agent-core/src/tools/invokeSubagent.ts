@@ -28,7 +28,7 @@ export class InvokeSubagentTool extends BaseTool<InvokeSubagentParams> {
             typeName: {
               type: 'string',
               description:
-                'Archetype of subagent (e.g. "researcher", "coder", "reviewer", "architect", "self", or any custom defined type).',
+                'Archetype of subagent. Recommended: "agy-worker" (autonomous implementation via Antigravity CLI), "agy-researcher" (codebase & architecture exploration via Antigravity CLI), "agy-tester" (test & repair via Antigravity CLI), or "researcher", "coder", "reviewer", "architect", "self".',
             },
             role: {
               type: 'string',
@@ -79,7 +79,10 @@ export class InvokeSubagentTool extends BaseTool<InvokeSubagentParams> {
       sessionId: context.sessionId || 'default',
       parentId: context.taskId || 'parent',
       workspaceRoot: context.workspaceRoot,
-      model: s.model,
+      model: s.model || (s.typeName.toLowerCase().startsWith('agy') ? undefined : context.model),
+      provider: context.provider,
+      apiKey: context.apiKey,
+      baseURL: context.baseURL,
     }));
 
     try {

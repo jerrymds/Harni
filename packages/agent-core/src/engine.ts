@@ -910,6 +910,10 @@ export class AgentCoreEngine extends EventEmitter {
             workspaceRoot: sessionTask.workspaceRoot,
             sessionId: sessionTask.sessionId,
             taskId: sessionTask.taskState.id,
+            provider: sessionTask.taskState.provider,
+            model: sessionTask.taskState.model,
+            apiKey: provider.getApiKey() || this.apiKey,
+            baseURL: provider.getBaseURL() || this.baseURL,
             subagentManager: this.subagentManager,
             onFileDiff: (diff: FileDiff) => {
               this.emitEvent('file:diff', { ...diff, sessionId, taskId: sessionTask.taskState.id });

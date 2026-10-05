@@ -88,17 +88,23 @@ export class OpenAIProvider extends BaseLLMProvider {
     }));
 
     // Format OpenAI messages
+    const isOllama =
+      this.providerType === 'ollama' ||
+      (typeof this.baseURL === 'string' &&
+        (this.baseURL.includes(':11434') || this.baseURL.toLowerCase().includes('ollama')));
+
     const formattedMessages: Array<Record<string, unknown>> = [
-      { role: 'system', content: systemPrompt },
+      { role: 'system', content: systemPrompt ?? '' },
     ];
 
     for (const msg of messages) {
       if (msg.role === 'user') {
-        formattedMessages.push({ role: 'user', content: msg.content });
+        formattedMessages.push({ role: 'user', content: msg.content ?? '' });
       } else if (msg.role === 'assistant') {
         const assistantMsg: Record<string, unknown> = {
           role: 'assistant',
-          content: msg.content || null,
+          // Ollama requires content to be a string and throws 400 'invalid message content type: <nil>' if null is provided
+          content: msg.content || (isOllama ? '' : null),
         };
         if (msg.toolCalls && msg.toolCalls.length > 0) {
           assistantMsg.tool_calls = msg.toolCalls.map((tc: ToolCall) => ({
