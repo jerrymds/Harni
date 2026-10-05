@@ -229,6 +229,19 @@ export interface ChatSession {
   tokenUsage?: TokenUsage;
 }
 
+export type SubagentRunnerType = 'internal' | 'agy';
+
+/**
+ * Options specifically for the Antigravity CLI ('agy') subagent runner
+ */
+export interface AgyRunnerOptions {
+  binaryPath?: string;
+  effort?: 'low' | 'medium' | 'high';
+  mode?: 'accept-edits' | 'plan';
+  dangerouslySkipPermissions?: boolean;
+  timeoutMs?: number;
+}
+
 /**
  * Subagent Definition metadata and capabilities
  */
@@ -243,6 +256,8 @@ export interface SubagentDefinition {
   enableMcpTools?: boolean;
   model?: string;
   maxTurns?: number;
+  runnerType?: SubagentRunnerType;
+  agyOptions?: AgyRunnerOptions;
 }
 
 /**
@@ -276,5 +291,9 @@ export interface SubagentInstanceInfo {
   result?: string;
   error?: string;
   toolCallCount?: number;
+  runnerType?: SubagentRunnerType;
+  conversationId?: string;
+  currentToolSummary?: string;
 }
+
 

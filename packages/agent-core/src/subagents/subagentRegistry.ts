@@ -181,5 +181,68 @@ Accomplish the requested objective thoroughly and report your results back clean
       enableMcpTools: true,
       maxTurns: 20,
     });
+
+    // 6. AGY Worker / Antigravity CLI Autonomous Subagent
+    this.register({
+      name: 'agy',
+      role: 'Antigravity Autonomous Subagent',
+      description:
+        'Executes autonomous tasks via Antigravity CLI (agy) child process with full tool and reasoning capabilities.',
+      systemPrompt:
+        'You are an autonomous subagent powered by Antigravity CLI. Accomplish the assigned coding task precisely and efficiently.',
+      runnerType: 'agy',
+      agyOptions: {
+        timeoutMs: 300_000,
+      },
+      maxTurns: 20,
+    });
+
+    this.register({
+      name: 'agy-worker',
+      role: 'Antigravity Autonomous Worker',
+      description:
+        'Executes autonomous full-stack coding tasks via Antigravity CLI (agy) with file and command tools.',
+      systemPrompt:
+        'You are an autonomous coding worker powered by Antigravity CLI. Write clean code, run tests, and report results concisely.',
+      runnerType: 'agy',
+      agyOptions: {
+        mode: 'accept-edits',
+        timeoutMs: 300_000,
+      },
+      maxTurns: 25,
+    });
+
+    // 7. AGY Researcher
+    this.register({
+      name: 'agy-researcher',
+      role: 'Antigravity Codebase Researcher',
+      description:
+        'Specialized in codebase exploration, architecture analysis, and search using Antigravity CLI.',
+      systemPrompt:
+        'You are a specialized codebase researcher powered by Antigravity CLI. Investigate and provide structured reports. Keep your file exploration efficient: avoid deep recursive exploration into build outputs, dist, or node_modules. Focus on package.json, main configuration files, and core architectural components to deliver a clear and comprehensive summary promptly.',
+      runnerType: 'agy',
+      agyOptions: {
+        mode: 'plan',
+        effort: 'medium',
+        timeoutMs: 300_000,
+      },
+      maxTurns: 15,
+    });
+
+    // 8. AGY Tester
+    this.register({
+      name: 'agy-tester',
+      role: 'Antigravity Automated Tester',
+      description:
+        'Specialized in running test suites, analyzing failures, and repairing broken tests via Antigravity CLI.',
+      systemPrompt:
+        'You are a testing and quality engineer powered by Antigravity CLI. Run test suites and fix broken tests.',
+      runnerType: 'agy',
+      agyOptions: {
+        effort: 'high',
+        timeoutMs: 300_000,
+      },
+      maxTurns: 20,
+    });
   }
 }

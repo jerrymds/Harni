@@ -66,6 +66,14 @@ export abstract class BaseLLMProvider {
     this.workspaceRoot = options.workspaceRoot;
   }
 
+  public getApiKey(): string | undefined {
+    return this.apiKey;
+  }
+
+  public getBaseURL(): string | undefined {
+    return this.baseURL;
+  }
+
   public abstract streamCompletion(
     messages: ChatMessage[],
     systemPrompt: string,

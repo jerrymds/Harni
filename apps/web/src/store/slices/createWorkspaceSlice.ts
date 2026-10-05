@@ -418,7 +418,13 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
             const existing = subagents[sid] || [];
             const updated = existing.map((s) =>
               s.id === msg.payload.subagentId
-                ? { ...s, status: msg.payload.status, error: msg.payload.error, updatedAt: Date.now() }
+                ? {
+                    ...s,
+                    status: msg.payload.status,
+                    error: msg.payload.error,
+                    currentToolSummary: msg.payload.status === 'running' ? s.currentToolSummary : undefined,
+                    updatedAt: Date.now(),
+                  }
                 : s,
             );
             set({
@@ -439,6 +445,7 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
                 ? {
                     ...s,
                     toolCallCount: (s.toolCallCount || 0) + (msg.payload.status === 'start' ? 1 : 0),
+                    currentToolSummary: msg.payload.status === 'start' ? msg.payload.summary : undefined,
                     updatedAt: Date.now(),
                   }
                 : s,
@@ -462,6 +469,7 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
                     ...s,
                     status: 'completed' as const,
                     result: msg.payload.result,
+                    currentToolSummary: undefined,
                     completedAt: Date.now(),
                     updatedAt: Date.now(),
                   }

@@ -131,4 +131,37 @@ describe('SubagentPanel Component', () => {
     const updated = useAgentStore.getState().subagents['session_123'];
     expect(updated[0].status).toBe('cancelled');
   });
+
+  it('renders AGY subagent badge and details correctly', () => {
+    const mockAgySubagent: SubagentInstanceInfo = {
+      id: 'sub_agy_1',
+      parentId: 'task_1',
+      sessionId: 'session_123',
+      typeName: 'agy-worker',
+      role: 'Autonomous Worker',
+      prompt: 'Execute refactoring via agy CLI',
+      status: 'running',
+      depth: 1,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      runnerType: 'agy',
+      conversationId: 'conv_agy_999',
+    };
+
+    useAgentStore.setState({
+      currentSessionId: 'session_123',
+      subagents: {
+        session_123: [mockAgySubagent],
+      },
+    });
+
+    render(<SubagentPanel />);
+
+    expect(screen.getByText('AGY CLI')).toBeInTheDocument();
+    expect(screen.getByText('Autonomous Worker')).toBeInTheDocument();
+    expect(screen.getByText('執行器:')).toBeInTheDocument();
+    expect(screen.getByText('AGY')).toBeInTheDocument();
+    expect(screen.getByText(/conv_agy/)).toBeInTheDocument();
+  });
 });
+

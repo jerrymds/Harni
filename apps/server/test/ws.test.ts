@@ -46,7 +46,17 @@ describe('Server WebSocket Protocol & Agent Flow', () => {
       } catch {}
     });
 
-    await new Promise((r) => setTimeout(r, 400));
+    const start = Date.now();
+    while (Date.now() - start < 2000) {
+      if (
+        receivedMessages.some((m) => m.type === 'workspace:info') &&
+        receivedMessages.some((m) => m.type === 'workspace:tree')
+      ) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
     expect(receivedMessages.some((m) => m.type === 'workspace:info')).toBe(true);
     expect(receivedMessages.some((m) => m.type === 'workspace:tree')).toBe(true);
 
@@ -70,9 +80,14 @@ describe('Server WebSocket Protocol & Agent Flow', () => {
       payload: { path: 'created_via_ws.txt', content: 'Created by WebSocket Client' },
     };
     ws.send(JSON.stringify(saveMsg));
-    await new Promise((r) => setTimeout(r, 400));
-
-    const fileContent = await fs.readFile(path.join(tempDir, 'created_via_ws.txt'), 'utf-8');
+    
+    let fileContent = '';
+    const startSave = Date.now();
+    while (Date.now() - startSave < 2000) {
+      fileContent = await fs.readFile(path.join(tempDir, 'created_via_ws.txt'), 'utf-8').catch(() => '');
+      if (fileContent === 'Created by WebSocket Client') break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
     expect(fileContent).toBe('Created by WebSocket Client');
 
     const openMsg: ClientMessage = {
@@ -80,7 +95,14 @@ describe('Server WebSocket Protocol & Agent Flow', () => {
       payload: { path: 'created_via_ws.txt' },
     };
     ws.send(JSON.stringify(openMsg));
-    await new Promise((r) => setTimeout(r, 400));
+
+    const startOpen = Date.now();
+    while (Date.now() - startOpen < 2000) {
+      if (receivedMessages.some((m) => m.type === 'file:content' && (m.payload as any).path === 'created_via_ws.txt')) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
 
     const contentReceived = receivedMessages.find(
       (m) => m.type === 'file:content' && (m.payload as any).path === 'created_via_ws.txt',
@@ -127,7 +149,13 @@ describe('Server WebSocket Protocol & Agent Flow', () => {
       customProvider: mockProvider,
     });
 
-    await new Promise((r) => setTimeout(r, 1000));
+    const startTask = Date.now();
+    while (Date.now() - startTask < 3000) {
+      if (receivedMessages.some((m) => m.type === 'task:status' && (m.payload as any).status === 'completed')) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
 
     expect(receivedMessages.some((m) => m.type === 'chat:token')).toBe(true);
     expect(receivedMessages.some((m) => m.type === 'chat:thinking')).toBe(true);
