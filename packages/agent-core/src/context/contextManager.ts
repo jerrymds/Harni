@@ -22,6 +22,17 @@ export class ContextManager {
     this.slidingWindowTurnLimit = options.slidingWindowTurnLimit ?? 30;
   }
 
+  public setMaxContextTokens(max: number): void {
+    if (max > 0) {
+      this.maxContextTokens = max;
+      this.maybePrune();
+    }
+  }
+
+  public getMaxContextTokens(): number {
+    return this.maxContextTokens;
+  }
+
   public addMessage(message: ChatMessage): void {
     this.messages.push(message);
     this.estimateTokens();

@@ -20,6 +20,22 @@ const savedMode = (localStorage.getItem('cline_web_mode') as any) || 'code';
 const initialSessionsData = loadSavedSessions(savedMode, 'folder_default', savedProvider, savedModel);
 const initialProviderBaseUrls = loadSavedProviderBaseUrls();
 
+const loadSavedModelContextWindows = (): Record<string, number> => {
+  try {
+    const raw = localStorage.getItem('cline_web_context_windows');
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+};
+
+const savedContextWindow = (() => {
+  const raw = localStorage.getItem('cline_web_context_window');
+  if (!raw) return null;
+  const num = parseInt(raw, 10);
+  return Number.isFinite(num) && num > 0 ? num : null;
+})();
+
 export const createSettingsSlice: StateCreator<AgentStoreState, [], [], SettingsSlice> = (set, get) => ({
   thinkingDepth: ((localStorage.getItem('cline_web_thinking_depth') as ThinkingDepth) || 'medium'),
   autoApprove: localStorage.getItem('cline_web_auto_approve') === 'true',
@@ -40,6 +56,8 @@ export const createSettingsSlice: StateCreator<AgentStoreState, [], [], Settings
   gitCheckpointEnabled: localStorage.getItem('cline_web_git_checkpoint_enabled') !== 'false',
   worktreeIsolationEnabled: localStorage.getItem('cline_web_worktree_isolation_enabled') === 'true',
   subagentsEnabled: localStorage.getItem('cline_web_subagents_enabled') !== 'false',
+  contextWindow: savedContextWindow,
+  modelContextWindows: loadSavedModelContextWindows(),
 
   setThinkingDepth: (depth) => {
     localStorage.setItem('cline_web_thinking_depth', depth);
@@ -151,6 +169,30 @@ export const createSettingsSlice: StateCreator<AgentStoreState, [], [], Settings
     localStorage.setItem('cline_web_subagents_enabled', String(enabled));
     set({ subagentsEnabled: enabled });
     syncSettingsToDB({ subagents_enabled: String(enabled) });
+  },
+
+  setContextWindow: (contextWindow) => {
+    if (contextWindow && contextWindow > 0) {
+      localStorage.setItem('cline_web_context_window', String(contextWindow));
+      syncSettingsToDB({ context_window: String(contextWindow) });
+    } else {
+      localStorage.removeItem('cline_web_context_window');
+      syncSettingsToDB({ context_window: '' });
+    }
+    set({ contextWindow });
+  },
+
+  setModelContextWindow: (modelId, contextWindow) => {
+    const current = { ...get().modelContextWindows };
+    if (contextWindow && contextWindow > 0) {
+      current[modelId] = contextWindow;
+      syncSettingsToDB({ [`context_window_${modelId}`]: String(contextWindow) });
+    } else {
+      delete current[modelId];
+      syncSettingsToDB({ [`context_window_${modelId}`]: '' });
+    }
+    localStorage.setItem('cline_web_context_windows', JSON.stringify(current));
+    set({ modelContextWindows: current });
   },
 
   setSettingsOpen: (open) => set({ isSettingsOpen: open }),

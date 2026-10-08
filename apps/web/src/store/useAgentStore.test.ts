@@ -47,6 +47,22 @@ describe('useAgentStore and Slices', () => {
     expect(useAgentStore.getState().isSettingsOpen).toBe(false);
   });
 
+  it('updates global and per-model context window settings', () => {
+    const { setContextWindow, setModelContextWindow } = useAgentStore.getState();
+
+    setContextWindow(200000);
+    expect(useAgentStore.getState().contextWindow).toBe(200000);
+
+    setModelContextWindow('gemini-3.7-flash', 1048576);
+    expect(useAgentStore.getState().modelContextWindows['gemini-3.7-flash']).toBe(1048576);
+
+    setModelContextWindow('gemini-3.7-flash', null);
+    expect(useAgentStore.getState().modelContextWindows['gemini-3.7-flash']).toBeUndefined();
+
+    setContextWindow(null);
+    expect(useAgentStore.getState().contextWindow).toBeNull();
+  });
+
   it('manages workspace fileTree, activeFile and closeActiveFile', () => {
     const { closeActiveFile } = useAgentStore.getState();
 

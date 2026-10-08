@@ -132,6 +132,10 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
         enableCheckpoint: get().gitCheckpointEnabled,
         subagentsEnabled: get().subagentsEnabled,
         thinkingDepth: get().thinkingDepth,
+        contextWindow:
+          (selectedModel && get().modelContextWindows[selectedModel]) ||
+          get().contextWindow ||
+          undefined,
         contextFiles,
         workspaceRoot: workspaceRoot || undefined,
         history: messages,

@@ -79,6 +79,7 @@ interface ContextUsageBadgeProps {
   selectedProvider: LLMProviderType;
   selectedModel: string;
   availableModels: Record<string, ModelInfo[]>;
+  customContextWindow?: number | null;
 }
 
 const ContextUsageBadge: React.FC<ContextUsageBadgeProps> = memo(({
@@ -87,13 +88,14 @@ const ContextUsageBadge: React.FC<ContextUsageBadgeProps> = memo(({
   selectedProvider,
   selectedModel,
   availableModels,
+  customContextWindow,
 }) => {
   const liveModels = availableModels[selectedProvider] || [];
   const currentModelInfo = liveModels.find((m) => m.id === selectedModel);
 
   const maxContextWindow = useMemo(() => {
-    return resolveModelContextWindow(selectedModel, selectedProvider, currentModelInfo);
-  }, [currentModelInfo, selectedModel, selectedProvider]);
+    return resolveModelContextWindow(selectedModel, selectedProvider, currentModelInfo, customContextWindow);
+  }, [currentModelInfo, selectedModel, selectedProvider, customContextWindow]);
 
   const estimatedMessageTokens = useMemo(() => {
     let chars = 0;
@@ -232,6 +234,10 @@ export const ChatPanel: React.FC = () => {
   const isRevertingCheckpoint = useAgentStore((s) => s.isRevertingCheckpoint);
   const worktreeIsolationEnabled = useAgentStore((s) => s.worktreeIsolationEnabled);
   const subagentsEnabled = useAgentStore((s) => s.subagentsEnabled);
+  const contextWindow = useAgentStore((s) => s.contextWindow);
+  const modelContextWindows = useAgentStore((s) => s.modelContextWindows);
+
+  const customContextWindow = (selectedModel && modelContextWindows[selectedModel]) || contextWindow;
 
   const {
     setAutoApprove,
@@ -588,6 +594,7 @@ export const ChatPanel: React.FC = () => {
                     selectedProvider={selectedProvider}
                     selectedModel={selectedModel}
                     availableModels={availableModels}
+                    customContextWindow={customContextWindow}
                   />
                 </div>
               </div>
