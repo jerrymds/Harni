@@ -94,6 +94,24 @@ describe('AutoTestRunner Unit Tests', () => {
     expect(observation).toContain('AssertionError: expected 5 to be 4');
     expect(observation).toContain('請調用相應代碼修改工具');
   });
+
+  it('classifies documentation and asset files as non-code', () => {
+    expect(AutoTestRunner.isCodeFile('README.md')).toBe(false);
+    expect(AutoTestRunner.isCodeFile('docs/CHANGELOG.MD')).toBe(false);
+    expect(AutoTestRunner.isCodeFile('notes/TODO.txt')).toBe(false);
+    expect(AutoTestRunner.isCodeFile('assets/logo.png')).toBe(false);
+    expect(AutoTestRunner.isCodeFile('docs\\guide.mdx')).toBe(false);
+    expect(AutoTestRunner.isCodeFile('LICENSE')).toBe(false);
+  });
+
+  it('classifies source files as code', () => {
+    expect(AutoTestRunner.isCodeFile('src/engine.ts')).toBe(true);
+    expect(AutoTestRunner.isCodeFile('math.js')).toBe(true);
+    expect(AutoTestRunner.isCodeFile('components\\Sidebar\\LeftSidebar.tsx')).toBe(true);
+    expect(AutoTestRunner.isCodeFile('main.py')).toBe(true);
+    expect(AutoTestRunner.isCodeFile('package.json')).toBe(true);
+    expect(AutoTestRunner.isCodeFile('')).toBe(false);
+  });
 });
 
 describe('AgentCoreEngine Auto Test-Driven Repair Loop', () => {
@@ -297,6 +315,53 @@ describe('AgentCoreEngine Auto Test-Driven Repair Loop', () => {
     await engine.startTask('Create doc', {
       customProvider: mockProvider,
       autoTest: false,
+      testCommand: 'pnpm test',
+    });
+
+    expect(testCalled).toBe(false);
+    expect(engine.getTaskState()?.status).toBe('completed');
+  });
+
+  it('skips auto test-driven repair when only non-code files (.md) are edited', async () => {
+    let testCalled = false;
+    const mockExecuteTerminal = async () => {
+      testCalled = true;
+      return { exitCode: 1, output: 'FAIL docs.test.ts' };
+    };
+
+    const engine = new AgentCoreEngine({
+      workspaceRoot: workspaceDir,
+      executeTerminalCommand: mockExecuteTerminal,
+    });
+
+    const mockProvider = new MockProvider({
+      script: [
+        {
+          text: 'Documenting the module',
+          toolCalls: [
+            {
+              id: 'c1',
+              name: 'write_to_file',
+              arguments: { path: 'docs/GUIDE.md', content: '# Guide' },
+            },
+            {
+              id: 'c2',
+              name: 'replace_file_content',
+              arguments: {
+                path: 'docs/GUIDE.md',
+                targetContent: '# Guide',
+                replacementContent: '# Guide\n\nUpdated.',
+              },
+            },
+          ],
+        },
+        { text: 'Docs finished' },
+      ],
+    });
+
+    await engine.startTask('Update documentation', {
+      customProvider: mockProvider,
+      autoTest: true,
       testCommand: 'pnpm test',
     });
 

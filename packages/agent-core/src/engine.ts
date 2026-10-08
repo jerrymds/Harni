@@ -986,7 +986,7 @@ export class AgentCoreEngine extends EventEmitter {
           }
           toolResult.toolCallId = toolCall.id;
           if (!toolResult.isError && (toolCall.name === 'write_to_file' || toolCall.name === 'replace_file_content')) {
-            sessionTask.codeModified = true;
+            if (AutoTestRunner.isCodeFile(String(toolCall.arguments.path ?? ''))) sessionTask.codeModified = true; // Prose/asset edits (.md, .txt, images) never arm the auto test-driven repair loop
           }
         }
 

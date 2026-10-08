@@ -2,6 +2,57 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { exec } from 'node:child_process';
 
+/**
+ * Extensions treated as documentation / prose / binary assets instead of
+ * source code. Editing only these files must not trigger the auto test-driven
+ * repair loop, because the project test suite cannot validate them.
+ */
+const NON_CODE_EXTENSIONS = new Set([
+  // Documentation & plain text
+  '.md',
+  '.mdx',
+  '.rst',
+  '.txt',
+  '.text',
+  '.adoc',
+  '.asciidoc',
+  '.log',
+  '.csv',
+  '.tsv',
+  // Images
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.svg',
+  '.ico',
+  '.bmp',
+  '.tiff',
+  // Documents
+  '.pdf',
+  '.doc',
+  '.docx',
+  '.xls',
+  '.xlsx',
+  '.ppt',
+  '.pptx',
+  // Audio / video
+  '.mp3',
+  '.mp4',
+  '.wav',
+  '.avi',
+  '.mov',
+  // Archives
+  '.zip',
+  '.tar',
+  '.gz',
+  '.tgz',
+  '.bz2',
+  '.7z',
+  '.rar',
+]);
+
 export interface TestExecutionResult {
   passed: boolean;
   exitCode: number;
@@ -29,6 +80,20 @@ export class AutoTestRunner {
   public static stripAnsi(text: string): string {
     // eslint-disable-next-line no-control-regex
     return text.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1B\([A-Z]/g, '');
+  }
+
+  /**
+   * Decide whether a written/modified file is a source-code artifact.
+   * Documentation and asset files (.md, .txt, images, ...) return false so the
+   * auto test-driven repair loop is skipped for pure prose edits.
+   */
+  public static isCodeFile(filePath: string): boolean {
+    if (!filePath) return false;
+    const base = filePath.split(/[\\/]/).filter(Boolean).pop() ?? '';
+    const extMatch = /\.([A-Za-z0-9]+)$/.exec(base);
+    // Files without an extension (README, LICENSE, Makefile) are treated as prose.
+    if (!extMatch) return false;
+    return !NON_CODE_EXTENSIONS.has(`.${extMatch[1]!.toLowerCase()}`);
   }
 
   /**
