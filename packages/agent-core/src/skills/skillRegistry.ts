@@ -167,7 +167,11 @@ export class SkillRegistry {
 1. **檢查狀態**：執行 \`git status\` 與 \`git diff\` 查看變更內容與新增檔案。
 2. **分類變更**：判斷是 feat、fix、refactor、docs、test 或 chore。
 3. **撰寫 Commit Message**：遵循 Conventional Commits 格式，繁體中文或簡潔英文描述具體改動動機與內容。
-4. **執行提交**：執行 \`git add <files>\` 及 \`git commit -m "<message>"\`。`,
+4. **執行提交**：執行 \`git add <files>\` 及 \`git commit -m "<message>"\`。
+5. **自動清除 Git Checkpoint**：僅當步驟 4 提交成功後，清理 Agent 內部影子快照參考與壓縮 Git 物件檔。此步驟刪除僅 \`refs/cline/checkpoints/\` 名稱空間，不會影響真實分支、commit history 或工作區內容。依據當前 shell 選擇對應指令：
+   - PowerShell: \`$refs = git for-each-ref --format="%(refname)" "refs/cline/checkpoints/"; foreach ($r in $refs) { git update-ref -d $r }; git gc\`
+   - Bash / Zsh: \`git for-each-ref --format="%(refname)" "refs/cline/checkpoints/" | xargs -r -n1 git update-ref -d && git gc\`
+   回報清理結果（刪除參考數量與 \`git gc\` 執行狀態）作為提交驗證總結。`,
       requiredTools: ['execute_command'],
     });
 
