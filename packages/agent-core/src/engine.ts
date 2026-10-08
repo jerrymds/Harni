@@ -325,6 +325,7 @@ export class AgentCoreEngine extends EventEmitter {
       worktreeTimeoutMs?: number;
       enableCheckpoint?: boolean;
       subagentsEnabled?: boolean;
+      contextWindow?: number;
     } = {},
   ): Promise<void> {
     const sessionId = options.sessionId || 'default';
@@ -486,6 +487,10 @@ export class AgentCoreEngine extends EventEmitter {
         testCommand: effectiveTestCommand,
         maxRetries: effectiveMaxTestRetries,
       };
+    }
+
+    if (options.contextWindow && options.contextWindow > 0) {
+      sessionTask.contextManager.setMaxContextTokens(options.contextWindow);
     }
 
     if (options.history && options.history.length > 0) {

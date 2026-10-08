@@ -227,6 +227,7 @@ export class WebSocketHandler {
           enableWorktree,
           enableCheckpoint,
           subagentsEnabled,
+          contextWindow,
         } = msg.payload;
 
         if (sessionId) {
@@ -333,6 +334,7 @@ export class WebSocketHandler {
             enableWorktree,
             enableCheckpoint,
             subagentsEnabled,
+            contextWindow,
           })
           .catch((err: unknown) => {
             const errorMsg = err instanceof Error ? err.message : String(err);

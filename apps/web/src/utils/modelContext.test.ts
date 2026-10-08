@@ -7,7 +7,18 @@ import {
 } from './modelContext.js';
 
 describe('Model Context Window Resolver & Formatting', () => {
-  it('resolves explicit contextWindow from ModelInfo with highest priority', () => {
+  it('resolves user-configured customContextWindow with top priority', () => {
+    const custom = {
+      id: 'gemini-3.7-pro',
+      name: 'Gemini 3.7 Pro',
+      contextWindow: 2097152,
+    };
+    // Even if modelInfo has 2M tokens, user override to 65536 takes precedence
+    expect(resolveModelContextWindow('gemini-3.7-pro', 'antigravity', custom, 65536)).toBe(65536);
+    expect(resolveModelContextWindow('gemini-3.7-pro', 'antigravity', undefined, 128000)).toBe(128000);
+  });
+
+  it('resolves explicit contextWindow from ModelInfo when no custom context override is provided', () => {
     const custom = {
       id: 'custom-model',
       name: 'Custom',

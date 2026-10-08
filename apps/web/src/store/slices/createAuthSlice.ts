@@ -339,19 +339,42 @@ export const createAuthSlice: StateCreator<AgentStoreState, [], [], AuthSlice> =
         const { folders, sessions, activeSessionId, activeFolderId, settings, credentials } = data;
 
         let loadedUrls: Record<string, string> = { ...get().providerBaseUrls };
+        let loadedContextWindows: Record<string, number> = { ...get().modelContextWindows };
+        let loadedGlobalContextWindow: number | null = get().contextWindow;
+
         if (settings && typeof settings === 'object') {
           for (const [k, v] of Object.entries(settings)) {
             if (k.startsWith('base_url_') && typeof v === 'string') {
               const p = k.replace('base_url_', '');
               loadedUrls[p] = v;
+            } else if (k === 'context_window' && typeof v === 'string') {
+              const parsed = parseInt(v, 10);
+              if (Number.isFinite(parsed) && parsed > 0) {
+                loadedGlobalContextWindow = parsed;
+              }
+            } else if (k.startsWith('context_window_') && typeof v === 'string') {
+              const modelKey = k.replace('context_window_', '');
+              const parsed = parseInt(v, 10);
+              if (Number.isFinite(parsed) && parsed > 0) {
+                loadedContextWindows[modelKey] = parsed;
+              }
             }
           }
         }
 
         if (credentials) {
-          set({ credentials, providerBaseUrls: loadedUrls });
+          set({
+            credentials,
+            providerBaseUrls: loadedUrls,
+            contextWindow: loadedGlobalContextWindow,
+            modelContextWindows: loadedContextWindows,
+          });
         } else {
-          set({ providerBaseUrls: loadedUrls });
+          set({
+            providerBaseUrls: loadedUrls,
+            contextWindow: loadedGlobalContextWindow,
+            modelContextWindows: loadedContextWindows,
+          });
         }
 
         if (Array.isArray(sessions) && sessions.length > 0) {

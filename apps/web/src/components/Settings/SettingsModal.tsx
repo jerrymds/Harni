@@ -12,6 +12,7 @@ import {
   FolderTree,
   GitBranch,
   Globe,
+  Hash,
   Key,
   Layers,
   Lock,
@@ -35,6 +36,7 @@ import {
 } from 'lucide-react';
 import type { AgentSkill, LLMProviderType, ModelInfo } from '@harni/types';
 import { useAgentStore, useShallow } from '../../store/useAgentStore.js';
+import { formatTokenCount, resolveModelContextWindow } from '../../utils/modelContext.js';
 import { McpManager } from './Mcp/McpManager.js';
 
 type SettingsTab = 'models' | 'tools' | 'skills' | 'mcp' | 'appearance';
@@ -47,6 +49,10 @@ export const SettingsModal: React.FC = () => {
     setProvider,
     selectedModel,
     setModel,
+    contextWindow,
+    setContextWindow,
+    modelContextWindows,
+    setModelContextWindow,
     serverAuthToken,
     setServerAuthToken,
     availableModels,
@@ -113,6 +119,10 @@ export const SettingsModal: React.FC = () => {
       setProvider: s.setProvider,
       selectedModel: s.selectedModel,
       setModel: s.setModel,
+      contextWindow: s.contextWindow,
+      setContextWindow: s.setContextWindow,
+      modelContextWindows: s.modelContextWindows,
+      setModelContextWindow: s.setModelContextWindow,
       serverAuthToken: s.serverAuthToken,
       setServerAuthToken: s.setServerAuthToken,
       availableModels: s.availableModels,
@@ -189,6 +199,7 @@ export const SettingsModal: React.FC = () => {
 
   // Form State
   const [customModelInput, setCustomModelInput] = useState(selectedModel);
+  const [contextInput, setContextInput] = useState('');
   const [apiKeyInput, setApiKeyInput] = useState('');
   const [serverAuthTokenInput, setServerAuthTokenInput] = useState(serverAuthToken);
   const [baseUrlInput, setBaseUrlInput] = useState(providerBaseUrls[selectedProvider] || '');
@@ -224,6 +235,8 @@ export const SettingsModal: React.FC = () => {
   useEffect(() => {
     if (isSettingsOpen) {
       setCustomModelInput(selectedModel);
+      const initialCtx = (selectedModel && modelContextWindows[selectedModel]) || contextWindow;
+      setContextInput(initialCtx ? String(initialCtx) : '');
       setServerAuthTokenInput(serverAuthToken);
       const currentProviderBaseUrl = providerBaseUrls[selectedProvider] || '';
       setBaseUrlInput(currentProviderBaseUrl);
@@ -278,6 +291,16 @@ export const SettingsModal: React.FC = () => {
       m.id.toLowerCase().includes(searchQuery.toLowerCase()),
   );
 
+  const currentTargetModel = customModelInput.trim() || selectedModel;
+  const currentModelInfo = rawLiveModels.find((m) => m.id === currentTargetModel);
+  const defaultModelContext = resolveModelContextWindow(
+    currentTargetModel,
+    selectedProvider,
+    currentModelInfo,
+  );
+  const parsedCustomContext = parseInt(contextInput.trim(), 10);
+  const hasCustomContext = Number.isFinite(parsedCustomContext) && parsedCustomContext > 0;
+
   const handleProviderChange = (newProvider: LLMProviderType) => {
     setProvider(newProvider);
     const targetBaseUrl = providerBaseUrls[newProvider] || '';
@@ -293,6 +316,12 @@ export const SettingsModal: React.FC = () => {
 
   const handleSelectModel = (modelId: string) => {
     setCustomModelInput(modelId);
+    const existing = modelContextWindows[modelId];
+    if (existing) {
+      setContextInput(String(existing));
+    } else {
+      setContextInput('');
+    }
   };
 
   // Live preview handlers for appearance
@@ -350,7 +379,15 @@ export const SettingsModal: React.FC = () => {
       saveCredential(selectedProvider, trimmedKey);
     }
 
-    setModel(customModelInput.trim());
+    const trimmedModel = customModelInput.trim();
+    setModel(trimmedModel);
+    const parsedCtx = parseInt(contextInput.trim(), 10);
+    const validCustomCtx = Number.isFinite(parsedCtx) && parsedCtx > 0 ? parsedCtx : null;
+    setContextWindow(validCustomCtx);
+    if (trimmedModel) {
+      setModelContextWindow(trimmedModel, validCustomCtx);
+    }
+
     setServerAuthToken(serverAuthTokenInput.trim());
     setProviderBaseUrl(selectedProvider, baseUrlInput.trim());
     setCustomProviderName(providerNameInput.trim());
@@ -869,19 +906,103 @@ tools: execute_command, read_file, replace_file_content
                 )}
               </div>
 
-              {/* 4. Selected / Custom Model ID Input */}
-              <div className="space-y-1.5">
-                <label className="flex items-center space-x-1.5 font-medium text-slate-800">
-                  <Sparkles className="h-3.5 w-3.5 text-amber-500" />
-                  <span>當前選擇 / 自訂模型 ID (Model ID)</span>
-                </label>
-                <input
-                  type="text"
-                  value={customModelInput}
-                  onChange={(e) => setCustomModelInput(e.target.value)}
-                  placeholder="例如: llama-3.3-70b-versatile, claude-3-5-sonnet-20241022..."
-                  className="w-full rounded-xl border border-ag-border bg-white px-3.5 py-2.5 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft"
-                />
+              {/* 4. Selected Model & Context Window Configuration */}
+              <div className="space-y-3.5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {/* Model ID */}
+                  <div className="space-y-1.5">
+                    <label className="flex items-center space-x-1.5 font-medium text-slate-800 text-[12.5px]">
+                      <Sparkles className="h-3.5 w-3.5 text-amber-500" />
+                      <span>當前選擇 / 自訂模型 ID (Model ID)</span>
+                    </label>
+                    <input
+                      type="text"
+                      value={customModelInput}
+                      onChange={(e) => setCustomModelInput(e.target.value)}
+                      placeholder="例如: llama-3.3-70b-versatile, claude-3-5-sonnet-20241022..."
+                      className="w-full rounded-xl border border-ag-border bg-white px-3.5 py-2.5 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft"
+                    />
+                  </div>
+
+                  {/* Context Window / 上下文長度限制 */}
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between">
+                      <label className="flex items-center space-x-1.5 font-medium text-slate-800 text-[12.5px]">
+                        <Sliders className="h-3.5 w-3.5 text-ag-blue" />
+                        <span>上下文限制 (Context Window / Tokens)</span>
+                      </label>
+                      <span className="font-mono text-[10.5px]">
+                        {hasCustomContext ? (
+                          <span className="text-ag-blue font-semibold">
+                            已自訂: {formatTokenCount(parsedCustomContext)}
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">
+                            預設: {formatTokenCount(defaultModelContext)}
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                    <div className="relative">
+                      <input
+                        type="number"
+                        min="1024"
+                        max="10000000"
+                        step="1024"
+                        value={contextInput}
+                        onChange={(e) => setContextInput(e.target.value)}
+                        placeholder={`預設: ${defaultModelContext.toLocaleString()} (${formatTokenCount(defaultModelContext)})`}
+                        className="w-full rounded-xl border border-ag-border bg-white px-3.5 py-2.5 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft pr-14"
+                      />
+                      {contextInput && (
+                        <button
+                          type="button"
+                          onClick={() => setContextInput('')}
+                          title="恢復為模型預設"
+                          className="absolute right-2.5 top-2.5 text-[11px] text-slate-400 hover:text-rose-600 transition-colors cursor-pointer"
+                        >
+                          重設
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Quick Presets for Context Window */}
+                <div className="flex items-center flex-wrap gap-1.5 text-[11px]">
+                  <span className="text-slate-500 mr-1 flex items-center space-x-1">
+                    <Hash className="h-3 w-3 text-slate-400" />
+                    <span>Context 快捷設定:</span>
+                  </span>
+                  {[
+                    { label: `模型預設 (${formatTokenCount(defaultModelContext)})`, val: '' },
+                    { label: '32k', val: '32768' },
+                    { label: '64k', val: '65536' },
+                    { label: '128k', val: '128000' },
+                    { label: '200k', val: '200000' },
+                    { label: '1M', val: '1048576' },
+                    { label: '2M', val: '2097152' },
+                  ].map((preset) => (
+                    <button
+                      key={preset.label}
+                      type="button"
+                      onClick={() => setContextInput(preset.val)}
+                      className={`px-2 py-0.5 rounded-lg border text-[11px] font-mono transition-all cursor-pointer ${
+                        (preset.val === '' && !contextInput) || (preset.val && contextInput === preset.val)
+                          ? 'border-ag-blue bg-blue-50 text-blue-700 font-semibold shadow-xs'
+                          : 'border-ag-border bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="flex items-center space-x-1.5 text-[10.5px] text-slate-400">
+                  <ShieldCheck className="h-3.5 w-3.5 text-slate-400 shrink-0" />
+                  <span>
+                    設定此模型執行的 Context 上下文視窗上限（Tokens，留空則自動依所選模型標準規格解析）。當長對話或工具輸出超出限制時，系統將自動進行滑動視窗修剪保護以維護推理品質。
+                  </span>
+                </div>
               </div>
             </div>
           )}

@@ -81,7 +81,8 @@ export const MODEL_EXACT_CONTEXT: Record<string, number> = {
 
 /**
  * Resolves the maximum context window for a given model and provider.
- * Follows a 4-tier resolution hierarchy:
+ * Follows a 5-tier resolution hierarchy:
+ * 0. User-configured customContextWindow (if > 0)
  * 1. Explicit modelInfo.contextWindow (if > 0)
  * 2. Exact match in MODEL_EXACT_CONTEXT
  * 3. Pattern / family heuristic match (e.g. Gemini Pro -> 2M, Claude -> 200k, MiniMax -> 1M)
@@ -91,7 +92,13 @@ export function resolveModelContextWindow(
   selectedModel?: string,
   selectedProvider?: LLMProviderType,
   modelInfo?: ModelInfo,
+  customContextWindow?: number | null,
 ): number {
+  // 0. User custom context window configuration
+  if (customContextWindow && customContextWindow > 0) {
+    return customContextWindow;
+  }
+
   // 1. Explicit modelInfo from backend / API
   if (modelInfo?.contextWindow && modelInfo.contextWindow > 0) {
     return modelInfo.contextWindow;

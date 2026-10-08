@@ -76,6 +76,7 @@ export interface ClientToServerEvents {
     workspaceRoot?: string;
     history?: import('./agent.js').ChatMessage[];
     maxTurns?: number;
+    contextWindow?: number;
   };
   'task:new': { sessionId?: string } | Record<string, never>;
   'task:cancel': { taskId?: string; sessionId?: string };

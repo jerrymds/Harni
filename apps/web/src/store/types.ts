@@ -143,6 +143,8 @@ export interface SettingsSliceState {
   gitCheckpointEnabled: boolean;
   worktreeIsolationEnabled: boolean;
   subagentsEnabled: boolean;
+  contextWindow: number | null;
+  modelContextWindows: Record<string, number>;
 }
 
 export interface SettingsSliceActions {
@@ -164,6 +166,8 @@ export interface SettingsSliceActions {
   setGitCheckpointEnabled: (enabled: boolean) => void;
   setWorktreeIsolationEnabled: (enabled: boolean) => void;
   setSubagentsEnabled: (enabled: boolean) => void;
+  setContextWindow: (contextWindow: number | null) => void;
+  setModelContextWindow: (modelId: string, contextWindow: number | null) => void;
   setSettingsOpen: (open: boolean) => void;
 }
 
