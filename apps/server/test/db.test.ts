@@ -166,4 +166,63 @@ describe('Server SQLite DB REST Endpoints', () => {
     expect(fsSync.existsSync(targetDb)).toBe(true);
     svc.close();
   });
+
+  it('accurately calculates messageCount and batch loads messages without N+1 queries', async () => {
+    const { DBService } = await import('../src/services/dbService.js');
+    const testDbPath = path.join(tempDir, `test_batch_sessions_${Date.now()}.db`);
+    const svc = new DBService({ dbPath: testDbPath });
+
+    try {
+      // 1. Session with 2 messages
+      svc.saveSession({
+        id: 'sess_with_msgs',
+        title: 'Session With Messages',
+        mode: 'code',
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+      svc.saveMessages('sess_with_msgs', [
+        { id: 'm1', role: 'user', content: 'Msg 1', timestamp: 1010 },
+        { id: 'm2', role: 'assistant', content: 'Msg 2', timestamp: 1020 },
+      ]);
+
+      // 2. Session with 0 messages
+      svc.saveSession({
+        id: 'sess_empty',
+        title: 'Empty Session',
+        mode: 'code',
+        createdAt: 2000,
+        updatedAt: 2000,
+      });
+
+      // 3. Test getSessions without messages
+      const sessionsWithoutMsgs = svc.getSessions({ includeMessages: false });
+      expect(sessionsWithoutMsgs.length).toBe(2);
+
+      const emptySess = sessionsWithoutMsgs.find((s) => s.id === 'sess_empty');
+      const filledSess = sessionsWithoutMsgs.find((s) => s.id === 'sess_with_msgs');
+
+      expect(emptySess).toBeDefined();
+      expect(emptySess?.messageCount).toBe(0);
+      expect(emptySess?.messages).toBeUndefined();
+
+      expect(filledSess).toBeDefined();
+      expect(filledSess?.messageCount).toBe(2);
+      expect(filledSess?.messages).toBeUndefined();
+
+      // 4. Test getSessions with messages (batch loaded)
+      const sessionsWithMsgs = svc.getSessions({ includeMessages: true });
+      const filledWithMsgs = sessionsWithMsgs.find((s) => s.id === 'sess_with_msgs');
+      expect(filledWithMsgs?.messageCount).toBe(2);
+      expect(filledWithMsgs?.messages?.length).toBe(2);
+      expect(filledWithMsgs?.messages?.[0]?.content).toBe('Msg 1');
+      expect(filledWithMsgs?.messages?.[1]?.content).toBe('Msg 2');
+
+      const emptyWithMsgs = sessionsWithMsgs.find((s) => s.id === 'sess_empty');
+      expect(emptyWithMsgs?.messageCount).toBe(0);
+      expect(emptyWithMsgs?.messages).toEqual([]);
+    } finally {
+      svc.close();
+    }
+  });
 });

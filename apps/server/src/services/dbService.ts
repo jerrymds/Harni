@@ -16,6 +16,18 @@ export interface DBServiceOptions {
   securityService?: SecurityService;
 }
 
+interface MessageRow {
+  id: string;
+  session_id: string;
+  role: string;
+  content: string;
+  thinking: string | null;
+  tool_calls: string | null;
+  tool_call_id: string | null;
+  tool_result: string | null;
+  timestamp: number;
+}
+
 export class DBService {
   private db: DatabaseSync;
   private dbPath: string;
@@ -200,9 +212,15 @@ export class DBService {
   // --- Sessions CRUD ---
 
   public getSessions(options: { includeMessages?: boolean } = {}): ChatSession[] {
-    const stmt = this.db.prepare(
-      'SELECT id, folder_id, title, mode, provider, model, created_at, updated_at FROM sessions ORDER BY created_at DESC',
-    );
+    const stmt = this.db.prepare(`
+      SELECT 
+        s.id, s.folder_id, s.title, s.mode, s.provider, s.model, s.created_at, s.updated_at,
+        COUNT(m.id) as message_count
+      FROM sessions s
+      LEFT JOIN messages m ON s.id = m.session_id
+      GROUP BY s.id
+      ORDER BY s.created_at DESC
+    `);
     const rows = stmt.all() as Array<{
       id: string;
       folder_id: string | null;
@@ -212,13 +230,31 @@ export class DBService {
       model: string | null;
       created_at: number;
       updated_at: number;
+      message_count: number;
     }>;
 
+    let messagesBySession: Map<string, ChatMessage[]> | undefined;
+    if (options.includeMessages && rows.length > 0) {
+      messagesBySession = new Map();
+      const allMsgsStmt = this.db.prepare(
+        'SELECT id, session_id, role, content, thinking, tool_calls, tool_call_id, tool_result, timestamp FROM messages ORDER BY timestamp ASC',
+      );
+      const msgRows = allMsgsStmt.all() as unknown as MessageRow[];
+      for (const m of msgRows) {
+        const chatMsg = this.mapMessageRow(m);
+        let list = messagesBySession.get(m.session_id);
+        if (!list) {
+          list = [];
+          messagesBySession.set(m.session_id, list);
+        }
+        list.push(chatMsg);
+      }
+    }
+
     return rows.map((r) => {
-      const messages = options.includeMessages ? this.getMessages(r.id) : [];
-      const msgCountStmt = this.db.prepare('SELECT COUNT(*) as cnt FROM messages WHERE session_id = ?');
-      const countRow = msgCountStmt.get(r.id) as { cnt: number } | undefined;
-      const count = countRow ? countRow.cnt : 0;
+      const messages = options.includeMessages
+        ? (messagesBySession?.get(r.id) || [])
+        : undefined;
 
       return {
         id: r.id,
@@ -229,8 +265,8 @@ export class DBService {
         model: r.model || undefined,
         createdAt: r.created_at,
         updatedAt: r.updated_at,
-        messageCount: count,
-        messages: options.includeMessages ? messages : undefined,
+        messageCount: Number(r.message_count || 0),
+        messages,
       };
     });
   }
@@ -313,51 +349,40 @@ export class DBService {
     stmt.run(sessionId);
   }
 
-  // --- Messages CRUD ---
+  private mapMessageRow(r: MessageRow): ChatMessage {
+    let toolCalls: any = undefined;
+    let toolResult: any = undefined;
+
+    if (r.tool_calls) {
+      try {
+        toolCalls = JSON.parse(r.tool_calls);
+      } catch {}
+    }
+
+    if (r.tool_result) {
+      try {
+        toolResult = JSON.parse(r.tool_result);
+      } catch {}
+    }
+
+    return {
+      id: r.id,
+      role: r.role as any,
+      content: r.content,
+      thinking: r.thinking || undefined,
+      toolCalls,
+      toolCallId: r.tool_call_id || undefined,
+      toolResult,
+      timestamp: r.timestamp,
+    };
+  }
 
   public getMessages(sessionId: string): ChatMessage[] {
     const stmt = this.db.prepare(
       'SELECT id, session_id, role, content, thinking, tool_calls, tool_call_id, tool_result, timestamp FROM messages WHERE session_id = ? ORDER BY timestamp ASC',
     );
-    const rows = stmt.all(sessionId) as Array<{
-      id: string;
-      session_id: string;
-      role: string;
-      content: string;
-      thinking: string | null;
-      tool_calls: string | null;
-      tool_call_id: string | null;
-      tool_result: string | null;
-      timestamp: number;
-    }>;
-
-    return rows.map((r) => {
-      let toolCalls: any = undefined;
-      let toolResult: any = undefined;
-
-      if (r.tool_calls) {
-        try {
-          toolCalls = JSON.parse(r.tool_calls);
-        } catch {}
-      }
-
-      if (r.tool_result) {
-        try {
-          toolResult = JSON.parse(r.tool_result);
-        } catch {}
-      }
-
-      return {
-        id: r.id,
-        role: r.role as any,
-        content: r.content,
-        thinking: r.thinking || undefined,
-        toolCalls,
-        toolCallId: r.tool_call_id || undefined,
-        toolResult,
-        timestamp: r.timestamp,
-      };
-    });
+    const rows = stmt.all(sessionId) as unknown as MessageRow[];
+    return rows.map((r) => this.mapMessageRow(r));
   }
 
   public saveMessages(sessionId: string, messages: ChatMessage[]): void {
