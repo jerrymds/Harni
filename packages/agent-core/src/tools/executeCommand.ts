@@ -62,7 +62,7 @@ export class ExecuteCommandTool extends BaseTool<ExecuteCommandParams> {
           {
             cwd: effectiveCwd,
             maxBuffer: 10 * 1024 * 1024,
-            timeout: 60000,
+            timeout: 300000,
             env: {
               ...process.env,
               TERM: 'dumb',

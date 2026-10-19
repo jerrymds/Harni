@@ -41,8 +41,22 @@ export class ListFilesTool extends BaseTool<ListFilesParams> {
       const targetRelPath = params.path || '.';
       const safeDir = this.resolveSafePath(targetRelPath, context.workspaceRoot);
       const isRecursive = params.recursive ?? true;
+      const rawPattern = params.pattern?.trim();
+      let patternRegex: RegExp | null = null;
+      if (rawPattern) {
+        const escaped = rawPattern
+          .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+          .replace(/\*/g, '.*')
+          .replace(/\?/g, '.');
+        patternRegex = new RegExp(rawPattern.includes('*') || rawPattern.includes('?') ? `^${escaped}$` : escaped, 'i');
+      }
 
       const entries: string[] = [];
+
+      const matchesFilter = (relPath: string, name: string): boolean => {
+        if (!patternRegex) return true;
+        return patternRegex.test(name) || patternRegex.test(relPath);
+      };
 
       const walk = async (currentDir: string, relativePrefix: string, depth = 0) => {
         if (depth > 10) return; // guard against deep recursion
@@ -53,11 +67,13 @@ export class ListFilesTool extends BaseTool<ListFilesParams> {
 
           const relPath = path.join(relativePrefix, dirent.name).replace(/\\/g, '/');
           if (dirent.isDirectory()) {
-            entries.push(`${relPath}/`);
+            if (matchesFilter(relPath, dirent.name)) {
+              entries.push(`${relPath}/`);
+            }
             if (isRecursive) {
               await walk(path.join(currentDir, dirent.name), relPath, depth + 1);
             }
-          } else {
+          } else if (matchesFilter(relPath, dirent.name)) {
             entries.push(relPath);
           }
         }

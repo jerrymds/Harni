@@ -894,7 +894,8 @@ export class AgentCoreEngine extends EventEmitter {
           'manage_subagents',
           'define_subagent',
         ]);
-        if (sessionTask.subagentsEnabled === false && subagentToolNames.has(toolCall.name)) {
+        const canonicalToolName = this.toolRegistry.resolveToolName(toolCall.name);
+        if (sessionTask.subagentsEnabled === false && subagentToolNames.has(canonicalToolName)) {
           toolResult = {
             toolCallId: toolCall.id,
             isError: true,
@@ -985,8 +986,14 @@ export class AgentCoreEngine extends EventEmitter {
             };
           }
           toolResult.toolCallId = toolCall.id;
-          if (!toolResult.isError && (toolCall.name === 'write_to_file' || toolCall.name === 'replace_file_content')) {
-            if (AutoTestRunner.isCodeFile(String(toolCall.arguments.path ?? ''))) sessionTask.codeModified = true; // Prose/asset edits (.md, .txt, images) never arm the auto test-driven repair loop
+          if (!toolResult.isError && (canonicalToolName === 'write_to_file' || canonicalToolName === 'replace_file_content')) {
+            const targetPath = String(
+              toolCall.arguments.path ??
+                toolCall.arguments.TargetFile ??
+                toolCall.arguments.AbsolutePath ??
+                '',
+            );
+            if (AutoTestRunner.isCodeFile(targetPath)) sessionTask.codeModified = true; // Prose/asset edits (.md, .txt, images) never arm the auto test-driven repair loop
           }
         }
 

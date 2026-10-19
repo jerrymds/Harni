@@ -192,7 +192,7 @@ Accomplish the requested objective thoroughly and report your results back clean
         'You are an autonomous subagent powered by Antigravity CLI. Accomplish the assigned coding task precisely and efficiently.',
       runnerType: 'agy',
       agyOptions: {
-        timeoutMs: 300_000,
+        timeoutMs: 600_000,
       },
       maxTurns: 20,
     });
@@ -207,7 +207,7 @@ Accomplish the requested objective thoroughly and report your results back clean
       runnerType: 'agy',
       agyOptions: {
         mode: 'accept-edits',
-        timeoutMs: 300_000,
+        timeoutMs: 600_000,
       },
       maxTurns: 25,
     });
@@ -224,7 +224,7 @@ Accomplish the requested objective thoroughly and report your results back clean
       agyOptions: {
         mode: 'plan',
         effort: 'medium',
-        timeoutMs: 300_000,
+        timeoutMs: 600_000,
       },
       maxTurns: 15,
     });
@@ -240,7 +240,7 @@ Accomplish the requested objective thoroughly and report your results back clean
       runnerType: 'agy',
       agyOptions: {
         effort: 'high',
-        timeoutMs: 300_000,
+        timeoutMs: 600_000,
       },
       maxTurns: 20,
     });

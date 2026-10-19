@@ -150,7 +150,7 @@ export class AgyProcessRunner {
       args.push('--mode', options.mode);
     }
 
-    const timeoutMs = options.timeoutMs ?? 300_000; // 預設 5 分鐘
+    const timeoutMs = options.timeoutMs ?? 600_000; // 預設 10 分鐘閒置逾時（有輸出即重置）
     const cwd = options.workspaceRoot || process.cwd();
 
     return new Promise<AgyProcessResult>((resolve, reject) => {
@@ -188,6 +188,29 @@ export class AgyProcessRunner {
         }
       };
 
+      const resetTimer = () => {
+        if (isSettled) return;
+        if (timer) {
+          clearTimeout(timer);
+        }
+        timer = setTimeout(() => {
+          if (!isSettled) {
+            isSettled = true;
+            cleanup();
+            killProcessTree();
+            resolve({
+              conversationId: detectedConversationId,
+              status: 'ERROR',
+              response: finalResponse || 'Agy process execution timed out.',
+              error: `Timeout exceeded (${Math.round(timeoutMs / 1000)}s of inactivity)`,
+            });
+          }
+        }, timeoutMs);
+        if (typeof timer.unref === 'function') {
+          timer.unref();
+        }
+      };
+
       if (options.signal) {
         if (options.signal.aborted) {
           return resolve({
@@ -210,22 +233,7 @@ export class AgyProcessRunner {
         });
       }
 
-      timer = setTimeout(() => {
-        if (!isSettled) {
-          isSettled = true;
-          cleanup();
-          killProcessTree();
-          resolve({
-            conversationId: detectedConversationId,
-            status: 'ERROR',
-            response: finalResponse || 'Agy process execution timed out.',
-            error: `Timeout exceeded (${Math.round(timeoutMs / 1000)}s)`,
-          });
-        }
-      }, timeoutMs);
-      if (typeof timer.unref === 'function') {
-        timer.unref();
-      }
+      resetTimer();
 
       try {
         child = spawn(binary, args, {
@@ -243,6 +251,7 @@ export class AgyProcessRunner {
       }
 
       child.stdout?.on('data', (chunk: Buffer) => {
+        resetTimer();
         buffer += chunk.toString('utf-8');
         const lines = buffer.split('\n');
         buffer = lines.pop() || '';
@@ -355,6 +364,7 @@ export class AgyProcessRunner {
       });
 
       child.stderr?.on('data', (chunk: Buffer) => {
+        resetTimer();
         stderrBuffer += chunk.toString('utf-8');
       });
 

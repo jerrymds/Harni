@@ -3,6 +3,7 @@ export * from './context/contextManager.js';
 export * from './prompts/systemPrompt.js';
 export * from './skills/skillRegistry.js';
 export * from './tools/baseTool.js';
+export * from './tools/toolAdapter.js';
 export * from './tools/toolRegistry.js';
 export * from './tools/useSkill.js';
 export * from './tools/readFile.js';

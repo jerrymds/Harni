@@ -11,6 +11,10 @@ import { SendMessageTool } from './sendMessage.js';
 import { ManageSubagentsTool } from './manageSubagents.js';
 import { DefineSubagentTool } from './defineSubagent.js';
 import { AskQuestionTool } from './askQuestion.js';
+import {
+  normalizeToolArguments,
+  resolveCanonicalToolName,
+} from './toolAdapter.js';
 import type { SkillRegistry } from '../skills/skillRegistry.js';
 import type { ToolDefinition, ToolResult } from '@harni/types';
 
@@ -34,8 +38,13 @@ export class ToolRegistry {
     this.tools.set(tool.name, tool);
   }
 
+  public resolveToolName(name: string): string {
+    if (this.tools.has(name)) return name;
+    return resolveCanonicalToolName(name);
+  }
+
   public getTool(name: string): BaseTool<any> | undefined {
-    return this.tools.get(name);
+    return this.tools.get(name) ?? this.tools.get(resolveCanonicalToolName(name));
   }
 
   public getAllTools(): BaseTool<any>[] {
@@ -60,7 +69,8 @@ export class ToolRegistry {
       };
     }
 
-    return await tool.execute(params, context);
+    const normalizedParams = normalizeToolArguments(name, params);
+    return await tool.execute(normalizedParams, context);
   }
 
   private registerDefaultTools(): void {

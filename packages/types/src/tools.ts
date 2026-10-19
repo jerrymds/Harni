@@ -67,6 +67,8 @@ export interface ToolResult {
  */
 export interface ReadFileParams {
   path: string;
+  startLine?: number;
+  endLine?: number;
 }
 
 export interface WriteFileParams {
@@ -74,15 +76,24 @@ export interface WriteFileParams {
   content: string;
 }
 
-export interface ReplaceFileContentParams {
-  path: string;
+export interface ReplaceFileChunk {
   targetContent: string;
   replacementContent: string;
+  allowMultiple?: boolean;
+}
+
+export interface ReplaceFileContentParams {
+  path: string;
+  targetContent?: string;
+  replacementContent?: string;
+  allowMultiple?: boolean;
+  replacementChunks?: ReplaceFileChunk[];
 }
 
 export interface ListFilesParams {
   path?: string;
   recursive?: boolean;
+  pattern?: string;
 }
 
 export interface SearchFilesParams {

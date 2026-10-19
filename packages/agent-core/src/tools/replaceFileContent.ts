@@ -37,8 +37,22 @@ export class ReplaceFileContentTool extends BaseTool<ReplaceFileContentParams> {
     context: ToolExecutionContext,
   ): Promise<ToolResult> {
     try {
-      const { path: filePath, targetContent, replacementContent } = params;
-      if (!filePath || targetContent === undefined || replacementContent === undefined) {
+      const {
+        path: filePath,
+        targetContent,
+        replacementContent,
+        allowMultiple,
+        replacementChunks,
+      } = params;
+
+      const chunks =
+        Array.isArray(replacementChunks) && replacementChunks.length > 0
+          ? replacementChunks
+          : targetContent !== undefined && replacementContent !== undefined
+            ? [{ targetContent, replacementContent, allowMultiple }]
+            : [];
+
+      if (!filePath || chunks.length === 0) {
         return {
           toolCallId: '',
           isError: true,
@@ -48,26 +62,41 @@ export class ReplaceFileContentTool extends BaseTool<ReplaceFileContentParams> {
 
       const safePath = this.resolveSafePath(filePath, context.workspaceRoot);
       const originalContent = await fs.readFile(safePath, 'utf-8');
+      let newContent = originalContent;
 
-      // Check occurrences
-      const occurrences = originalContent.split(targetContent).length - 1;
-      if (occurrences === 0) {
-        return {
-          toolCallId: '',
-          isError: true,
-          output: `Target content not found in '${filePath}'. Make sure whitespace and line breaks match exactly.`,
-        };
+      for (const chunk of chunks) {
+        if (!chunk.targetContent && chunk.targetContent !== '') {
+          return {
+            toolCallId: '',
+            isError: true,
+            output: 'Missing required parameters: path, targetContent, replacementContent',
+          };
+        }
+
+        const occurrences = newContent.split(chunk.targetContent).length - 1;
+        if (occurrences === 0) {
+          return {
+            toolCallId: '',
+            isError: true,
+            output: `Target content not found in '${filePath}'. Make sure whitespace and line breaks match exactly.`,
+          };
+        }
+
+        const canReplaceMultiple = Boolean(chunk.allowMultiple ?? allowMultiple);
+        if (occurrences > 1 && !canReplaceMultiple) {
+          return {
+            toolCallId: '',
+            isError: true,
+            output: `Target content matched ${occurrences} times in '${filePath}'. Please provide more surrounding context to make the targetContent unique.`,
+          };
+        }
+
+        if (canReplaceMultiple) {
+          newContent = newContent.split(chunk.targetContent).join(chunk.replacementContent);
+        } else {
+          newContent = newContent.replace(chunk.targetContent, () => chunk.replacementContent);
+        }
       }
-
-      if (occurrences > 1) {
-        return {
-          toolCallId: '',
-          isError: true,
-          output: `Target content matched ${occurrences} times in '${filePath}'. Please provide more surrounding context to make the targetContent unique.`,
-        };
-      }
-
-      const newContent = originalContent.replace(targetContent, replacementContent);
 
       if (context.onFileDiff) {
         context.onFileDiff({

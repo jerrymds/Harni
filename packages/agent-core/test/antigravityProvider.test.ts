@@ -89,4 +89,28 @@ describe('AntigravityProvider idle timeout', () => {
     const provider = new AntigravityProvider({ baseURL: 'http://127.0.0.1:8123' });
     expect((provider as any).idleTimeoutMs).toBe(90_000);
   });
+
+  it('正確解析帶有後續文字大括號與多重工具呼叫的文字格式 tool call', () => {
+    const textWithTrailingBraces =
+      'Calling tool `replace_file_content` with arguments: {"path": "src/index.ts", "content": "export function main() { return { ok: true }; }"}\n' +
+      '已完成修改 `export function main() { return { ok: true }; }`。';
+
+    const single = AntigravityProvider.extractTextToolCalls(textWithTrailingBraces);
+    expect(single.length).toBe(1);
+    expect(single[0].name).toBe('replace_file_content');
+    expect(single[0].arguments).toEqual({
+      path: 'src/index.ts',
+      content: 'export function main() { return { ok: true }; }',
+    });
+
+    const multiCallsText =
+      'Calling tool `read_file` with arguments: {"path": "package.json"}\n' +
+      'Calling tool `read_file` with arguments: {"path": "tsconfig.json"}\n';
+
+    const multi = AntigravityProvider.extractTextToolCalls(multiCallsText);
+    expect(multi.length).toBe(2);
+    expect(multi[0].arguments).toEqual({ path: 'package.json' });
+    expect(multi[1].arguments).toEqual({ path: 'tsconfig.json' });
+  });
 });
+

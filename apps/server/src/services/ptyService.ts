@@ -345,7 +345,7 @@ export class PTYService {
     command: string,
     cwd?: string,
     onData?: (data: string) => void,
-    timeoutMs: number = 60000,
+    timeoutMs: number = 300000,
   ): Promise<{ exitCode: number; output: string }> {
     const isWindows = process.platform === 'win32';
     const shell = isWindows ? 'powershell.exe' : '/bin/bash';
@@ -357,6 +357,7 @@ export class PTYService {
     return new Promise<{ exitCode: number; output: string }>((resolve) => {
       let isSettled = false;
       let fullOutput = '';
+      let timeoutTimer: NodeJS.Timeout | null = null;
 
       const child = spawn(shell, shellArgs, {
         cwd: workingDir,
@@ -376,31 +377,41 @@ export class PTYService {
         child.stdin?.end();
       } catch {}
 
-      const timeoutTimer = setTimeout(() => {
-        if (!isSettled) {
-          isSettled = true;
-          try {
-            if (isWindows && child.pid) {
-              // Kill entire process tree on Windows
-              spawn('taskkill', ['/pid', String(child.pid), '/f', '/t']);
-            } else {
-              child.kill('SIGKILL');
-            }
-          } catch {}
-          resolve({
-            exitCode: 124,
-            output: fullOutput + `\n⚠️ [逾時警告] 指令執行超過 ${timeoutMs / 1000} 秒已被系統安全中止。`,
-          });
+      const resetTimeout = () => {
+        if (isSettled) return;
+        if (timeoutTimer) {
+          clearTimeout(timeoutTimer);
         }
-      }, timeoutMs);
+        timeoutTimer = setTimeout(() => {
+          if (!isSettled) {
+            isSettled = true;
+            try {
+              if (isWindows && child.pid) {
+                // Kill entire process tree on Windows
+                spawn('taskkill', ['/pid', String(child.pid), '/f', '/t']);
+              } else {
+                child.kill('SIGKILL');
+              }
+            } catch {}
+            resolve({
+              exitCode: 124,
+              output: fullOutput + `\n⚠️ [逾時警告] 指令超過 ${timeoutMs / 1000} 秒無輸出或執行逾時，已被系統安全中止。`,
+            });
+          }
+        }, timeoutMs);
+      };
+
+      resetTimeout();
 
       child.stdout?.on('data', (chunk: Buffer) => {
+        resetTimeout();
         const text = chunk.toString();
         fullOutput += text;
         onData?.(text);
       });
 
       child.stderr?.on('data', (chunk: Buffer) => {
+        resetTimeout();
         const text = chunk.toString();
         fullOutput += text;
         onData?.(text);
@@ -409,7 +420,7 @@ export class PTYService {
       child.on('close', (code) => {
         if (!isSettled) {
           isSettled = true;
-          clearTimeout(timeoutTimer);
+          if (timeoutTimer) clearTimeout(timeoutTimer);
           resolve({
             exitCode: code ?? 0,
             output: fullOutput || '(指令執行完成，無終端輸出)',
@@ -420,7 +431,7 @@ export class PTYService {
       child.on('error', (err) => {
         if (!isSettled) {
           isSettled = true;
-          clearTimeout(timeoutTimer);
+          if (timeoutTimer) clearTimeout(timeoutTimer);
           resolve({
             exitCode: 1,
             output: `指令啟動失敗: ${err.message}`,

@@ -15,6 +15,14 @@ export class ReadFileTool extends BaseTool<ReadFileParams> {
         type: 'string',
         description: 'The relative or absolute path of the file to read.',
       },
+      startLine: {
+        type: 'number',
+        description: 'Optional 1-indexed starting line number (inclusive).',
+      },
+      endLine: {
+        type: 'number',
+        description: 'Optional 1-indexed ending line number (inclusive).',
+      },
     },
     required: ['path'],
   };
@@ -61,24 +69,34 @@ export class ReadFileTool extends BaseTool<ReadFileParams> {
       // Add line numbers for surgical replacement reference
       const lines = rawContent.split('\n');
       const MAX_LINES = 2500;
-      let displayLines = lines;
+      const startIdx =
+        typeof params.startLine === 'number' && params.startLine > 1
+          ? Math.min(Math.floor(params.startLine) - 1, lines.length)
+          : 0;
+      const endIdx =
+        typeof params.endLine === 'number' && params.endLine >= 1
+          ? Math.min(Math.floor(params.endLine), lines.length)
+          : lines.length;
+
+      const slicedLines = lines.slice(startIdx, Math.max(startIdx, endIdx));
+      let displayLines = slicedLines;
       let truncatedNotice = '';
 
-      if (lines.length > MAX_LINES) {
-        displayLines = lines.slice(0, MAX_LINES);
-        truncatedNotice = `\n...[檔案過長 (共 ${lines.length} 行)，僅顯示前 ${MAX_LINES} 行以防止 Token 耗盡]...`;
+      if (slicedLines.length > MAX_LINES) {
+        displayLines = slicedLines.slice(0, MAX_LINES);
+        truncatedNotice = `\n...[檔案過長 (共 ${lines.length} 行)，僅顯示 ${ MAX_LINES } 行以防止 Token 耗盡]...`;
       }
 
       const numberedContent =
         displayLines
-          .map((line: string, idx: number) => `${String(idx + 1).padStart(4, ' ')} | ${line}`)
+          .map((line: string, idx: number) => `${String(startIdx + idx + 1).padStart(4, ' ')} | ${line}`)
           .join('\n') + truncatedNotice;
 
       return {
         toolCallId: '',
         isError: false,
         output: numberedContent,
-        summary: `Read ${displayLines.length} lines from ${params.path}${lines.length > MAX_LINES ? ' (truncated)' : ''}`,
+        summary: `Read ${displayLines.length} lines from ${params.path}${slicedLines.length > MAX_LINES ? ' (truncated)' : ''}`,
       };
     } catch (err: unknown) {
       const errorMsg = err instanceof Error ? err.message : String(err);
