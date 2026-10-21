@@ -60,6 +60,7 @@ export interface ClientToServerEvents {
   'user:prompt': {
     sessionId?: string;
     prompt: string;
+    attachments?: import('./agent.js').FileAttachment[];
     mode?: AgentMode;
     provider?: LLMProviderType;
     model?: string;

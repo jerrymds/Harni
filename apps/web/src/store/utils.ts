@@ -3,11 +3,12 @@ import type {
   ChatMessage,
   ChatSession,
   GoogleAuthInfo,
+  LLMProviderConfig,
   LLMProviderType,
   WorkspaceFolder,
-} from './types.js';
+} from '@harni/types';
 
-export const PROVIDER_DEFAULT_MODELS: Record<LLMProviderType, string> = {
+export const PROVIDER_DEFAULT_MODELS: Record<string, string> = {
   cline: 'cline-pass/deepseek-v4-pro',
   anthropic: 'claude-3-5-sonnet-20241022',
   openai: 'gpt-5.6-sol',
@@ -15,8 +16,31 @@ export const PROVIDER_DEFAULT_MODELS: Record<LLMProviderType, string> = {
   ollama: 'llama3.3',
   openrouter: 'anthropic/claude-3.5-sonnet',
   opencode: 'claude-fable-5',
+  deepseek: 'deepseek-chat',
+  groq: 'llama-3.3-70b-versatile',
+  xai: 'grok-3-beta',
+  siliconflow: 'deepseek-ai/DeepSeek-V3',
+  together: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+  mistral: 'codestral-latest',
+  fireworks: 'accounts/fireworks/models/deepseek-v3',
+  cerebras: 'llama-3.3-70b',
+  lmstudio: 'local-model',
+  vllm: 'default-model',
   custom: 'custom-model',
 };
+
+export function loadSavedCustomProviders(): LLMProviderConfig[] {
+  try {
+    const raw = localStorage.getItem('cline_web_custom_providers');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((p) => p && typeof p.id === 'string' && typeof p.name === 'string');
+      }
+    }
+  } catch {}
+  return [];
+}
 
 export const getApiBase = () => `http://${window.location.hostname}:3001`;
 

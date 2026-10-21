@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import type { AgentMode, LLMProviderType, ModelInfo, ThinkingDepth } from '@harni/types';
 import { useAgentStore, useShallow } from '../../store/useAgentStore.js';
+import { resolveAllProviders } from '../Settings/Models/providerRegistry.js';
 import { HarniLogo } from './HarniLogo.js';
 
 export const Header: React.FC = () => {
@@ -32,6 +33,7 @@ export const Header: React.FC = () => {
     folders,
     activeFolderId,
     customProviderName,
+    customProviders,
     setMode,
     setProvider,
     setModel,
@@ -52,12 +54,17 @@ export const Header: React.FC = () => {
       folders: s.folders,
       activeFolderId: s.activeFolderId,
       customProviderName: s.customProviderName,
+      customProviders: s.customProviders,
       setMode: s.setMode,
       setProvider: s.setProvider,
       setModel: s.setModel,
       setThinkingDepth: s.setThinkingDepth,
       setSettingsOpen: s.setSettingsOpen,
     }))
+  );
+
+  const allProviders = resolveAllProviders(customProviders, customProviderName).filter(
+    (p) => p.enabled !== false || p.id === selectedProvider,
   );
 
   const rawLiveModels: ModelInfo[] = availableModels[selectedProvider] || [];
@@ -198,30 +205,15 @@ export const Header: React.FC = () => {
             onChange={(e) => setProvider(e.target.value as LLMProviderType)}
             className="bg-transparent font-medium text-ag-textPrimary outline-none cursor-pointer"
           >
-            <option value="antigravity" className="bg-ag-panel text-ag-textPrimary">
-              Google Antigravity
-            </option>
-            <option value="cline" className="bg-ag-panel text-ag-textPrimary">
-              Cline API
-            </option>
-            <option value="anthropic" className="bg-ag-panel text-ag-textPrimary">
-              Anthropic
-            </option>
-            <option value="openai" className="bg-ag-panel text-ag-textPrimary">
-              OpenAI
-            </option>
-            <option value="openrouter" className="bg-ag-panel text-ag-textPrimary">
-              OpenRouter
-            </option>
-            <option value="opencode" className="bg-ag-panel text-ag-textPrimary">
-              OpenCode
-            </option>
-            <option value="ollama" className="bg-ag-panel text-ag-textPrimary">
-              Ollama
-            </option>
-            <option value="custom" className="bg-ag-panel text-ag-textPrimary">
-              {customProviderName ? `自訂 (${customProviderName})` : '自訂 (Custom)'}
-            </option>
+            {allProviders.map((p) => (
+              <option key={p.id} value={p.id} className="bg-ag-panel text-ag-textPrimary">
+                {p.id === 'custom'
+                  ? customProviderName
+                    ? `自訂 (${customProviderName})`
+                    : '自訂 (Custom)'
+                  : p.name}
+              </option>
+            ))}
           </select>
         </div>
 

@@ -7,6 +7,88 @@ import {
 } from './baseProvider.js';
 import type { ChatMessage, LLMProviderType, ToolCall, ToolDefinition } from '@harni/types';
 
+const OPENAI_COMPATIBLE_DEFAULTS: Record<
+  string,
+  { defaultModel: string; baseURL: string; envKey?: string; keyless?: boolean }
+> = {
+  openai: {
+    defaultModel: 'gpt-4o',
+    baseURL: 'https://api.openai.com/v1',
+    envKey: 'OPENAI_API_KEY',
+  },
+  ollama: {
+    defaultModel: 'llama3.3',
+    baseURL: 'http://localhost:11434/v1',
+    keyless: true,
+  },
+  openrouter: {
+    defaultModel: 'anthropic/claude-3.5-sonnet',
+    baseURL: process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
+    envKey: 'OPENROUTER_API_KEY',
+  },
+  opencode: {
+    defaultModel: 'claude-fable-5',
+    baseURL: process.env.OPENCODE_BASE_URL || 'https://opencode.ai/zen/v1',
+    envKey: 'OPENCODE_API_KEY',
+  },
+  deepseek: {
+    defaultModel: 'deepseek-chat',
+    baseURL: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/v1',
+    envKey: 'DEEPSEEK_API_KEY',
+  },
+  groq: {
+    defaultModel: 'llama-3.3-70b-versatile',
+    baseURL: process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1',
+    envKey: 'GROQ_API_KEY',
+  },
+  xai: {
+    defaultModel: 'grok-3-beta',
+    baseURL: process.env.XAI_BASE_URL || 'https://api.x.ai/v1',
+    envKey: 'XAI_API_KEY',
+  },
+  siliconflow: {
+    defaultModel: 'deepseek-ai/DeepSeek-V3',
+    baseURL: process.env.SILICONFLOW_BASE_URL || 'https://api.siliconflow.cn/v1',
+    envKey: 'SILICONFLOW_API_KEY',
+  },
+  together: {
+    defaultModel: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+    baseURL: process.env.TOGETHER_BASE_URL || 'https://api.together.xyz/v1',
+    envKey: 'TOGETHER_API_KEY',
+  },
+  mistral: {
+    defaultModel: 'codestral-latest',
+    baseURL: process.env.MISTRAL_BASE_URL || 'https://api.mistral.ai/v1',
+    envKey: 'MISTRAL_API_KEY',
+  },
+  fireworks: {
+    defaultModel: 'accounts/fireworks/models/deepseek-v3',
+    baseURL: process.env.FIREWORKS_BASE_URL || 'https://api.fireworks.ai/inference/v1',
+    envKey: 'FIREWORKS_API_KEY',
+  },
+  cerebras: {
+    defaultModel: 'llama-3.3-70b',
+    baseURL: process.env.CEREBRAS_BASE_URL || 'https://api.cerebras.ai/v1',
+    envKey: 'CEREBRAS_API_KEY',
+  },
+  lmstudio: {
+    defaultModel: 'local-model',
+    baseURL: 'http://localhost:1234/v1',
+    keyless: true,
+  },
+  vllm: {
+    defaultModel: 'default-model',
+    baseURL: 'http://localhost:8000/v1',
+    keyless: true,
+  },
+  custom: {
+    defaultModel: 'default-model',
+    baseURL: process.env.CUSTOM_BASE_URL || 'http://localhost:8000/v1',
+    envKey: 'CUSTOM_API_KEY',
+    keyless: true,
+  },
+};
+
 export class OpenAIProvider extends BaseLLMProvider {
   public readonly providerType: LLMProviderType;
   public readonly defaultModel: string;
@@ -22,21 +104,14 @@ export class OpenAIProvider extends BaseLLMProvider {
     this.accountId = options.openaiAccountId;
     this.providerType = providerType;
 
-    if (providerType === 'ollama') {
-      this.defaultModel = 'llama3.3';
-      this.baseURL = options.baseURL || 'http://localhost:11434/v1';
-    } else if (providerType === 'openrouter') {
-      this.defaultModel = 'anthropic/claude-3.5-sonnet';
-      this.baseURL = options.baseURL || process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
-    } else if (providerType === 'opencode') {
-      this.defaultModel = 'claude-fable-5';
-      this.baseURL = options.baseURL || process.env.OPENCODE_BASE_URL || 'https://opencode.ai/zen/v1';
-    } else if (providerType === 'custom') {
+    const preset = OPENAI_COMPATIBLE_DEFAULTS[providerType];
+    if (preset) {
+      this.defaultModel =
+        providerType === 'custom' ? options.model || preset.defaultModel : preset.defaultModel;
+      this.baseURL = options.baseURL || preset.baseURL;
+    } else {
       this.defaultModel = options.model || 'default-model';
       this.baseURL = options.baseURL || process.env.CUSTOM_BASE_URL || 'http://localhost:8000/v1';
-    } else {
-      this.defaultModel = 'gpt-4o';
-      this.baseURL = options.baseURL || 'https://api.openai.com/v1';
     }
 
     if (this.baseURL && !this.baseURL.startsWith('http://') && !this.baseURL.startsWith('https://')) {
@@ -56,20 +131,25 @@ export class OpenAIProvider extends BaseLLMProvider {
     onChunk: (chunk: StreamChunk) => void,
     signal?: AbortSignal,
   ): Promise<ProviderCompletionResult> {
+    const preset = OPENAI_COMPATIBLE_DEFAULTS[this.providerType];
+    const dynamicEnvKeyName =
+      preset?.envKey || `${this.providerType.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_API_KEY`;
+    const isLocalEndpoint =
+      typeof this.baseURL === 'string' &&
+      (this.baseURL.includes('localhost') || this.baseURL.includes('127.0.0.1'));
+    const isKeylessAllowed =
+      Boolean(preset?.keyless) ||
+      this.providerType === 'ollama' ||
+      this.providerType === 'custom' ||
+      this.providerType.startsWith('custom-') ||
+      isLocalEndpoint;
+
     const apiKey =
       this.apiKey ||
-      (this.providerType === 'custom'
-        ? process.env.CUSTOM_API_KEY || 'custom'
-        : this.providerType === 'ollama'
-          ? 'ollama'
-          : this.providerType === 'openrouter'
-            ? process.env.OPENROUTER_API_KEY
-            : this.providerType === 'opencode'
-              ? process.env.OPENCODE_API_KEY
-              : process.env.OPENAI_API_KEY) ||
-      '';
+      process.env[dynamicEnvKeyName] ||
+      (isKeylessAllowed ? this.providerType : '');
 
-    if (!apiKey && this.providerType !== 'ollama' && this.providerType !== 'custom') {
+    if (!apiKey && !isKeylessAllowed) {
       throw new Error(`${this.providerType} API Key is required.`);
     }
 
@@ -99,7 +179,23 @@ export class OpenAIProvider extends BaseLLMProvider {
 
     for (const msg of messages) {
       if (msg.role === 'user') {
-        formattedMessages.push({ role: 'user', content: msg.content ?? '' });
+        const imageAttachments = msg.attachments?.filter(
+          (a) => a.type.startsWith('image/') && a.dataUrl,
+        );
+        if (imageAttachments && imageAttachments.length > 0) {
+          const parts: Array<Record<string, unknown>> = [
+            { type: 'text', text: msg.content ?? '' },
+          ];
+          for (const img of imageAttachments) {
+            parts.push({
+              type: 'image_url',
+              image_url: { url: img.dataUrl },
+            });
+          }
+          formattedMessages.push({ role: 'user', content: parts });
+        } else {
+          formattedMessages.push({ role: 'user', content: msg.content ?? '' });
+        }
       } else if (msg.role === 'assistant') {
         const assistantMsg: Record<string, unknown> = {
           role: 'assistant',

@@ -4,6 +4,7 @@ import type { AgentStoreState, SettingsSlice } from '../types.js';
 import {
   DEFAULT_MCP_CONFIG,
   getServerAuthToken,
+  loadSavedCustomProviders,
   loadSavedProviderBaseUrls,
   loadSavedSessions,
   PROVIDER_DEFAULT_MODELS,
@@ -43,6 +44,7 @@ export const createSettingsSlice: StateCreator<AgentStoreState, [], [], Settings
   customBaseUrl: initialProviderBaseUrls[initialSessionsData.initialProvider || savedProvider] || '',
   providerBaseUrls: initialProviderBaseUrls,
   customProviderName: localStorage.getItem('cline_web_custom_provider_name') || '',
+  customProviders: loadSavedCustomProviders(),
   isSettingsOpen: false,
   theme: localStorage.getItem('cline_web_theme') || 'eye-friendly',
   fontSize: localStorage.getItem('cline_web_font_size') || 'sm',
@@ -96,6 +98,36 @@ export const createSettingsSlice: StateCreator<AgentStoreState, [], [], Settings
     localStorage.setItem('cline_web_custom_provider_name', name);
     set({ customProviderName: name });
     syncSettingsToDB({ custom_provider_name: name });
+  },
+
+  setCustomProviders: (providers) => {
+    const serialized = JSON.stringify(providers);
+    localStorage.setItem('cline_web_custom_providers', serialized);
+    set({ customProviders: providers });
+    syncSettingsToDB({ custom_providers: serialized });
+  },
+
+  upsertCustomProvider: (provider) => {
+    const current = get().customProviders || [];
+    const idx = current.findIndex((p) => p.id === provider.id);
+    const updated =
+      idx >= 0
+        ? current.map((p, i) => (i === idx ? { ...p, ...provider } : p))
+        : [...current, provider];
+    get().setCustomProviders(updated);
+    if (provider.defaultBaseUrl && !get().providerBaseUrls[provider.id]) {
+      get().setProviderBaseUrl(provider.id, provider.defaultBaseUrl);
+    }
+  },
+
+  deleteCustomProvider: (providerId) => {
+    const current = get().customProviders || [];
+    const updated = current.filter((p) => p.id !== providerId);
+    get().setCustomProviders(updated);
+    get().deleteCredential(providerId);
+    if (get().selectedProvider === providerId) {
+      get().setProvider('antigravity');
+    }
   },
 
   setTheme: (theme) => {

@@ -5,6 +5,7 @@ import type {
   AnthropicAuthInfo,
   ChatMessage,
   ChatSession,
+  FileAttachment,
   FileDiff,
   FileNode,
   GoogleAuthInfo,
@@ -27,6 +28,7 @@ export type {
   AnthropicAuthInfo,
   ChatMessage,
   ChatSession,
+  FileAttachment,
   FileDiff,
   FileNode,
   GoogleAuthInfo,
@@ -60,7 +62,7 @@ export interface ChatSliceState {
 }
 
 export interface ChatSliceActions {
-  sendPrompt: (prompt: string, contextFiles?: string[]) => void;
+  sendPrompt: (prompt: string, contextFiles?: string[], attachments?: FileAttachment[]) => void;
   newSession: (folderId?: string) => void;
   switchSession: (sessionId: string) => void;
   deleteSession: (sessionId: string) => void;
@@ -130,6 +132,7 @@ export interface SettingsSliceState {
   customBaseUrl: string;
   providerBaseUrls: Record<string, string>;
   customProviderName: string;
+  customProviders: import('@harni/types').LLMProviderConfig[];
   isSettingsOpen: boolean;
   theme: string;
   fontSize: string;
@@ -154,6 +157,9 @@ export interface SettingsSliceActions {
   setCustomBaseUrl: (url: string) => void;
   setProviderBaseUrl: (provider: string, url: string) => void;
   setCustomProviderName: (name: string) => void;
+  setCustomProviders: (providers: import('@harni/types').LLMProviderConfig[]) => void;
+  upsertCustomProvider: (provider: import('@harni/types').LLMProviderConfig) => void;
+  deleteCustomProvider: (providerId: string) => void;
   setTheme: (theme: string) => void;
   setFontSize: (size: string) => void;
   setCodeFont: (font: string) => void;

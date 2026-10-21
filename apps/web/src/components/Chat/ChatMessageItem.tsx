@@ -8,8 +8,16 @@ import {
   Clock,
   Code2,
   Copy,
+  FileText,
   User,
+  X,
 } from 'lucide-react';
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 import type { ChatMessage } from '@harni/types';
 import { ThinkingAccordion } from './ThinkingAccordion.js';
 import { ToolAccordion } from './ToolAccordion.js';
@@ -227,6 +235,8 @@ export const RateLimitCard: React.FC<{ msg: ChatMessage }> = memo(({ msg }) => {
 RateLimitCard.displayName = 'RateLimitCard';
 
 export const ChatMessageItem: React.FC<ChatMessageItemProps> = memo(({ msg }) => {
+  const [selectedPreviewImage, setSelectedPreviewImage] = useState<string | null>(null);
+
   const isRateLimit = Boolean(
     msg.rateLimitInfo?.isRateLimit ||
       msg.content?.includes('觸發 API 頻率限制') ||
@@ -242,17 +252,65 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = memo(({ msg }) =>
   return (
     <div className="space-y-2">
       {/* User Prompt */}
-      {msg.role === 'user' && msg.content && (
+      {msg.role === 'user' && (msg.content || (msg.attachments && msg.attachments.length > 0)) && (
         <div className="flex flex-col items-end group">
           <div className="flex items-center space-x-2 text-[11px] text-ag-textMuted mb-1 font-mono select-none">
             <div className="flex items-center space-x-1.5">
               <User className="h-3 w-3 text-ag-primary" />
               <span>You</span>
             </div>
-            <CopyMessageButton content={msg.content} />
+            {msg.content && <CopyMessageButton content={msg.content} />}
           </div>
-          <div className="rounded-2xl rounded-tr-xs bg-ag-primary px-5 py-3 text-sm text-white shadow-soft max-w-[85%] whitespace-pre-wrap leading-relaxed select-text">
-            {msg.content}
+
+          <div className="flex flex-col items-end space-y-2 max-w-[85%]">
+            {/* User message attachments (images & files) */}
+            {msg.attachments && msg.attachments.length > 0 && (
+              <div className="flex flex-wrap justify-end gap-2">
+                {msg.attachments.map((att) => {
+                  if (att.type.startsWith('image/') && att.dataUrl) {
+                    return (
+                      <div
+                        key={att.id}
+                        onClick={() => setSelectedPreviewImage(att.dataUrl!)}
+                        className="relative group cursor-pointer overflow-hidden rounded-xl border border-ag-border bg-ag-void shadow-soft hover:ring-2 hover:ring-ag-primary/50 transition-all max-w-[240px] max-h-[180px]"
+                        title={`${att.name} (點擊放大檢視)`}
+                      >
+                        <img
+                          src={att.dataUrl}
+                          alt={att.name}
+                          className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-105"
+                        />
+                        <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity text-white text-xs font-medium">
+                          <span>點擊放大</span>
+                        </div>
+                      </div>
+                    );
+                  }
+                  return (
+                    <div
+                      key={att.id}
+                      className="flex items-center space-x-2 rounded-xl border border-ag-border bg-ag-panel px-3 py-2 text-xs shadow-xs text-ag-textPrimary"
+                      title={att.name}
+                    >
+                      <FileText className="h-4 w-4 text-ag-primary shrink-0" />
+                      <div className="flex flex-col max-w-[160px]">
+                        <span className="font-medium truncate">{att.name}</span>
+                        <span className="text-[10px] text-ag-textMuted font-mono">
+                          {formatFileSize(att.size)}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* User message text */}
+            {msg.content && (
+              <div className="rounded-2xl rounded-tr-xs bg-ag-primary px-5 py-3 text-sm text-white shadow-soft whitespace-pre-wrap leading-relaxed select-text w-full">
+                {msg.content}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -294,6 +352,33 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = memo(({ msg }) =>
 
       {/* Tool Execution Result */}
       {msg.role === 'tool' && <ToolAccordion msg={msg} defaultOpen={false} />}
+
+      {/* Lightbox Image Preview Modal */}
+      {selectedPreviewImage && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs p-4 animate-in fade-in duration-150"
+          onClick={() => setSelectedPreviewImage(null)}
+        >
+          <div
+            className="relative max-w-4xl max-h-[90vh] overflow-hidden rounded-2xl bg-ag-panel border border-ag-border shadow-2xl p-2"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => setSelectedPreviewImage(null)}
+              className="absolute top-4 right-4 z-10 flex h-8 w-8 items-center justify-center rounded-full bg-black/60 hover:bg-black text-white transition-all cursor-pointer shadow-lg"
+              title="關閉預覽"
+            >
+              <X className="h-4 w-4" />
+            </button>
+            <img
+              src={selectedPreviewImage}
+              alt="預覽圖片"
+              className="max-h-[85vh] max-w-full rounded-xl object-contain mx-auto"
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 });

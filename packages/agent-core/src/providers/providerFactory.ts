@@ -11,27 +11,29 @@ export class ProviderFactory {
     type: LLMProviderType,
     options: ProviderOptions & { mockScript?: MockScriptStep[] } = {},
   ): BaseLLMProvider {
-    switch (type) {
-      case 'cline':
-        return new ClineProvider(options);
-      case 'anthropic':
-        return new AnthropicProvider(options);
-      case 'antigravity':
-        if (options.mockScript) {
-          return new MockProvider({ ...options, script: options.mockScript });
-        }
-        return new AntigravityProvider(options);
-      case 'openai':
-      case 'ollama':
-      case 'openrouter':
-      case 'opencode':
-      case 'custom':
-        if (options.mockScript) {
-          return new MockProvider({ ...options, script: options.mockScript });
-        }
-        return new OpenAIProvider(type, options);
-      default:
-        throw new Error(`Unsupported LLM provider type: ${type}`);
+    if (!type || typeof type !== 'string') {
+      throw new Error(`Unsupported LLM provider type: ${String(type)}`);
     }
+
+    if (type === 'cline') {
+      return new ClineProvider(options);
+    }
+
+    if (type === 'anthropic' || type.startsWith('anthropic-')) {
+      return new AnthropicProvider(options);
+    }
+
+    if (type === 'antigravity') {
+      if (options.mockScript) {
+        return new MockProvider({ ...options, script: options.mockScript });
+      }
+      return new AntigravityProvider(options);
+    }
+
+    if (options.mockScript) {
+      return new MockProvider({ ...options, script: options.mockScript });
+    }
+
+    return new OpenAIProvider(type, options);
   }
 }

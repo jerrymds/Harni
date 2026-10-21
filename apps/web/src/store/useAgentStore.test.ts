@@ -47,6 +47,31 @@ describe('useAgentStore and Slices', () => {
     expect(useAgentStore.getState().isSettingsOpen).toBe(false);
   });
 
+  it('adds, updates, and deletes dynamic custom providers without code changes', () => {
+    const { upsertCustomProvider, deleteCustomProvider, setProvider } = useAgentStore.getState();
+
+    upsertCustomProvider({
+      id: 'groq',
+      name: 'Groq Cloud',
+      icon: '🚀',
+      description: 'Groq LPU API',
+      protocol: 'openai-compatible',
+      defaultBaseUrl: 'https://api.groq.com/openai/v1',
+      defaultModel: 'llama-3.3-70b-versatile',
+    });
+
+    expect(useAgentStore.getState().customProviders.some((p) => p.id === 'groq')).toBe(true);
+    expect(useAgentStore.getState().providerBaseUrls['groq']).toBe('https://api.groq.com/openai/v1');
+
+    setProvider('groq');
+    expect(useAgentStore.getState().selectedProvider).toBe('groq');
+    expect(useAgentStore.getState().selectedModel).toBe('llama-3.3-70b-versatile');
+
+    deleteCustomProvider('groq');
+    expect(useAgentStore.getState().customProviders.some((p) => p.id === 'groq')).toBe(false);
+    expect(useAgentStore.getState().selectedProvider).toBe('antigravity');
+  });
+
   it('updates global and per-model context window settings', () => {
     const { setContextWindow, setModelContextWindow } = useAgentStore.getState();
 

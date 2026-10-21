@@ -88,6 +88,63 @@ export const OPENCODE_OFFICIAL_MODELS: ModelInfo[] = [
   { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash (OpenCode Zen)', description: '高速低延遲大上下文模型', contextWindow: 1048576, maxTokens: 8192 },
 ];
 
+export const PRESET_CURATED_MODELS: Record<string, ModelInfo[]> = {
+  openrouter: OPENROUTER_OFFICIAL_MODELS,
+  opencode: OPENCODE_OFFICIAL_MODELS,
+  deepseek: [
+    { id: 'deepseek-chat', name: 'DeepSeek V3 (deepseek-chat)', description: 'DeepSeek 官方主力對話與編程模型', contextWindow: 65536, maxTokens: 8192 },
+    { id: 'deepseek-reasoner', name: 'DeepSeek R1 (deepseek-reasoner)', description: 'DeepSeek 官方深度思維推理模型', contextWindow: 65536, maxTokens: 8192 },
+  ],
+  groq: [
+    { id: 'llama-3.3-70b-versatile', name: 'Llama 3.3 70B Versatile (Groq)', description: 'Groq LPU 超高速主力模型', contextWindow: 128000, maxTokens: 8192 },
+    { id: 'deepseek-r1-distill-llama-70b', name: 'DeepSeek R1 Distill Llama 70B', description: 'Groq 高速深度推理模型', contextWindow: 128000, maxTokens: 8192 },
+    { id: 'qwen-qwq-32b', name: 'Qwen QwQ 32B (Groq)', description: '通義千問推理模型', contextWindow: 128000, maxTokens: 8192 },
+  ],
+  xai: [
+    { id: 'grok-3-beta', name: 'Grok 3 Beta', description: 'xAI 旗艦推理與編程模型', contextWindow: 131072, maxTokens: 8192 },
+    { id: 'grok-3-mini-beta', name: 'Grok 3 Mini Beta', description: 'xAI 高速輕量推理模型', contextWindow: 131072, maxTokens: 8192 },
+  ],
+  siliconflow: [
+    { id: 'deepseek-ai/DeepSeek-V3', name: 'DeepSeek V3 (SiliconFlow)', description: 'SiliconFlow 高速開源模型', contextWindow: 65536, maxTokens: 8192 },
+    { id: 'deepseek-ai/DeepSeek-R1', name: 'DeepSeek R1 (SiliconFlow)', description: 'SiliconFlow 深度推理模型', contextWindow: 65536, maxTokens: 8192 },
+    { id: 'Qwen/Qwen2.5-Coder-32B-Instruct', name: 'Qwen 2.5 Coder 32B', description: '程式碼專精開源模型', contextWindow: 131072, maxTokens: 8192 },
+  ],
+  together: [
+    { id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo', name: 'Llama 3.3 70B Instruct Turbo', description: 'Together AI 高速主力模型', contextWindow: 131072, maxTokens: 8192 },
+    { id: 'deepseek-ai/DeepSeek-V3', name: 'DeepSeek V3 (Together)', description: 'DeepSeek V3 雲端推論', contextWindow: 65536, maxTokens: 8192 },
+    { id: 'deepseek-ai/DeepSeek-R1', name: 'DeepSeek R1 (Together)', description: 'DeepSeek R1 深度推理', contextWindow: 65536, maxTokens: 8192 },
+  ],
+  mistral: [
+    { id: 'codestral-latest', name: 'Codestral Latest', description: 'Mistral 官方程式碼生成與 Agent 專精模型', contextWindow: 256000, maxTokens: 8192 },
+    { id: 'mistral-large-latest', name: 'Mistral Large Latest', description: 'Mistral 旗艦通用推理模型', contextWindow: 128000, maxTokens: 8192 },
+  ],
+  fireworks: [
+    { id: 'accounts/fireworks/models/deepseek-v3', name: 'DeepSeek V3 (Fireworks)', description: 'Fireworks 超低延遲推論', contextWindow: 131072, maxTokens: 8192 },
+    { id: 'accounts/fireworks/models/deepseek-r1', name: 'DeepSeek R1 (Fireworks)', description: 'Fireworks 深度推理模型', contextWindow: 131072, maxTokens: 8192 },
+  ],
+  cerebras: [
+    { id: 'llama-3.3-70b', name: 'Llama 3.3 70B (Cerebras)', description: 'Cerebras 晶圓級極速推論', contextWindow: 128000, maxTokens: 8192 },
+    { id: 'qwen-3-32b', name: 'Qwen 3 32B (Cerebras)', description: 'Cerebras 高速代碼與推理模型', contextWindow: 128000, maxTokens: 8192 },
+  ],
+};
+
+const PRESET_DEFAULT_BASE_URLS: Record<string, string> = {
+  openai: 'https://api.openai.com/v1',
+  openrouter: process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
+  opencode: process.env.OPENCODE_BASE_URL || 'https://opencode.ai/zen/v1',
+  deepseek: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com/v1',
+  groq: process.env.GROQ_BASE_URL || 'https://api.groq.com/openai/v1',
+  xai: process.env.XAI_BASE_URL || 'https://api.x.ai/v1',
+  siliconflow: process.env.SILICONFLOW_BASE_URL || 'https://api.siliconflow.cn/v1',
+  together: process.env.TOGETHER_BASE_URL || 'https://api.together.xyz/v1',
+  mistral: process.env.MISTRAL_BASE_URL || 'https://api.mistral.ai/v1',
+  fireworks: process.env.FIREWORKS_BASE_URL || 'https://api.fireworks.ai/inference/v1',
+  cerebras: process.env.CEREBRAS_BASE_URL || 'https://api.cerebras.ai/v1',
+  lmstudio: 'http://localhost:1234/v1',
+  vllm: 'http://localhost:8000/v1',
+  custom: process.env.CUSTOM_BASE_URL || 'http://localhost:8000/v1',
+};
+
 export class ModelService {
   /**
    * Queries the provider's /models endpoint to retrieve all live available models.
@@ -204,75 +261,18 @@ export class ModelService {
         );
       }
 
-      // 2. OpenAI / OpenRouter / OpenCode / Custom OpenAI-compatible Gateway
-      if (provider === 'openai' || provider === 'custom' || provider === 'openrouter' || provider === 'opencode') {
-        let defaultBaseUrl = 'https://api.openai.com/v1';
-        let defaultKey = process.env.OPENAI_API_KEY;
-
-        if (provider === 'custom') {
-          defaultBaseUrl = process.env.CUSTOM_BASE_URL || 'http://localhost:8000/v1';
-          defaultKey = process.env.CUSTOM_API_KEY;
-        } else if (provider === 'openrouter') {
-          defaultBaseUrl = process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1';
-          defaultKey = process.env.OPENROUTER_API_KEY;
-        } else if (provider === 'opencode') {
-          defaultBaseUrl = process.env.OPENCODE_BASE_URL || 'https://opencode.ai/zen/v1';
-          defaultKey = process.env.OPENCODE_API_KEY;
-        }
-
-        const effectiveKey = apiKey || defaultKey || '';
-
-        let rawUrl = (baseURL || defaultBaseUrl).trim().replace(/\/+$/, '');
-        if (!rawUrl.startsWith('http://') && !rawUrl.startsWith('https://')) {
-          rawUrl = rawUrl.includes('localhost') || rawUrl.includes('127.0.0.1')
-            ? `http://${rawUrl}`
-            : `https://${rawUrl}`;
-        }
-
-        const targetUrl = rawUrl.endsWith('/models')
-          ? rawUrl
-          : `${rawUrl}/models`;
-
-        try {
-          const res = await fetch(targetUrl, {
-            method: 'GET',
-            headers: {
-              ...(effectiveKey ? { authorization: `Bearer ${effectiveKey}` } : {}),
-              ...(provider === 'openrouter' ? { 'HTTP-Referer': 'https://harni.dev', 'X-Title': 'Harni' } : {}),
-              'content-type': 'application/json',
-            },
-            signal: AbortSignal.timeout(4000),
-          });
-
-          if (!res.ok) {
-            const errBody = await res.text();
-            console.warn(`[ModelService] ${provider} /models returned ${res.status}: ${errBody}`);
-            if (provider === 'openrouter') return OPENROUTER_OFFICIAL_MODELS;
-            if (provider === 'opencode') return OPENCODE_OFFICIAL_MODELS;
-            return [];
-          }
-
-          const json = (await res.json()) as any;
-          const models = this.parseOpenAIModelsResponse(json);
-          if (models.length > 0) return models;
-          if (provider === 'openrouter') return OPENROUTER_OFFICIAL_MODELS;
-          if (provider === 'opencode') return OPENCODE_OFFICIAL_MODELS;
-          return [];
-        } catch (fetchErr: any) {
-          console.info(`[ModelService] Unable to auto-discover /models from ${rawUrl} (${fetchErr.name || 'Timeout'}: ${fetchErr.message}). Manual Model ID input remains active.`);
-          if (provider === 'openrouter') return OPENROUTER_OFFICIAL_MODELS;
-          if (provider === 'opencode') return OPENCODE_OFFICIAL_MODELS;
-          return [];
-        }
-      }
-
-      // 3. Anthropic Official /v1/models
-      if (provider === 'anthropic') {
+      // 2. Anthropic Official or Anthropic-compatible /v1/models
+      if (provider === 'anthropic' || provider.startsWith('anthropic-')) {
         const effectiveKey = apiKey || process.env.ANTHROPIC_API_KEY || '';
         if (!effectiveKey) return [];
 
+        const rawAnthropicBase = (baseURL || 'https://api.anthropic.com/v1').trim().replace(/\/+$/, '');
+        const anthropicModelsUrl = rawAnthropicBase.endsWith('/models')
+          ? rawAnthropicBase
+          : `${rawAnthropicBase}/models`;
+
         try {
-          const res = await fetch('https://api.anthropic.com/v1/models', {
+          const res = await fetch(anthropicModelsUrl, {
             method: 'GET',
             headers: {
               'x-api-key': effectiveKey,
@@ -298,8 +298,8 @@ export class ModelService {
         return [];
       }
 
-      // 4. Ollama /api/tags or /v1/models
-      if (provider === 'ollama') {
+      // 3. Ollama /api/tags or /v1/models
+      if (provider === 'ollama' || provider.startsWith('ollama-')) {
         let effectiveUrl = (baseURL || 'http://localhost:11434').trim().replace(
           /\/+$/,
           '',
@@ -337,6 +337,53 @@ export class ModelService {
           }
         } catch {}
         return [];
+      }
+
+      // 4. OpenAI-compatible Gateway (OpenAI, OpenRouter, OpenCode, DeepSeek, Groq, xAI, Custom, or any dynamic provider ID)
+      const defaultBaseUrl =
+        PRESET_DEFAULT_BASE_URLS[provider] ||
+        process.env.CUSTOM_BASE_URL ||
+        'http://localhost:8000/v1';
+      const envKeyName = `${provider.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_API_KEY`;
+      const defaultKey = process.env[envKeyName];
+      const effectiveKey = apiKey || defaultKey || '';
+      const fallbackModels = PRESET_CURATED_MODELS[provider] || [];
+
+      let rawUrl = (baseURL || defaultBaseUrl).trim().replace(/\/+$/, '');
+      if (!rawUrl.startsWith('http://') && !rawUrl.startsWith('https://')) {
+        rawUrl = rawUrl.includes('localhost') || rawUrl.includes('127.0.0.1')
+          ? `http://${rawUrl}`
+          : `https://${rawUrl}`;
+      }
+
+      const targetUrl = rawUrl.endsWith('/models')
+        ? rawUrl
+        : `${rawUrl}/models`;
+
+      try {
+        const res = await fetch(targetUrl, {
+          method: 'GET',
+          headers: {
+            ...(effectiveKey ? { authorization: `Bearer ${effectiveKey}` } : {}),
+            ...(provider === 'openrouter' ? { 'HTTP-Referer': 'https://harni.dev', 'X-Title': 'Harni' } : {}),
+            'content-type': 'application/json',
+          },
+          signal: AbortSignal.timeout(4000),
+        });
+
+        if (!res.ok) {
+          const errBody = await res.text();
+          console.warn(`[ModelService] ${provider} /models returned ${res.status}: ${errBody}`);
+          return fallbackModels;
+        }
+
+        const json = (await res.json()) as any;
+        const models = this.parseOpenAIModelsResponse(json);
+        if (models.length > 0) return models;
+        return fallbackModels;
+      } catch (fetchErr: any) {
+        console.info(`[ModelService] Unable to auto-discover /models from ${rawUrl} (${fetchErr.name || 'Timeout'}: ${fetchErr.message}). Manual Model ID input remains active.`);
+        return fallbackModels;
       }
     } catch (err: any) {
       console.info(`[ModelService] Failed to query /models for ${provider}: ${err.message}`);

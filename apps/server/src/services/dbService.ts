@@ -573,8 +573,10 @@ export class DBService {
         return process.env.OPENCODE_API_KEY || null;
       case 'custom':
         return process.env.CUSTOM_API_KEY || null;
-      default:
-        return null;
+      default: {
+        const envKey = `${provider.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_API_KEY`;
+        return process.env[envKey] || null;
+      }
     }
   }
 
@@ -597,16 +599,24 @@ export class DBService {
   }
 
   /**
-   * Returns safe, masked status for all supported providers (no plaintext keys exposed)
+   * Returns safe, masked status for all supported and dynamically configured providers (no plaintext keys exposed)
    */
   public getAllCredentialsStatus(): Record<string, { configured: boolean; maskedKey?: string }> {
-    const supportedProviders = [
+    const baseProviders = [
       'cline', 'anthropic', 'anthropic-oauth', 'openai', 'openai-oauth', 'antigravity', 'ollama', 'openrouter', 'opencode', 'custom',
     ];
+    let storedProviders: string[] = [];
+    try {
+      const stmt = this.db.prepare('SELECT provider FROM credentials');
+      const rows = stmt.all() as Array<{ provider: string }>;
+      storedProviders = rows.map((r) => r.provider).filter(Boolean);
+    } catch {}
+
+    const allProviders = Array.from(new Set([...baseProviders, ...storedProviders]));
     const result: Record<string, { configured: boolean; maskedKey?: string }> = {};
 
-    for (const provider of supportedProviders) {
-      if (provider === 'ollama') {
+    for (const provider of allProviders) {
+      if (provider === 'ollama' || provider === 'lmstudio' || provider === 'vllm') {
         result[provider] = { configured: true, maskedKey: 'Local daemon (免金鑰)' };
         continue;
       }

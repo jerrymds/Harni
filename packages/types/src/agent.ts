@@ -21,9 +21,19 @@ export type AgentStatus =
 export type MessageRole = 'user' | 'assistant' | 'system' | 'tool';
 
 /**
- * Supported LLM Providers
+ * Underlying API wire protocol used by an LLM Provider
  */
-export type LLMProviderType =
+export type LLMProviderProtocol =
+  | 'openai-compatible'
+  | 'anthropic'
+  | 'ollama'
+  | 'antigravity'
+  | 'cline';
+
+/**
+ * Built-in LLM Provider identifiers
+ */
+export type BuiltinLLMProviderType =
   | 'cline'
   | 'anthropic'
   | 'openai'
@@ -32,6 +42,31 @@ export type LLMProviderType =
   | 'openrouter'
   | 'opencode'
   | 'custom';
+
+/**
+ * Supported LLM Providers (supports built-in providers as well as dynamic/custom provider IDs)
+ */
+export type LLMProviderType = BuiltinLLMProviderType | (string & {});
+
+/**
+ * Dynamic LLM Provider definition for the Provider Registry & Preset Marketplace
+ */
+export interface LLMProviderConfig {
+  id: string;
+  name: string;
+  icon: string;
+  description: string;
+  protocol: LLMProviderProtocol;
+  defaultBaseUrl: string;
+  defaultModel: string;
+  apiKeyPlaceholder?: string;
+  requiresApiKey?: boolean;
+  isBuiltin?: boolean;
+  enabled?: boolean;
+  badge?: string;
+  category?: 'official' | 'aggregator' | 'cloud' | 'local' | 'custom';
+  docUrl?: string;
+}
 
 /**
  * Google / Antigravity Authentication Status
@@ -117,12 +152,25 @@ export interface RateLimitInfo {
 }
 
 /**
+ * Attached file or pasted image payload
+ */
+export interface FileAttachment {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+  dataUrl?: string;
+  content?: string;
+}
+
+/**
  * Chat message within the task conversation history
  */
 export interface ChatMessage {
   id: string;
   role: MessageRole;
   content: string;
+  attachments?: FileAttachment[];
   name?: string;
   thinking?: string;
   toolCalls?: ToolCall[];

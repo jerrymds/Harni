@@ -18,6 +18,7 @@ import type {
   AgentStatus,
   AutoTestConfig,
   ChatMessage,
+  FileAttachment,
   CheckpointInfo,
   FileDiff,
   LLMProviderType,
@@ -311,6 +312,7 @@ export class AgentCoreEngine extends EventEmitter {
       thinkingDepth?: import('@harni/types').ThinkingDepth;
       resetContext?: boolean;
       contextFiles?: string[];
+      attachments?: FileAttachment[];
       customProvider?: BaseLLMProvider;
       workspaceRoot?: string;
       history?: ChatMessage[];
@@ -563,11 +565,23 @@ export class AgentCoreEngine extends EventEmitter {
     if (options.contextFiles && options.contextFiles.length > 0) {
       userMessageContent += `\n\n[Referenced files: ${options.contextFiles.join(', ')}]`;
     }
+    if (options.attachments && options.attachments.length > 0) {
+      for (const att of options.attachments) {
+        if (att.content) {
+          userMessageContent += `\n\n[Attached file: ${att.name}]\n\`\`\`\n${att.content}\n\`\`\``;
+        } else if (att.type.startsWith('image/')) {
+          userMessageContent += `\n\n[Attached image: ${att.name}]`;
+        } else {
+          userMessageContent += `\n\n[Attached file: ${att.name} (${att.size} bytes)]`;
+        }
+      }
+    }
 
     const userMessage: ChatMessage = {
       id: `msg_user_${Date.now()}`,
       role: 'user',
       content: userMessageContent,
+      attachments: options.attachments,
       timestamp: Date.now(),
     };
 

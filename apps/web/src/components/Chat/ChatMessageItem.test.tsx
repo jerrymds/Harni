@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { ChatMessageItem } from './ChatMessageItem.js';
 import type { ChatMessage } from '@harni/types';
 
@@ -84,5 +84,62 @@ describe('ChatMessageItem Component', () => {
     expect(screen.getByTestId('rate-limit-card')).toBeInTheDocument();
     expect(screen.getByText('HTTP 429')).toBeInTheDocument();
     expect(screen.getByText('RPM 超標 (Requests/min)')).toBeInTheDocument();
+  });
+
+  it('renders user message with image attachments and opens lightbox preview on click', () => {
+    const userMsgWithImage: ChatMessage = {
+      id: 'msg_user_img_1',
+      role: 'user',
+      content: '請分析這張圖的架構',
+      attachments: [
+        {
+          id: 'att_1',
+          name: 'architecture.png',
+          size: 15360,
+          type: 'image/png',
+          dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        },
+      ],
+      timestamp: Date.now(),
+    };
+
+    render(<ChatMessageItem msg={userMsgWithImage} />);
+    expect(screen.getByText('請分析這張圖的架構')).toBeInTheDocument();
+    
+    // Check image thumbnail is rendered
+    const imgThumbnail = screen.getByAltText('architecture.png');
+    expect(imgThumbnail).toBeInTheDocument();
+
+    // Click to open preview modal
+    fireEvent.click(imgThumbnail);
+    expect(screen.getByTitle('關閉預覽')).toBeInTheDocument();
+    expect(screen.getByAltText('預覽圖片')).toBeInTheDocument();
+
+    // Close preview modal
+    fireEvent.click(screen.getByTitle('關閉預覽'));
+    expect(screen.queryByTitle('關閉預覽')).not.toBeInTheDocument();
+  });
+
+  it('renders user message with document file attachments showing file name and size', () => {
+    const userMsgWithFile: ChatMessage = {
+      id: 'msg_user_file_1',
+      role: 'user',
+      content: '請審查此說明文檔',
+      attachments: [
+        {
+          id: 'att_2',
+          name: 'SPEC.md',
+          size: 2048,
+          type: 'text/markdown',
+          content: '# Spec content',
+        },
+      ],
+      timestamp: Date.now(),
+    };
+
+    render(<ChatMessageItem msg={userMsgWithFile} />);
+    expect(screen.getByText('SPEC.md')).toBeInTheDocument();
+    expect(screen.getByText('2.0 KB')).toBeInTheDocument();
+    expect(screen.getByText('請審查此說明文檔')).toBeInTheDocument();
   });
 });

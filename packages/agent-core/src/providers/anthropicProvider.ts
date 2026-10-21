@@ -51,7 +51,30 @@ export class AnthropicProvider extends BaseLLMProvider {
 
     for (const msg of messages) {
       if (msg.role === 'user') {
-        formattedMessages.push({ role: 'user', content: msg.content });
+        const imageAttachments = msg.attachments?.filter(
+          (a) => a.type.startsWith('image/') && a.dataUrl,
+        );
+        if (imageAttachments && imageAttachments.length > 0) {
+          const parts: Array<Record<string, unknown>> = [
+            { type: 'text', text: msg.content ?? '' },
+          ];
+          for (const img of imageAttachments) {
+            const match = img.dataUrl!.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+            if (match) {
+              parts.push({
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: match[1],
+                  data: match[2],
+                },
+              });
+            }
+          }
+          formattedMessages.push({ role: 'user', content: parts });
+        } else {
+          formattedMessages.push({ role: 'user', content: msg.content });
+        }
       } else if (msg.role === 'assistant') {
         const contentBlocks: Array<Record<string, unknown>> = [];
         if (msg.thinking) {

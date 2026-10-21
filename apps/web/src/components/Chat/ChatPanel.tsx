@@ -4,16 +4,25 @@ import {
   Bot,
   Brain,
   CornerDownLeft,
+  FileText,
   GitBranch,
   GitMerge,
   Layers,
+  Plus,
   RotateCcw,
   Sparkles,
   Square,
   Trash2,
+  X,
   Zap,
 } from 'lucide-react';
-import type { AgentMode, ChatMessage, LLMProviderType, ModelInfo, TokenUsage, ToolCallRequest } from '@harni/types';
+import type { AgentMode, ChatMessage, FileAttachment, LLMProviderType, ModelInfo, TokenUsage, ToolCallRequest } from '@harni/types';
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
 import { useAgentStore, useShallow } from '../../store/useAgentStore.js';
 import { resolveModelContextWindow, formatTokenCount } from '../../utils/modelContext.js';
 import { ApprovalCard } from './ApprovalCard.js';
@@ -272,6 +281,9 @@ export const ChatPanel: React.FC = () => {
   const latestCheckpoint = sessionCheckpoints[0];
 
   const [inputPrompt, setInputPrompt] = useState('');
+  const [attachments, setAttachments] = useState<FileAttachment[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -320,13 +332,118 @@ export const ChatPanel: React.FC = () => {
     };
   }, [messages.length, lastMsgContent, hasThinking, pendingApproval, status]);
 
+  const processFiles = useCallback((files: FileList | File[]) => {
+    const fileArray = Array.from(files);
+    for (const file of fileArray) {
+      if (file.type.startsWith('image/')) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const dataUrl = e.target?.result as string;
+          const newAtt: FileAttachment = {
+            id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+            name: file.name && file.name !== 'image.png'
+              ? file.name
+              : `貼上圖片_${new Date().toLocaleTimeString('zh-TW', { hour12: false }).replace(/:/g, '')}.png`,
+            size: file.size,
+            type: file.type || 'image/png',
+            dataUrl,
+          };
+          setAttachments((prev) => [...prev, newAtt]);
+        };
+        reader.readAsDataURL(file);
+      } else {
+        const isTextCandidate =
+          file.type.startsWith('text/') ||
+          /\.(txt|md|json|ts|tsx|js|jsx|css|html|yaml|yml|py|rs|go|c|cpp|h|java|sql|sh|env|log)$/i.test(file.name);
+
+        if (isTextCandidate && file.size < 1024 * 1024 * 2) {
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            const content = e.target?.result as string;
+            const newAtt: FileAttachment = {
+              id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+              name: file.name,
+              size: file.size,
+              type: file.type || 'text/plain',
+              content,
+            };
+            setAttachments((prev) => [...prev, newAtt]);
+          };
+          reader.readAsText(file);
+        } else {
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            const dataUrl = e.target?.result as string;
+            const newAtt: FileAttachment = {
+              id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+              name: file.name,
+              size: file.size,
+              type: file.type || 'application/octet-stream',
+              dataUrl,
+            };
+            setAttachments((prev) => [...prev, newAtt]);
+          };
+          reader.readAsDataURL(file);
+        }
+      }
+    }
+  }, []);
+
+  const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+
+    const imageFiles: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) imageFiles.push(file);
+      }
+    }
+
+    if (imageFiles.length > 0) {
+      processFiles(imageFiles);
+    }
+  }, [processFiles]);
+
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      processFiles(e.target.files);
+      e.target.value = '';
+    }
+  }, [processFiles]);
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      processFiles(e.dataTransfer.files);
+    }
+  }, [processFiles]);
+
   const handleSubmit = useCallback((e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!inputPrompt.trim() || isBusy) return;
+    if ((!inputPrompt.trim() && attachments.length === 0) || isBusy) return;
 
-    sendPrompt(inputPrompt);
+    sendPrompt(inputPrompt, undefined, attachments);
     setInputPrompt('');
-  }, [inputPrompt, isBusy, sendPrompt]);
+    setAttachments([]);
+  }, [inputPrompt, attachments, isBusy, sendPrompt]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -509,18 +626,78 @@ export const ChatPanel: React.FC = () => {
 
           <form
             onSubmit={handleSubmit}
-            className="flex flex-col rounded-2xl border border-ag-border bg-ag-panel shadow-soft p-3 focus-within:border-ag-primary focus-within:ring-2 focus-within:ring-ag-primaryLight transition-all duration-150"
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+            className={`flex flex-col rounded-2xl border bg-ag-panel shadow-soft p-3 transition-all duration-150 ${
+              isDragging
+                ? 'border-ag-primary ring-2 ring-ag-primary/30 bg-ag-primaryLight/20'
+                : 'border-ag-border focus-within:border-ag-primary focus-within:ring-2 focus-within:ring-ag-primaryLight'
+            }`}
           >
+            {/* Hidden file input for uploading files */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              onChange={handleFileSelect}
+              className="hidden"
+              data-testid="chat-file-input"
+            />
+
+            {/* Attached files and pasted images preview row */}
+            {attachments.length > 0 && (
+              <div className="flex items-center gap-2 pb-2.5 mb-1 overflow-x-auto custom-scrollbar border-b border-ag-border/50">
+                {attachments.map((att) => (
+                  <div
+                    key={att.id}
+                    className="relative group shrink-0 flex items-center space-x-2 rounded-xl border border-ag-border bg-ag-sidebar/70 px-2.5 py-1.5 text-xs shadow-xs hover:border-ag-primary/40 transition-all"
+                  >
+                    {att.type.startsWith('image/') && att.dataUrl ? (
+                      <div className="relative h-10 w-10 rounded-lg overflow-hidden border border-ag-border shrink-0 bg-ag-void">
+                        <img
+                          src={att.dataUrl}
+                          alt={att.name}
+                          className="h-full w-full object-cover"
+                        />
+                      </div>
+                    ) : (
+                      <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-ag-panel border border-ag-border shrink-0 text-ag-primary">
+                        <FileText className="h-4 w-4" />
+                      </div>
+                    )}
+                    <div className="flex flex-col max-w-[140px] pr-1.5">
+                      <span className="text-[11.5px] font-medium text-ag-textPrimary truncate" title={att.name}>
+                        {att.name}
+                      </span>
+                      <span className="text-[10px] text-ag-textMuted font-mono">
+                        {formatFileSize(att.size)}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeAttachment(att.id)}
+                      className="flex h-5 w-5 items-center justify-center rounded-full bg-ag-panel hover:bg-rose-500 hover:text-white text-ag-textMuted border border-ag-border transition-all cursor-pointer shadow-2xs"
+                      title="移除附件"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <textarea
               ref={textareaRef}
               rows={3}
               value={inputPrompt}
               onChange={(e) => setInputPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
+              onPaste={handlePaste}
               placeholder={
                 isBusy
                   ? 'Agent 正在推理或執行工具中...'
-                  : '輸入指令、代碼重構要求或問題 (Enter 發送，Shift+Enter 換行)...'
+                  : '輸入指令、代碼重構要求或問題 (可貼上剪貼簿圖片，Enter 發送，Shift+Enter 換行)...'
               }
               disabled={isBusy}
               className="w-full resize-none bg-transparent p-2 text-sm text-ag-textPrimary placeholder-slate-400 outline-none disabled:opacity-40 font-sans leading-relaxed"
@@ -528,6 +705,20 @@ export const ChatPanel: React.FC = () => {
 
             <div className="flex items-center justify-between pt-2 border-t border-ag-border/60 gap-3">
               <div className="flex items-center flex-wrap gap-x-2.5 gap-y-1.5 text-[11px] text-ag-textMuted font-mono min-w-0">
+                {/* Plus button to upload file */}
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isBusy}
+                  className="flex items-center justify-center h-6 w-6 rounded-lg border border-ag-border bg-ag-sidebar/60 text-ag-textSecondary hover:text-ag-primary hover:border-ag-primary/50 hover:bg-ag-primaryLight transition-all cursor-pointer shrink-0 shadow-xs disabled:opacity-40"
+                  title="上傳檔案或圖片 (可選多檔案，支援圖片與代碼文檔)"
+                  aria-label="上傳檔案"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
+
+                <span className="text-ag-border shrink-0">•</span>
+
                 {/* Skill Dropdown Menu */}
                 <div className="shrink-0">
                   <SkillDropdown
@@ -613,7 +804,7 @@ export const ChatPanel: React.FC = () => {
 
                 <button
                   type="submit"
-                  disabled={isBusy || !inputPrompt.trim()}
+                  disabled={isBusy || (!inputPrompt.trim() && attachments.length === 0)}
                   className="flex items-center space-x-2 rounded-xl bg-ag-primary px-5 py-2 text-xs font-semibold text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed shadow-soft transition-all duration-150 active:scale-98 cursor-pointer"
                 >
                   <span>發送</span>

@@ -211,6 +211,7 @@ export class WebSocketHandler {
         const {
           sessionId,
           prompt,
+          attachments,
           mode,
           provider,
           model,
@@ -315,6 +316,7 @@ export class WebSocketHandler {
         this.engine
           .startTask(prompt, {
             sessionId,
+            attachments,
             mode,
             provider,
             model: effectiveModel,

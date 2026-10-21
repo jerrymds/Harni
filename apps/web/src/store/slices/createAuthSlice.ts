@@ -341,12 +341,21 @@ export const createAuthSlice: StateCreator<AgentStoreState, [], [], AuthSlice> =
         let loadedUrls: Record<string, string> = { ...get().providerBaseUrls };
         let loadedContextWindows: Record<string, number> = { ...get().modelContextWindows };
         let loadedGlobalContextWindow: number | null = get().contextWindow;
+        let loadedCustomProviders = get().customProviders;
 
         if (settings && typeof settings === 'object') {
           for (const [k, v] of Object.entries(settings)) {
             if (k.startsWith('base_url_') && typeof v === 'string') {
               const p = k.replace('base_url_', '');
               loadedUrls[p] = v;
+            } else if (k === 'custom_providers' && typeof v === 'string') {
+              try {
+                const parsed = JSON.parse(v);
+                if (Array.isArray(parsed)) {
+                  loadedCustomProviders = parsed;
+                  localStorage.setItem('cline_web_custom_providers', v);
+                }
+              } catch {}
             } else if (k === 'context_window' && typeof v === 'string') {
               const parsed = parseInt(v, 10);
               if (Number.isFinite(parsed) && parsed > 0) {
@@ -366,12 +375,14 @@ export const createAuthSlice: StateCreator<AgentStoreState, [], [], AuthSlice> =
           set({
             credentials,
             providerBaseUrls: loadedUrls,
+            customProviders: loadedCustomProviders,
             contextWindow: loadedGlobalContextWindow,
             modelContextWindows: loadedContextWindows,
           });
         } else {
           set({
             providerBaseUrls: loadedUrls,
+            customProviders: loadedCustomProviders,
             contextWindow: loadedGlobalContextWindow,
             modelContextWindows: loadedContextWindows,
           });

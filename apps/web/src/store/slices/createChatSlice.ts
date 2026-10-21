@@ -41,7 +41,7 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
   isLoadingModels: false,
   subagents: {},
 
-  sendPrompt: (prompt, contextFiles) => {
+  sendPrompt: (prompt, contextFiles, attachments) => {
     const {
       ws,
       selectedMode,
@@ -73,6 +73,7 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
       id: `msg_user_${Date.now()}`,
       role: 'user',
       content: prompt,
+      attachments: attachments && attachments.length > 0 ? attachments : undefined,
       timestamp: Date.now(),
     };
 
@@ -83,7 +84,7 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
       if (s.id === currentSessionId) {
         return {
           ...s,
-          title: s.messageCount === 0 ? prompt.slice(0, 26) + (prompt.length > 26 ? '...' : '') : s.title,
+          title: s.messageCount === 0 ? (prompt.trim() ? prompt.slice(0, 26) + (prompt.length > 26 ? '...' : '') : (attachments?.[0]?.name || '新對話')) : s.title,
           messageCount: s.messageCount + 1,
           mode: selectedMode,
           provider: selectedProvider,
@@ -120,11 +121,17 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
       payload: {
         sessionId: currentSessionId,
         prompt,
+        attachments: attachments && attachments.length > 0 ? attachments : undefined,
         mode: selectedMode,
         provider: selectedProvider,
         model: selectedModel || undefined,
         apiKey: selectedProvider === 'custom' ? (customApiKey || undefined) : undefined,
-        baseURL: (selectedProvider === 'custom' ? customBaseUrl : get().providerBaseUrls[selectedProvider]) || undefined,
+        baseURL:
+          (selectedProvider === 'custom'
+            ? customBaseUrl
+            : get().providerBaseUrls[selectedProvider] ||
+              (get().customProviders || []).find((p) => p.id === selectedProvider)?.defaultBaseUrl) ||
+          undefined,
         autoApprove: get().autoApprove,
         autoTest: get().autoTestEnabled,
         testCommand: get().autoTestCommand || undefined,
@@ -483,13 +490,16 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
 
   setProvider: (provider) => {
     localStorage.setItem('cline_web_provider', provider);
+    const customProv = (get().customProviders || []).find((p) => p.id === provider);
     const savedForProvider =
       localStorage.getItem(`cline_web_model_${provider}`) ||
+      customProv?.defaultModel ||
       PROVIDER_DEFAULT_MODELS[provider] ||
       '';
     localStorage.setItem('cline_web_model', savedForProvider);
 
-    const providerBaseUrl = get().providerBaseUrls[provider] || '';
+    const providerBaseUrl =
+      get().providerBaseUrls[provider] || customProv?.defaultBaseUrl || '';
 
     const { sessions, currentSessionId } = get();
     const updatedSessions = sessions.map((s) =>
@@ -534,6 +544,7 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
 
   fetchModels: async (providerParam, apiKeyParam, baseUrlParam) => {
     const provider = providerParam || get().selectedProvider;
+    const customProv = (get().customProviders || []).find((p) => p.id === provider);
     const apiKey =
       apiKeyParam !== undefined
         ? apiKeyParam
@@ -545,7 +556,7 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
         ? baseUrlParam
         : provider === 'custom'
           ? (get().customBaseUrl || undefined)
-          : (get().providerBaseUrls[provider] || undefined);
+          : (get().providerBaseUrls[provider] || customProv?.defaultBaseUrl || undefined);
 
     set({ isLoadingModels: true });
     try {

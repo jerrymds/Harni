@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, type Event } from 'electron';
+import { app, BrowserWindow, Menu, shell, type Event } from 'electron';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -56,6 +56,9 @@ function createWindow(url: string): void {
     },
   });
 
+  // 完全移除視窗頂部的應用程式選單列 (File, Edit, View, Window, Help)
+  mainWindow.removeMenu();
+
   // Open external links (OAuth flows, docs) in the default browser
   mainWindow.webContents.setWindowOpenHandler(({ url: target }: { url: string }) => {
     void shell.openExternal(target);
@@ -103,6 +106,8 @@ async function startBackend(): Promise<void> {
 
 app.whenReady().then(async () => {
   try {
+    // 全域關閉 Electron 預設選單列
+    Menu.setApplicationMenu(null);
     await startBackend();
     createWindow(`http://127.0.0.1:${SERVER_PORT}`);
   } catch (err) {

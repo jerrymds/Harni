@@ -34,10 +34,12 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import type { AgentSkill, LLMProviderType, ModelInfo } from '@harni/types';
+import type { AgentSkill, LLMProviderConfig, LLMProviderType, ModelInfo } from '@harni/types';
 import { useAgentStore, useShallow } from '../../store/useAgentStore.js';
 import { formatTokenCount, resolveModelContextWindow } from '../../utils/modelContext.js';
 import { McpManager } from './Mcp/McpManager.js';
+import { ProviderModal } from './Models/ProviderModal.js';
+import { getProviderConfig, resolveAllProviders } from './Models/providerRegistry.js';
 
 type SettingsTab = 'models' | 'tools' | 'skills' | 'mcp' | 'appearance';
 
@@ -64,6 +66,9 @@ export const SettingsModal: React.FC = () => {
     setCustomBaseUrl,
     customProviderName,
     setCustomProviderName,
+    customProviders,
+    upsertCustomProvider,
+    deleteCustomProvider,
     autoApprove,
     setAutoApprove,
     autoTestEnabled,
@@ -134,6 +139,9 @@ export const SettingsModal: React.FC = () => {
       setCustomBaseUrl: s.setCustomBaseUrl,
       customProviderName: s.customProviderName,
       setCustomProviderName: s.setCustomProviderName,
+      customProviders: s.customProviders,
+      upsertCustomProvider: s.upsertCustomProvider,
+      deleteCustomProvider: s.deleteCustomProvider,
       autoApprove: s.autoApprove,
       setAutoApprove: s.setAutoApprove,
       autoTestEnabled: s.autoTestEnabled,
@@ -196,6 +204,12 @@ export const SettingsModal: React.FC = () => {
   const [claudeError, setClaudeError] = useState<string | null>(null);
   const [openaiLoggingIn, setOpenaiLoggingIn] = useState(false);
   const [openaiError, setOpenaiError] = useState<string | null>(null);
+
+  // Provider Registry Modal State
+  const [providerSearchQuery, setProviderSearchQuery] = useState('');
+  const [isProviderModalOpen, setIsProviderModalOpen] = useState(false);
+  const [providerModalTab, setProviderModalTab] = useState<'presets' | 'custom'>('presets');
+  const [editingProviderConfig, setEditingProviderConfig] = useState<LLMProviderConfig | null>(null);
 
   // Form State
   const [customModelInput, setCustomModelInput] = useState(selectedModel);
@@ -301,17 +315,53 @@ export const SettingsModal: React.FC = () => {
   const parsedCustomContext = parseInt(contextInput.trim(), 10);
   const hasCustomContext = Number.isFinite(parsedCustomContext) && parsedCustomContext > 0;
 
+  const allProviders = resolveAllProviders(customProviders, providerNameInput || customProviderName);
+  const filteredProviders = allProviders.filter((p) => {
+    if (!providerSearchQuery.trim()) return true;
+    const q = providerSearchQuery.toLowerCase();
+    return (
+      p.name.toLowerCase().includes(q) ||
+      p.id.toLowerCase().includes(q) ||
+      p.description.toLowerCase().includes(q) ||
+      (p.badge && p.badge.toLowerCase().includes(q))
+    );
+  });
+  const activeProviderConfig = getProviderConfig(
+    selectedProvider,
+    customProviders,
+    providerNameInput || customProviderName,
+  );
+
+  const isProviderConfigured = (providerId: string): boolean => {
+    if (providerId === 'antigravity' || providerId === 'ollama' || providerId === 'lmstudio' || providerId === 'vllm') {
+      return true;
+    }
+    if (providerId === 'anthropic' && (anthropicAuthInfo?.authenticated || credentials['anthropic-oauth']?.configured)) {
+      return true;
+    }
+    if (providerId === 'openai' && (openaiAuthInfo?.authenticated || credentials['openai-oauth']?.configured)) {
+      return true;
+    }
+    return Boolean(credentials[providerId]?.configured);
+  };
+
   const handleProviderChange = (newProvider: LLMProviderType) => {
     setProvider(newProvider);
-    const targetBaseUrl = providerBaseUrls[newProvider] || '';
+    const latestState = useAgentStore.getState();
+    const targetConfig = getProviderConfig(newProvider, latestState.customProviders, providerNameInput || customProviderName);
+    const targetBaseUrl = latestState.providerBaseUrls[newProvider] || '';
     setBaseUrlInput(targetBaseUrl);
-    setApiKeyInput(credentials[newProvider]?.maskedKey || '');
+    setApiKeyInput(latestState.credentials[newProvider]?.maskedKey || '');
+    const nextModel = latestState.selectedModel || targetConfig.defaultModel || '';
+    setCustomModelInput(nextModel);
+    const existingCtx = nextModel ? latestState.modelContextWindows[nextModel] : undefined;
+    setContextInput(existingCtx ? String(existingCtx) : '');
 
     if (newProvider === 'anthropic') {
       fetchAnthropicAuthStatus();
     }
     if (newProvider === 'openai') fetchOpenAIAuthStatus();
-    fetchModels(newProvider, undefined, targetBaseUrl || undefined);
+    fetchModels(newProvider, undefined, targetBaseUrl || targetConfig.defaultBaseUrl || undefined);
   };
 
   const handleSelectModel = (modelId: string) => {
@@ -438,7 +488,7 @@ tools: execute_command, read_file, replace_file_content
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-xs p-4 select-none animate-in fade-in duration-200">
-      <div className="flex w-full max-w-3xl flex-col rounded-3xl border border-ag-border bg-ag-panel shadow-2xl overflow-hidden">
+      <div className="flex w-full max-w-4xl flex-col rounded-3xl border border-ag-border bg-ag-panel shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="flex h-14 items-center justify-between border-b border-ag-border px-6 bg-ag-sidebar">
           <div className="flex items-center space-x-2.5 text-sm font-semibold text-ag-textPrimary">
@@ -484,524 +534,600 @@ tools: execute_command, read_file, replace_file_content
         </div>
 
         {/* Tab Contents */}
-        <div className="max-h-[68vh] overflow-y-auto p-6 space-y-6 text-xs text-ag-textSecondary bg-ag-panel">
-          {/* ================= TAB 1: MODELS ================= */}
+        <div className="max-h-[70vh] overflow-y-auto p-6 space-y-6 text-xs text-ag-textSecondary bg-ag-panel">
+          {/* ================= TAB 1: MODELS (MASTER-DETAIL) ================= */}
           {activeTab === 'models' && (
-            <div className="space-y-6 animate-in fade-in duration-150">
-              {/* 1. Provider Selection */}
-              <div className="space-y-2.5">
-                <label className="flex items-center space-x-2 font-medium text-slate-800 text-[12.5px]">
-                  <Cpu className="h-4 w-4 text-ag-blue" />
-                  <span>大語言模型服務商 (LLM Provider)</span>
-                </label>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                  {[
-                    { id: 'antigravity', name: 'Google Antigravity', icon: '🌌', desc: 'Gemini 官方額度池' },
-                    { id: 'cline', name: 'Cline 官方 API', icon: '⚡', desc: 'api.cline.bot' },
-                    { id: 'anthropic', name: 'Anthropic Claude', icon: '🧠', desc: 'Official API' },
-                    { id: 'openai', name: 'OpenAI GPT', icon: '🤖', desc: 'api.openai.com' },
-                    { id: 'openrouter', name: 'OpenRouter', icon: '🌐', desc: 'openrouter.ai' },
-                    { id: 'opencode', name: 'OpenCode', icon: '💻', desc: 'opencode.ai/zen' },
-                    { id: 'ollama', name: 'Ollama 本地模型', icon: '🦙', desc: 'Local daemon' },
-                    {
-                      id: 'custom',
-                      name: providerNameInput || customProviderName || '自訂服務商',
-                      icon: '🛠️',
-                      desc: 'OpenAI 相容網關',
-                    },
-                  ].map((p) => (
-                    <button
-                      key={p.id}
-                      onClick={() => handleProviderChange(p.id as LLMProviderType)}
-                      className={`flex flex-col rounded-2xl border p-3 text-left transition-all cursor-pointer ${
-                        selectedProvider === p.id
-                          ? 'border-ag-blue bg-blue-50/80 text-blue-900 shadow-soft'
-                          : 'border-ag-border bg-white text-slate-600 hover:border-slate-300 hover:text-slate-800'
-                      }`}
-                    >
-                      <div className="flex items-center space-x-2">
-                        <span className="text-lg">{p.icon}</span>
-                        <span className="font-semibold text-slate-800 truncate">{p.name}</span>
-                      </div>
-                      <span className="font-mono text-[10px] text-slate-400 mt-1">{p.desc}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Custom Provider Name Input */}
-              {selectedProvider === 'custom' && (
-                <div className="space-y-1.5 p-3.5 border border-ag-blue/40 rounded-2xl bg-blue-50/40">
-                  <label className="flex items-center space-x-1.5 font-medium text-blue-900">
-                    <Tag className="h-3.5 w-3.5 text-ag-blue" />
-                    <span>自訂服務商名稱 (Custom Provider Name / Label)</span>
-                  </label>
-                  <input
-                    type="text"
-                    value={providerNameInput}
-                    onChange={(e) => setProviderNameInput(e.target.value)}
-                    placeholder="例如: Groq AI, vLLM, OpenRouter, 公司私有網關..."
-                    className="w-full rounded-xl border border-ag-border bg-white px-3.5 py-2.5 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft"
-                  />
-                </div>
-              )}
-
-              {/* 2. Provider Config: Google Auth for Antigravity, or Base URL & API Key for others */}
-              {selectedProvider === 'antigravity' ? (
-                <div className="space-y-4">
-                  {/* Antigravity Bridge URL */}
-                  <div className="rounded-2xl border border-ag-border bg-ag-panel p-4 space-y-2 shadow-soft">
-                    <div className="flex items-center space-x-2">
-                      <Globe className="h-4 w-4 text-ag-blue" />
-                      <span className="text-xs font-semibold text-slate-800">外部 Antigravity Bridge URL (選填)</span>
-                    </div>
-                    <p className="text-[11px] text-slate-500 leading-relaxed">
-                      若要使用自建的 Antigravity Bridge 服務，請在此填入其 URL。
-                    </p>
-                    <input
-                      type="text"
-                      value={baseUrlInput}
-                      onChange={(e) => setBaseUrlInput(e.target.value)}
-                      placeholder="例如: http://localhost:8000"
-                      className="w-full rounded-xl border border-ag-border bg-white px-3.5 py-2 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft"
-                    />
-                  </div>
-                </div>
-              ) : (
-                <div className="space-y-4">
-                  {selectedProvider === 'anthropic' && (
-                    <div className="rounded-2xl border border-orange-200 bg-gradient-to-r from-orange-50/80 via-amber-50/60 to-yellow-50/60 p-5 space-y-4 shadow-soft">
-                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                        <div className="flex items-start space-x-3.5">
-                          <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-white border border-orange-200 shadow-soft text-2xl">
-                            🧡
-                          </div>
-                          <div className="space-y-1.5">
-                            <div className="flex items-center space-x-2">
-                              <span className="font-semibold text-slate-900 text-sm">使用 Claude 訂閱登入 (Pro / Max)</span>
-                            {anthropicAuthInfo?.authenticated || credentials['anthropic-oauth']?.configured ? (
-                              <span className="inline-flex items-center space-x-1 rounded-full bg-emerald-100 text-emerald-800 px-2.5 py-0.5 font-medium text-[10.5px] border border-emerald-300">
-                                <Check className="h-3 w-3" />
-                                <span>已完成認證</span>
-                              </span>
-                            ) : (
-                              <span className="inline-flex items-center space-x-1 rounded-full bg-amber-100 text-amber-800 px-2.5 py-0.5 font-medium text-[10.5px] border border-amber-300">
-                                <AlertCircle className="h-3 w-3" />
-                                <span>尚未登入</span>
-                              </span>
-                            )}
-                          </div>
-                          <p className="text-[11.5px] text-slate-600 leading-relaxed max-w-lg">
-                            採 <strong>Claude Code 相容</strong> 的 Anthropic 官方 OAuth：以 claude.ai 帳號授權後，<strong>直接使用 Claude Pro / Max 訂閱額度</strong>驅動 Agent，無需 API Key。
-                          </p>
-                          {(anthropicAuthInfo?.email || credentials['anthropic-oauth']?.configured) && (
-                            <div className="flex items-center space-x-1.5 font-mono text-[11px] text-orange-900 font-medium pt-0.5">
-                              <ShieldCheck className="h-4 w-4 text-emerald-600 shrink-0" />
-                              <span>
-                                授權帳號：{anthropicAuthInfo?.email || credentials['anthropic-oauth']?.maskedKey || 'claude 訂閱帳號'}
-                                {anthropicAuthInfo?.plan ? `（${anthropicAuthInfo.plan}）` : ''}
-                              </span>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="flex sm:flex-col items-center sm:items-end justify-end gap-2 shrink-0">
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            setClaudeError(null);
-                            const ok = await startAnthropicLogin();
-                            setClaudeLoginStarted(ok);
-                            if (!ok) setClaudeError('無法開啟授權頁面');
-                          }}
-                          className="flex items-center space-x-2 rounded-xl bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-700 hover:to-amber-700 text-white px-4 py-2 text-xs font-semibold shadow-soft cursor-pointer transition-all"
-                        >
-                          <Key className="h-3.5 w-3.5" />
-                          <span>
-                            {anthropicAuthInfo?.authenticated || credentials['anthropic-oauth']?.configured
-                              ? '重新登入 Claude'
-                              : '使用 Claude 登入'}
-                          </span>
-                        </button>
-                        {(anthropicAuthInfo?.authenticated || credentials['anthropic-oauth']?.configured) && (
-                          <button
-                            type="button"
-                            onClick={() => logoutAnthropic()}
-                            className="text-[11px] text-slate-500 hover:text-rose-600 transition-colors cursor-pointer"
-                          >
-                            解除帳號綁定
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    {claudeLoginStarted && (
-                      <div className="space-y-2 rounded-xl border border-orange-200 bg-white/70 p-3">
-                        <p className="text-[11px] text-slate-600">
-                          在新分頁完成授權後，claude.ai 會顯示一段授權碼（<code className="font-mono">code#state</code>），複製整段貼到下方：
-                        </p>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="text"
-                            value={claudeCodeInput}
-                            onChange={(e) => setClaudeCodeInput(e.target.value)}
-                            placeholder="貼上授權碼 code#state..."
-                            className="flex-1 rounded-lg border border-ag-border bg-white px-3 py-2 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-orange-400"
-                          />
-                          <button
-                            type="button"
-                            disabled={claudeSubmitting || !claudeCodeInput.trim()}
-                            onClick={async () => {
-                              setClaudeSubmitting(true);
-                              setClaudeError(null);
-                              const r = await submitAnthropicCode(claudeCodeInput);
-                              setClaudeSubmitting(false);
-                              if (r.ok) {
-                                setClaudeCodeInput('');
-                                setClaudeLoginStarted(false);
-                              } else {
-                                setClaudeError(r.error || '交換失敗');
-                              }
-                            }}
-                            className="rounded-lg bg-orange-600 hover:bg-orange-700 text-white px-3 py-2 text-xs font-semibold shadow-soft cursor-pointer disabled:opacity-50"
-                          >
-                            {claudeSubmitting ? '驗證中...' : '完成登入'}
-                          </button>
-                        </div>
-                        {claudeError && (
-                          <p className="text-[10.5px] text-rose-600 flex items-center space-x-1">
-                            <AlertCircle className="h-3 w-3" />
-                            <span>{claudeError}</span>
-                          </p>
-                        )}
-                      </div>
-                    )}
-
-                    <div className="flex items-center space-x-1.5 text-[10.5px] text-slate-500 pt-1 border-t border-orange-200/60">
-                      <Lock className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                      <span>Access / Refresh Token 皆以 AES-256-GCM 加密儲存於本地端 SQLite，並自動續期。</span>
-                    </div>
-                  </div>
-                )}
-                {selectedProvider === 'openai' && (
-                  <div className="rounded-2xl border border-emerald-200 bg-gradient-to-r from-emerald-50/80 via-teal-50/60 to-cyan-50/60 p-5 space-y-4 shadow-soft">
-                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                      <div className="flex items-start space-x-3.5">
-                        <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-white border border-emerald-200 shadow-soft text-2xl">🤖</div>
-                        <div className="space-y-1.5">
-                          <div className="flex items-center space-x-2">
-                            <span className="font-semibold text-slate-900 text-sm">使用 OpenAI 訂閱登入 (Plus / Pro)</span>
-                            {openaiAuthInfo?.authenticated || credentials['openai-oauth']?.configured ? (
-                              <span className="inline-flex items-center space-x-1 rounded-full bg-emerald-100 text-emerald-800 px-2.5 py-0.5 font-medium text-[10.5px] border border-emerald-300"><Check className="h-3 w-3" /><span>已完成認證</span></span>
-                            ) : (
-                              <span className="inline-flex items-center space-x-1 rounded-full bg-amber-100 text-amber-800 px-2.5 py-0.5 font-medium text-[10.5px] border border-amber-300"><AlertCircle className="h-3 w-3" /><span>尚未登入</span></span>
-                            )}
-                          </div>
-                          <p className="text-[11.5px] text-slate-600 leading-relaxed max-w-lg">
-                            透過 <strong>Codex 相容的 OpenAI OAuth</strong> 登入 ChatGPT，使用 Plus / Pro 方案內含的 Codex 額度。這與下方 API Key 的獨立 API 計費不同。
-                          </p>
-                          {(openaiAuthInfo?.email || credentials['openai-oauth']?.configured) && (
-                            <div className="flex items-center space-x-1.5 font-mono text-[11px] text-emerald-900 font-medium pt-0.5">
-                              <ShieldCheck className="h-4 w-4 text-emerald-600 shrink-0" />
-                              <span>授權帳號：{openaiAuthInfo?.email || credentials['openai-oauth']?.maskedKey || 'OpenAI 訂閱帳號'}{openaiAuthInfo?.plan ? `（${openaiAuthInfo.plan}）` : ''}</span>
-                            </div>
-                          )}
-                          {openaiError && <p className="text-[10.5px] text-rose-600">{openaiError}</p>}
-                        </div>
-                      </div>
-                      <div className="flex sm:flex-col items-center sm:items-end justify-end gap-2 shrink-0">
-                        <button type="button" disabled={openaiLoggingIn} onClick={async () => {
-                          setOpenaiLoggingIn(true); setOpenaiError(null);
-                          const ok = await loginWithOpenAI();
-                          if (!ok) setOpenaiError('登入未完成，請重試並確認本機 1455 連接埠可用。');
-                          setOpenaiLoggingIn(false);
-                        }} className="flex items-center space-x-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white px-4 py-2 text-xs font-semibold shadow-soft cursor-pointer transition-all disabled:opacity-50">
-                          <Key className="h-3.5 w-3.5" /><span>{openaiLoggingIn ? '等待登入...' : openaiAuthInfo?.authenticated || credentials['openai-oauth']?.configured ? '重新登入 OpenAI' : '使用 OpenAI 登入'}</span>
-                        </button>
-                        {(openaiAuthInfo?.authenticated || credentials['openai-oauth']?.configured) && (
-                          <button type="button" onClick={async () => {
-                            setOpenaiError(null);
-                            try {
-                              await logoutOpenAI();
-                            } catch (err) {
-                              setOpenaiError(`解除綁定失敗：${err instanceof Error ? err.message : String(err)}`);
-                            }
-                          }} className="text-[11px] text-slate-500 hover:text-rose-600 transition-colors cursor-pointer">解除帳號綁定</button>
-                        )}
-                      </div>
-                    </div>
-                    <div className="flex items-center space-x-1.5 text-[10.5px] text-slate-500 pt-1 border-t border-emerald-200/60">
-                      <Lock className="h-3.5 w-3.5 text-slate-400 shrink-0" /><span>Access / Refresh Token 以 AES-256-GCM 加密儲存於本機 SQLite，並在到期前自動續期。</span>
-                    </div>
-                  </div>
-                )}
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <div className="space-y-1.5">
-                    <label className="flex items-center space-x-1.5 font-medium text-slate-800">
-                      <Globe className="h-3.5 w-3.5 text-ag-blue" />
-                      <span>API 端點 (Base URL)</span>
-                      {selectedProvider === 'custom' && (
-                        <span className="text-[10.5px] text-ag-blue font-normal">（必填）</span>
-                      )}
-                    </label>
-                    <input
-                      type="text"
-                      value={baseUrlInput}
-                      onChange={(e) => setBaseUrlInput(e.target.value)}
-                      placeholder={
-                        selectedProvider === 'cline'
-                          ? '預設: https://api.cline.bot/api/v1 (未自訂則留空)'
-                          : selectedProvider === 'anthropic'
-                            ? '預設: https://api.anthropic.com/v1 (未自訂則留空)'
-                            : selectedProvider === 'openai'
-                              ? '預設: https://api.openai.com/v1 (未自訂則留空)'
-                              : selectedProvider === 'openrouter'
-                                ? '預設: https://openrouter.ai/api/v1 (未自訂則留空)'
-                                : selectedProvider === 'opencode'
-                                  ? '預設: https://opencode.ai/zen/v1 (未自訂則留空)'
-                                  : selectedProvider === 'ollama'
-                                    ? '預設: http://localhost:11434 (未自訂則留空)'
-                                    : '例如: https://api.groq.com/openai/v1 或 http://localhost:8000/v1'
-                      }
-                      className="w-full rounded-xl border border-ag-border bg-white px-3.5 py-2.5 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft"
-                    />
-                  </div>
-
-                  <div className="space-y-1.5">
-                    <label className="flex items-center space-x-1.5 font-medium text-slate-800">
-                      <Key className="h-3.5 w-3.5 text-amber-500" />
-                      <span>API Key</span>
-                      {selectedProvider === 'custom' && (
-                        <span className="text-[10.5px] text-slate-400 font-normal">（若免密可留空）</span>
-                      )}
-                    </label>
-                    <div className="relative">
-                      <input
-                        type="text"
-                        value={apiKeyInput}
-                        onChange={(e) => setApiKeyInput(e.target.value)}
-                        placeholder={
-                          selectedProvider === 'custom'
-                            ? '自訂 API Key (如 sk-..., gsk-... 或本機留空)'
-                            : selectedProvider === 'openrouter'
-                              ? '輸入 OpenRouter API Key (sk-or-v1-...)'
-                              : selectedProvider === 'opencode'
-                                ? '輸入 OpenCode Zen API Key'
-                                : '輸入 API Key (將使用 AES-256-GCM 安全加密儲存)'
-                        }
-                        className="w-full rounded-xl border border-ag-border bg-white px-3.5 py-2.5 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft pr-8"
-                      />
-                      {apiKeyInput && (
-                        <button
-                          type="button"
-                          onClick={() => setApiKeyInput('')}
-                          title="清空金鑰"
-                          className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-600 p-0.5 rounded cursor-pointer transition-colors"
-                        >
-                          <X className="h-3.5 w-3.5" />
-                        </button>
-                      )}
-                    </div>
-                    <div className="flex items-center space-x-1 text-[10px] text-slate-400">
-                      <Lock className="h-3 w-3 text-slate-400" />
-                      <span>AES-256-GCM 欄位加密儲存於後端 SQLite，不外洩至 localStorage 或 Git。</span>
-                    </div>
-                  </div>
-                </div>
-                </div>
-              )}
-
-              {/* 3. Live Model Selection & Search */}
-              <div className="space-y-2.5">
+            <div className="flex flex-col md:flex-row gap-5 animate-in fade-in duration-150">
+              {/* LEFT SIDEBAR: Provider List & Add/Marketplace Action */}
+              <div className="w-full md:w-64 shrink-0 flex flex-col space-y-3 border-b md:border-b-0 md:border-r border-ag-border pb-4 md:pb-0 md:pr-4">
                 <div className="flex items-center justify-between">
-                  <label className="flex items-center space-x-1.5 font-medium text-slate-800">
-                    <Layers className="h-3.5 w-3.5 text-ag-blue" />
-                    <span>可選模型清單 ({liveModels.length} 款可用)</span>
-                  </label>
+                  <div className="flex items-center space-x-1.5 font-semibold text-slate-800 text-xs">
+                    <Cpu className="h-3.5 w-3.5 text-ag-blue" />
+                    <span>模型服務商 ({allProviders.length})</span>
+                  </div>
                   <button
-                    onClick={handleRefreshModels}
-                    disabled={isLoadingModels}
-                    className="flex items-center space-x-1.5 text-xs text-ag-blue hover:text-blue-700 disabled:opacity-50 transition-colors cursor-pointer"
+                    type="button"
+                    onClick={() => {
+                      setEditingProviderConfig(null);
+                      setProviderModalTab('presets');
+                      setIsProviderModalOpen(true);
+                    }}
+                    className="flex items-center space-x-1 rounded-xl bg-ag-primary px-2.5 py-1 text-[11px] font-semibold text-white hover:opacity-90 shadow-soft transition-all cursor-pointer"
                   >
-                    <RefreshCw className={`h-3 w-3 ${isLoadingModels ? 'animate-spin' : ''}`} />
-                    <span>從 API 重新整理</span>
+                    <Plus className="h-3 w-3" />
+                    <span>新增 / 範本</span>
                   </button>
                 </div>
 
-                {/* Search filter input */}
+                {/* Provider Search Input */}
                 <div className="relative">
-                  <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                  <Search className="absolute left-2.5 top-2 h-3.5 w-3.5 text-slate-400" />
                   <input
                     type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="搜尋模型名稱或 Model ID (例如: deepseek, kimi, glm, qwen, llama)..."
-                    className="w-full rounded-xl border border-ag-border bg-white pl-9 pr-3.5 py-2 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft"
+                    value={providerSearchQuery}
+                    onChange={(e) => setProviderSearchQuery(e.target.value)}
+                    placeholder="篩選服務商..."
+                    className="w-full rounded-xl border border-ag-border bg-white pl-8 pr-2.5 py-1.5 text-[11px] text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft"
                   />
                 </div>
 
-                {/* Models list */}
-                {filteredModels.length > 0 ? (
-                  <div className="space-y-3 max-h-52 overflow-y-auto p-1.5 border border-ag-border rounded-2xl bg-ag-sidebar/30 custom-scrollbar">
-                    {selectedProvider === 'cline' ? (
-                      <div>
-                        <div className="px-2 py-1 text-[11px] font-semibold text-amber-800 flex items-center space-x-1">
-                          <Sparkles className="h-3 w-3 text-amber-500" />
-                          <span>Cline 官方推薦模型 ({filteredModels.length} 款 Cline Pass)</span>
+                {/* Scrollable Provider List */}
+                <div className="space-y-1.5 max-h-[420px] overflow-y-auto pr-0.5 custom-scrollbar">
+                  {filteredProviders.map((p) => {
+                    const isSelected = selectedProvider === p.id;
+                    const configured = isProviderConfigured(p.id);
+                    return (
+                      <button
+                        key={p.id}
+                        type="button"
+                        onClick={() => handleProviderChange(p.id as LLMProviderType)}
+                        className={`w-full flex items-center justify-between rounded-2xl border px-3 py-2.5 text-left transition-all cursor-pointer group ${
+                          isSelected
+                            ? 'border-ag-blue bg-blue-50/90 text-blue-950 shadow-soft'
+                            : 'border-ag-border bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50/70'
+                        }`}
+                      >
+                        <div className="flex items-center space-x-2.5 min-w-0">
+                          <span className="text-base shrink-0">{p.icon}</span>
+                          <div className="min-w-0">
+                            <div className="flex items-center space-x-1.5">
+                              <span className="font-semibold text-slate-800 truncate text-xs">
+                                {p.name}
+                              </span>
+                            </div>
+                            <div className="flex items-center space-x-1.5 mt-0.5">
+                              {p.badge && (
+                                <span
+                                  className={`rounded px-1 py-0.2 text-[9px] font-medium ${
+                                    isSelected
+                                      ? 'bg-blue-100/90 text-blue-800'
+                                      : 'bg-slate-100 text-slate-500'
+                                  }`}
+                                >
+                                  {p.badge}
+                                </span>
+                              )}
+                              {!p.isBuiltin && (
+                                <span className="font-mono text-[9px] text-ag-blue">擴充</span>
+                              )}
+                            </div>
+                          </div>
                         </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-1">
-                          {filteredModels.map((model) => (
-                            <button
-                              key={model.id}
-                              onClick={() => handleSelectModel(model.id)}
-                              className={`flex flex-col rounded-xl border p-2.5 text-left transition-all cursor-pointer ${
-                                customModelInput === model.id
-                                  ? 'border-ag-blue bg-blue-50/80 text-blue-900 shadow-soft'
-                                  : 'border-ag-border bg-white text-slate-700 hover:border-slate-300 hover:text-slate-900'
-                              }`}
-                            >
-                              <span className="font-semibold text-slate-800 truncate">{model.name || model.id}</span>
-                              <span className="font-mono text-[10px] text-amber-700 truncate">{model.id}</span>
-                            </button>
-                          ))}
+
+                        <div className="flex items-center space-x-1.5 shrink-0 ml-2">
+                          <span
+                            title={configured ? '已設定憑證或免密就緒' : '尚未設定金鑰'}
+                            className={`h-2 w-2 rounded-full ${
+                              configured ? 'bg-emerald-500' : 'bg-slate-300'
+                            }`}
+                          />
                         </div>
-                      </div>
-                    ) : (
-                      <div>
-                        <div className="px-2 py-1 text-[11px] font-semibold text-slate-600 flex items-center space-x-1">
-                          <Layers className="h-3 w-3 text-ag-blue" />
-                          <span>可用模型 ({filteredModels.length} 款)</span>
-                        </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-1">
-                          {filteredModels.slice(0, 50).map((model) => (
-                            <button
-                              key={model.id}
-                              onClick={() => handleSelectModel(model.id)}
-                              className={`flex flex-col rounded-xl border p-2 text-left transition-all cursor-pointer ${
-                                customModelInput === model.id
-                                  ? 'border-ag-blue bg-blue-50/80 text-blue-900 shadow-soft'
-                                  : 'border-ag-border bg-white text-slate-700 hover:border-slate-300 hover:text-slate-900'
-                              }`}
-                            >
-                              <span className="font-semibold text-slate-800 truncate text-xs">{model.name || model.id}</span>
-                              <span className="font-mono text-[9.5px] text-slate-400 truncate">{model.id}</span>
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="rounded-2xl border border-dashed border-ag-border bg-ag-sidebar/20 p-4 text-center text-slate-500">
-                    {isLoadingModels ? (
-                      <div className="flex items-center justify-center space-x-2 text-ag-blue">
-                        <RefreshCw className="h-4 w-4 animate-spin" />
-                        <span>正在請求 /models 端點獲取即時模型清單...</span>
-                      </div>
-                    ) : (
-                      <p>尚未從 API 取得模型清單，可直接在下方填入自訂 Model ID。</p>
-                    )}
-                  </div>
-                )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Bottom Quick Marketplace CTA */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingProviderConfig(null);
+                    setProviderModalTab('presets');
+                    setIsProviderModalOpen(true);
+                  }}
+                  className="w-full flex items-center justify-center space-x-1.5 rounded-2xl border border-dashed border-ag-blue/50 bg-blue-50/30 hover:bg-blue-50/70 py-2 text-[11px] font-medium text-ag-blue transition-colors cursor-pointer"
+                >
+                  <Sparkles className="h-3.5 w-3.5" />
+                  <span>瀏覽熱門 Provider 範本市集</span>
+                </button>
               </div>
 
-              {/* 4. Selected Model & Context Window Configuration */}
-              <div className="space-y-3.5">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  {/* Model ID */}
-                  <div className="space-y-1.5">
-                    <label className="flex items-center space-x-1.5 font-medium text-slate-800 text-[12.5px]">
-                      <Sparkles className="h-3.5 w-3.5 text-amber-500" />
-                      <span>當前選擇 / 自訂模型 ID (Model ID)</span>
+              {/* RIGHT DETAIL PANEL: Selected Provider Credentials, Endpoint & Models */}
+              <div className="flex-1 min-w-0 space-y-5">
+                {/* 1. Selected Provider Header Banner */}
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-2xl border border-ag-border bg-ag-sidebar/40 p-3.5 shadow-soft">
+                  <div className="flex items-center space-x-3 min-w-0">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-ag-border bg-white text-xl shadow-soft">
+                      {activeProviderConfig.icon}
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center flex-wrap gap-2">
+                        <span className="font-bold text-slate-900 text-sm truncate">
+                          {activeProviderConfig.name}
+                        </span>
+                        <span className="rounded-full bg-blue-50 border border-blue-200 px-2 py-0.5 font-mono text-[10px] font-medium text-blue-700">
+                          {activeProviderConfig.protocol === 'openai-compatible'
+                            ? 'OpenAI 相容協定'
+                            : activeProviderConfig.protocol === 'anthropic'
+                              ? 'Anthropic 協定'
+                              : activeProviderConfig.protocol === 'ollama'
+                                ? 'Ollama 協定'
+                                : activeProviderConfig.protocol === 'cline'
+                                  ? 'Cline Pass API'
+                                  : 'Antigravity Bridge'}
+                        </span>
+                        {isProviderConfigured(selectedProvider) && (
+                          <span className="inline-flex items-center space-x-1 rounded-full bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
+                            <Check className="h-2.5 w-2.5" />
+                            <span>已就緒</span>
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[11px] text-slate-500 truncate mt-0.5">
+                        {activeProviderConfig.description}
+                      </p>
+                    </div>
+                  </div>
+
+                  {!activeProviderConfig.isBuiltin && (
+                    <div className="flex items-center space-x-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingProviderConfig(activeProviderConfig);
+                          setProviderModalTab('custom');
+                          setIsProviderModalOpen(true);
+                        }}
+                        className="rounded-xl border border-ag-border bg-white px-2.5 py-1.5 text-[11px] font-medium text-slate-700 hover:bg-slate-50 cursor-pointer shadow-xs"
+                      >
+                        編輯
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => deleteCustomProvider(activeProviderConfig.id)}
+                        title="刪除此自訂服務商"
+                        className="rounded-xl border border-rose-200 bg-rose-50/70 p-1.5 text-rose-600 hover:bg-rose-100 cursor-pointer"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {/* Custom Provider Name Input (for built-in 'custom' slot) */}
+                {selectedProvider === 'custom' && (
+                  <div className="space-y-1.5 p-3.5 border border-ag-blue/40 rounded-2xl bg-blue-50/40">
+                    <label className="flex items-center space-x-1.5 font-medium text-blue-900">
+                      <Tag className="h-3.5 w-3.5 text-ag-blue" />
+                      <span>自訂服務商名稱 (Custom Provider Name / Label)</span>
                     </label>
                     <input
                       type="text"
-                      value={customModelInput}
-                      onChange={(e) => setCustomModelInput(e.target.value)}
-                      placeholder="例如: llama-3.3-70b-versatile, claude-3-5-sonnet-20241022..."
-                      className="w-full rounded-xl border border-ag-border bg-white px-3.5 py-2.5 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft"
+                      value={providerNameInput}
+                      onChange={(e) => setProviderNameInput(e.target.value)}
+                      placeholder="例如: Groq AI, vLLM, OpenRouter, 公司私有網關..."
+                      className="w-full rounded-xl border border-ag-border bg-white px-3.5 py-2 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft"
+                    />
+                  </div>
+                )}
+
+                {/* 2. Provider Config: Antigravity Bridge URL, or OAuth + Base URL & API Key */}
+                {selectedProvider === 'antigravity' ? (
+                  <div className="space-y-4">
+                    <div className="rounded-2xl border border-ag-border bg-ag-panel p-4 space-y-2 shadow-soft">
+                      <div className="flex items-center space-x-2">
+                        <Globe className="h-4 w-4 text-ag-blue" />
+                        <span className="text-xs font-semibold text-slate-800">外部 Antigravity Bridge URL (選填)</span>
+                      </div>
+                      <p className="text-[11px] text-slate-500 leading-relaxed">
+                        若要使用自建的 Antigravity Bridge 服務，請在此填入其 URL。
+                      </p>
+                      <input
+                        type="text"
+                        value={baseUrlInput}
+                        onChange={(e) => setBaseUrlInput(e.target.value)}
+                        placeholder="例如: http://localhost:8000"
+                        className="w-full rounded-xl border border-ag-border bg-white px-3.5 py-2 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft"
+                      />
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {selectedProvider === 'anthropic' && (
+                      <div className="rounded-2xl border border-orange-200 bg-gradient-to-r from-orange-50/80 via-amber-50/60 to-yellow-50/60 p-4 space-y-3.5 shadow-soft">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          <div className="flex items-start space-x-3">
+                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-white border border-orange-200 shadow-soft text-xl">
+                              🧡
+                            </div>
+                            <div className="space-y-1">
+                              <div className="flex items-center space-x-2">
+                                <span className="font-semibold text-slate-900 text-xs">使用 Claude 訂閱登入 (Pro / Max)</span>
+                                {anthropicAuthInfo?.authenticated || credentials['anthropic-oauth']?.configured ? (
+                                  <span className="inline-flex items-center space-x-1 rounded-full bg-emerald-100 text-emerald-800 px-2 py-0.5 font-medium text-[10px] border border-emerald-300">
+                                    <Check className="h-3 w-3" />
+                                    <span>已完成認證</span>
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center space-x-1 rounded-full bg-amber-100 text-amber-800 px-2 py-0.5 font-medium text-[10px] border border-amber-300">
+                                    <AlertCircle className="h-3 w-3" />
+                                    <span>尚未登入</span>
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[11px] text-slate-600 leading-relaxed">
+                                採 <strong>Claude Code 相容</strong> 的 Anthropic 官方 OAuth：以 claude.ai 帳號授權後，<strong>直接使用 Claude Pro / Max 訂閱額度</strong>驅動 Agent，無需 API Key。
+                              </p>
+                              {(anthropicAuthInfo?.email || credentials['anthropic-oauth']?.configured) && (
+                                <div className="flex items-center space-x-1.5 font-mono text-[10.5px] text-orange-900 font-medium pt-0.5">
+                                  <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+                                  <span>
+                                    授權帳號：{anthropicAuthInfo?.email || credentials['anthropic-oauth']?.maskedKey || 'claude 訂閱帳號'}
+                                    {anthropicAuthInfo?.plan ? `（${anthropicAuthInfo.plan}）` : ''}
+                                  </span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="flex sm:flex-col items-center sm:items-end justify-end gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                setClaudeError(null);
+                                const ok = await startAnthropicLogin();
+                                setClaudeLoginStarted(ok);
+                                if (!ok) setClaudeError('無法開啟授權頁面');
+                              }}
+                              className="flex items-center space-x-1.5 rounded-xl bg-gradient-to-r from-orange-600 to-amber-600 hover:from-orange-700 hover:to-amber-700 text-white px-3.5 py-1.5 text-xs font-semibold shadow-soft cursor-pointer transition-all"
+                            >
+                              <Key className="h-3.5 w-3.5" />
+                              <span>
+                                {anthropicAuthInfo?.authenticated || credentials['anthropic-oauth']?.configured
+                                  ? '重新登入 Claude'
+                                  : '使用 Claude 登入'}
+                              </span>
+                            </button>
+                            {(anthropicAuthInfo?.authenticated || credentials['anthropic-oauth']?.configured) && (
+                              <button
+                                type="button"
+                                onClick={() => logoutAnthropic()}
+                                className="text-[10.5px] text-slate-500 hover:text-rose-600 transition-colors cursor-pointer"
+                              >
+                                解除帳號綁定
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {claudeLoginStarted && (
+                          <div className="space-y-2 rounded-xl border border-orange-200 bg-white/70 p-3">
+                            <p className="text-[11px] text-slate-600">
+                              在新分頁完成授權後，claude.ai 會顯示一段授權碼（<code className="font-mono">code#state</code>），複製整段貼到下方：
+                            </p>
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="text"
+                                value={claudeCodeInput}
+                                onChange={(e) => setClaudeCodeInput(e.target.value)}
+                                placeholder="貼上授權碼 code#state..."
+                                className="flex-1 rounded-lg border border-ag-border bg-white px-3 py-1.5 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-orange-400"
+                              />
+                              <button
+                                type="button"
+                                disabled={claudeSubmitting || !claudeCodeInput.trim()}
+                                onClick={async () => {
+                                  setClaudeSubmitting(true);
+                                  setClaudeError(null);
+                                  const r = await submitAnthropicCode(claudeCodeInput);
+                                  setClaudeSubmitting(false);
+                                  if (r.ok) {
+                                    setClaudeCodeInput('');
+                                    setClaudeLoginStarted(false);
+                                  } else {
+                                    setClaudeError(r.error || '交換失敗');
+                                  }
+                                }}
+                                className="rounded-lg bg-orange-600 hover:bg-orange-700 text-white px-3 py-1.5 text-xs font-semibold shadow-soft cursor-pointer disabled:opacity-50"
+                              >
+                                {claudeSubmitting ? '驗證中...' : '完成登入'}
+                              </button>
+                            </div>
+                            {claudeError && (
+                              <p className="text-[10.5px] text-rose-600 flex items-center space-x-1">
+                                <AlertCircle className="h-3 w-3" />
+                                <span>{claudeError}</span>
+                              </p>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {selectedProvider === 'openai' && (
+                      <div className="rounded-2xl border border-emerald-200 bg-gradient-to-r from-emerald-50/80 via-teal-50/60 to-cyan-50/60 p-4 space-y-3.5 shadow-soft">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                          <div className="flex items-start space-x-3">
+                            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-white border border-emerald-200 shadow-soft text-xl">🤖</div>
+                            <div className="space-y-1">
+                              <div className="flex items-center space-x-2">
+                                <span className="font-semibold text-slate-900 text-xs">使用 OpenAI 訂閱登入 (Plus / Pro)</span>
+                                {openaiAuthInfo?.authenticated || credentials['openai-oauth']?.configured ? (
+                                  <span className="inline-flex items-center space-x-1 rounded-full bg-emerald-100 text-emerald-800 px-2 py-0.5 font-medium text-[10px] border border-emerald-300"><Check className="h-3 w-3" /><span>已完成認證</span></span>
+                                ) : (
+                                  <span className="inline-flex items-center space-x-1 rounded-full bg-amber-100 text-amber-800 px-2 py-0.5 font-medium text-[10px] border border-amber-300"><AlertCircle className="h-3 w-3" /><span>尚未登入</span></span>
+                                )}
+                              </div>
+                              <p className="text-[11px] text-slate-600 leading-relaxed">
+                                透過 <strong>Codex 相容的 OpenAI OAuth</strong> 登入 ChatGPT，使用 Plus / Pro 方案內含的 Codex 額度。
+                              </p>
+                              {(openaiAuthInfo?.email || credentials['openai-oauth']?.configured) && (
+                                <div className="flex items-center space-x-1.5 font-mono text-[10.5px] text-emerald-900 font-medium pt-0.5">
+                                  <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 shrink-0" />
+                                  <span>授權帳號：{openaiAuthInfo?.email || credentials['openai-oauth']?.maskedKey || 'OpenAI 訂閱帳號'}{openaiAuthInfo?.plan ? `（${openaiAuthInfo.plan}）` : ''}</span>
+                                </div>
+                              )}
+                              {openaiError && <p className="text-[10.5px] text-rose-600">{openaiError}</p>}
+                            </div>
+                          </div>
+                          <div className="flex sm:flex-col items-center sm:items-end justify-end gap-1.5 shrink-0">
+                            <button type="button" disabled={openaiLoggingIn} onClick={async () => {
+                              setOpenaiLoggingIn(true); setOpenaiError(null);
+                              const ok = await loginWithOpenAI();
+                              if (!ok) setOpenaiError('登入未完成，請重試並確認本機 1455 連接埠可用。');
+                              setOpenaiLoggingIn(false);
+                            }} className="flex items-center space-x-1.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white px-3.5 py-1.5 text-xs font-semibold shadow-soft cursor-pointer transition-all disabled:opacity-50">
+                              <Key className="h-3.5 w-3.5" /><span>{openaiLoggingIn ? '等待登入...' : openaiAuthInfo?.authenticated || credentials['openai-oauth']?.configured ? '重新登入 OpenAI' : '使用 OpenAI 登入'}</span>
+                            </button>
+                            {(openaiAuthInfo?.authenticated || credentials['openai-oauth']?.configured) && (
+                              <button type="button" onClick={async () => {
+                                setOpenaiError(null);
+                                try {
+                                  await logoutOpenAI();
+                                } catch (err) {
+                                  setOpenaiError(`解除綁定失敗：${err instanceof Error ? err.message : String(err)}`);
+                                }
+                              }} className="text-[10.5px] text-slate-500 hover:text-rose-600 transition-colors cursor-pointer">解除帳號綁定</button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                      <div className="space-y-1.5">
+                        <label className="flex items-center space-x-1.5 font-medium text-slate-800">
+                          <Globe className="h-3.5 w-3.5 text-ag-blue" />
+                          <span>API 端點 (Base URL)</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={baseUrlInput}
+                          onChange={(e) => setBaseUrlInput(e.target.value)}
+                          placeholder={`預設: ${activeProviderConfig.defaultBaseUrl} (未覆寫則留空)`}
+                          className="w-full rounded-xl border border-ag-border bg-white px-3.5 py-2 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft"
+                        />
+                      </div>
+
+                      <div className="space-y-1.5">
+                        <label className="flex items-center space-x-1.5 font-medium text-slate-800">
+                          <Key className="h-3.5 w-3.5 text-amber-500" />
+                          <span>API Key</span>
+                          {activeProviderConfig.requiresApiKey === false && (
+                            <span className="text-[10px] text-slate-400 font-normal">（若免密可留空）</span>
+                          )}
+                        </label>
+                        <div className="relative">
+                          <input
+                            type="text"
+                            value={apiKeyInput}
+                            onChange={(e) => setApiKeyInput(e.target.value)}
+                            placeholder={
+                              activeProviderConfig.apiKeyPlaceholder ||
+                              '輸入 API Key (將以 AES-256-GCM 加密儲存)'
+                            }
+                            className="w-full rounded-xl border border-ag-border bg-white px-3.5 py-2 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft pr-8"
+                          />
+                          {apiKeyInput && (
+                            <button
+                              type="button"
+                              onClick={() => setApiKeyInput('')}
+                              title="清空金鑰"
+                              className="absolute right-2.5 top-2 text-slate-400 hover:text-slate-600 p-0.5 rounded cursor-pointer transition-colors"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                        </div>
+                        <div className="flex items-center space-x-1 text-[10px] text-slate-400">
+                          <Lock className="h-3 w-3 text-slate-400" />
+                          <span>AES-256-GCM 加密儲存於後端 SQLite，不外洩至 localStorage。</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 3. Live Model Selection & Search */}
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <label className="flex items-center space-x-1.5 font-medium text-slate-800">
+                      <Layers className="h-3.5 w-3.5 text-ag-blue" />
+                      <span>可選模型清單 ({liveModels.length} 款可用)</span>
+                    </label>
+                    <button
+                      onClick={handleRefreshModels}
+                      disabled={isLoadingModels}
+                      className="flex items-center space-x-1.5 text-xs text-ag-blue hover:text-blue-700 disabled:opacity-50 transition-colors cursor-pointer"
+                    >
+                      <RefreshCw className={`h-3 w-3 ${isLoadingModels ? 'animate-spin' : ''}`} />
+                      <span>從 API 重新整理</span>
+                    </button>
+                  </div>
+
+                  {/* Search filter input */}
+                  <div className="relative">
+                    <Search className="absolute left-3 top-2.5 h-3.5 w-3.5 text-slate-400" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="搜尋模型名稱或 Model ID (例如: deepseek, kimi, glm, qwen, llama)..."
+                      className="w-full rounded-xl border border-ag-border bg-white pl-9 pr-3.5 py-2 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft"
                     />
                   </div>
 
-                  {/* Context Window / 上下文長度限制 */}
-                  <div className="space-y-1.5">
-                    <div className="flex items-center justify-between">
-                      <label className="flex items-center space-x-1.5 font-medium text-slate-800 text-[12.5px]">
-                        <Sliders className="h-3.5 w-3.5 text-ag-blue" />
-                        <span>上下文限制 (Context Window / Tokens)</span>
-                      </label>
-                      <span className="font-mono text-[10.5px]">
-                        {hasCustomContext ? (
-                          <span className="text-ag-blue font-semibold">
-                            已自訂: {formatTokenCount(parsedCustomContext)}
-                          </span>
-                        ) : (
-                          <span className="text-slate-400">
-                            預設: {formatTokenCount(defaultModelContext)}
-                          </span>
-                        )}
-                      </span>
+                  {/* Models list */}
+                  {filteredModels.length > 0 ? (
+                    <div className="space-y-2.5 max-h-48 overflow-y-auto p-2 border border-ag-border rounded-2xl bg-ag-sidebar/30 custom-scrollbar">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        {filteredModels.slice(0, 60).map((model) => (
+                          <button
+                            key={model.id}
+                            type="button"
+                            onClick={() => handleSelectModel(model.id)}
+                            className={`flex flex-col rounded-xl border p-2.5 text-left transition-all cursor-pointer ${
+                              customModelInput === model.id
+                                ? 'border-ag-blue bg-blue-50/80 text-blue-900 shadow-soft'
+                                : 'border-ag-border bg-white text-slate-700 hover:border-slate-300 hover:text-slate-900'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-1.5">
+                              <span className="font-semibold text-slate-800 truncate text-xs">
+                                {model.name || model.id}
+                              </span>
+                              {model.contextWindow && (
+                                <span className="shrink-0 rounded bg-slate-100 px-1.5 py-0.2 font-mono text-[9.5px] text-slate-500">
+                                  {formatTokenCount(model.contextWindow)}
+                                </span>
+                              )}
+                            </div>
+                            <span
+                              className={`font-mono text-[10px] truncate mt-0.5 ${
+                                selectedProvider === 'cline' ? 'text-amber-700' : 'text-slate-400'
+                              }`}
+                            >
+                              {model.id}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                    <div className="relative">
-                      <input
-                        type="number"
-                        min="1024"
-                        max="10000000"
-                        step="1024"
-                        value={contextInput}
-                        onChange={(e) => setContextInput(e.target.value)}
-                        placeholder={`預設: ${defaultModelContext.toLocaleString()} (${formatTokenCount(defaultModelContext)})`}
-                        className="w-full rounded-xl border border-ag-border bg-white px-3.5 py-2.5 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft pr-14"
-                      />
-                      {contextInput && (
-                        <button
-                          type="button"
-                          onClick={() => setContextInput('')}
-                          title="恢復為模型預設"
-                          className="absolute right-2.5 top-2.5 text-[11px] text-slate-400 hover:text-rose-600 transition-colors cursor-pointer"
-                        >
-                          重設
-                        </button>
+                  ) : (
+                    <div className="rounded-2xl border border-dashed border-ag-border bg-ag-sidebar/20 p-4 text-center text-slate-500">
+                      {isLoadingModels ? (
+                        <div className="flex items-center justify-center space-x-2 text-ag-blue">
+                          <RefreshCw className="h-4 w-4 animate-spin" />
+                          <span>正在請求 /models 端點獲取即時模型清單...</span>
+                        </div>
+                      ) : (
+                        <p>尚未從 API 取得模型清單，可直接在下方填入自訂 Model ID。</p>
                       )}
                     </div>
-                  </div>
+                  )}
                 </div>
 
-                {/* Quick Presets for Context Window */}
-                <div className="flex items-center flex-wrap gap-1.5 text-[11px]">
-                  <span className="text-slate-500 mr-1 flex items-center space-x-1">
-                    <Hash className="h-3 w-3 text-slate-400" />
-                    <span>Context 快捷設定:</span>
-                  </span>
-                  {[
-                    { label: `模型預設 (${formatTokenCount(defaultModelContext)})`, val: '' },
-                    { label: '32k', val: '32768' },
-                    { label: '64k', val: '65536' },
-                    { label: '128k', val: '128000' },
-                    { label: '200k', val: '200000' },
-                    { label: '1M', val: '1048576' },
-                    { label: '2M', val: '2097152' },
-                  ].map((preset) => (
-                    <button
-                      key={preset.label}
-                      type="button"
-                      onClick={() => setContextInput(preset.val)}
-                      className={`px-2 py-0.5 rounded-lg border text-[11px] font-mono transition-all cursor-pointer ${
-                        (preset.val === '' && !contextInput) || (preset.val && contextInput === preset.val)
-                          ? 'border-ag-blue bg-blue-50 text-blue-700 font-semibold shadow-xs'
-                          : 'border-ag-border bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
-                      }`}
-                    >
-                      {preset.label}
-                    </button>
-                  ))}
-                </div>
-                <div className="flex items-center space-x-1.5 text-[10.5px] text-slate-400">
-                  <ShieldCheck className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                  <span>
-                    設定此模型執行的 Context 上下文視窗上限（Tokens，留空則自動依所選模型標準規格解析）。當長對話或工具輸出超出限制時，系統將自動進行滑動視窗修剪保護以維護推理品質。
-                  </span>
+                {/* 4. Selected Model & Context Window Configuration */}
+                <div className="space-y-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                    {/* Model ID */}
+                    <div className="space-y-1.5">
+                      <label className="flex items-center space-x-1.5 font-medium text-slate-800 text-xs">
+                        <Sparkles className="h-3.5 w-3.5 text-amber-500" />
+                        <span>當前選擇 / 自訂模型 ID (Model ID)</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={customModelInput}
+                        onChange={(e) => setCustomModelInput(e.target.value)}
+                        placeholder={`例如: ${activeProviderConfig.defaultModel || 'llama-3.3-70b-versatile'}`}
+                        className="w-full rounded-xl border border-ag-border bg-white px-3.5 py-2 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft"
+                      />
+                    </div>
+
+                    {/* Context Window */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <label className="flex items-center space-x-1.5 font-medium text-slate-800 text-xs">
+                          <Sliders className="h-3.5 w-3.5 text-ag-blue" />
+                          <span>上下文限制 (Context Window)</span>
+                        </label>
+                        <span className="font-mono text-[10.5px]">
+                          {hasCustomContext ? (
+                            <span className="text-ag-blue font-semibold">
+                              已自訂: {formatTokenCount(parsedCustomContext)}
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">
+                              預設: {formatTokenCount(defaultModelContext)}
+                            </span>
+                          )}
+                        </span>
+                      </div>
+                      <div className="relative">
+                        <input
+                          type="number"
+                          min="1024"
+                          max="10000000"
+                          step="1024"
+                          value={contextInput}
+                          onChange={(e) => setContextInput(e.target.value)}
+                          placeholder={`預設: ${defaultModelContext.toLocaleString()} (${formatTokenCount(defaultModelContext)})`}
+                          className="w-full rounded-xl border border-ag-border bg-white px-3.5 py-2 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft pr-14"
+                        />
+                        {contextInput && (
+                          <button
+                            type="button"
+                            onClick={() => setContextInput('')}
+                            title="恢復為模型預設"
+                            className="absolute right-2.5 top-2 text-[11px] text-slate-400 hover:text-rose-600 transition-colors cursor-pointer"
+                          >
+                            重設
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Quick Presets for Context Window */}
+                  <div className="flex items-center flex-wrap gap-1.5 text-[11px]">
+                    <span className="text-slate-500 mr-1 flex items-center space-x-1">
+                      <Hash className="h-3 w-3 text-slate-400" />
+                      <span>Context 快捷設定:</span>
+                    </span>
+                    {[
+                      { label: `模型預設 (${formatTokenCount(defaultModelContext)})`, val: '' },
+                      { label: '32k', val: '32768' },
+                      { label: '64k', val: '65536' },
+                      { label: '128k', val: '128000' },
+                      { label: '200k', val: '200000' },
+                      { label: '1M', val: '1048576' },
+                      { label: '2M', val: '2097152' },
+                    ].map((preset) => (
+                      <button
+                        key={preset.label}
+                        type="button"
+                        onClick={() => setContextInput(preset.val)}
+                        className={`px-2 py-0.5 rounded-lg border text-[11px] font-mono transition-all cursor-pointer ${
+                          (preset.val === '' && !contextInput) || (preset.val && contextInput === preset.val)
+                            ? 'border-ag-blue bg-blue-50 text-blue-700 font-semibold shadow-xs'
+                            : 'border-ag-border bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
             </div>
@@ -1806,6 +1932,24 @@ tools: execute_command, read_file, replace_file_content
           </div>
         </div>
       )}
+
+      {/* Provider Marketplace & Custom Provider Modal */}
+      <ProviderModal
+        isOpen={isProviderModalOpen}
+        onClose={() => {
+          setIsProviderModalOpen(false);
+          setEditingProviderConfig(null);
+        }}
+        existingIds={allProviders.map((p) => p.id)}
+        initialEditProvider={editingProviderConfig}
+        initialTab={providerModalTab}
+        onSaveProvider={(provider) => {
+          upsertCustomProvider(provider);
+        }}
+        onSelectProvider={(providerId) => {
+          handleProviderChange(providerId);
+        }}
+      />
     </div>
   );
 };

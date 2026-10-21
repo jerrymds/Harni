@@ -22,6 +22,18 @@ describe('ProviderFactory & Providers', () => {
     expect(opencode.providerType).toBe('opencode');
     expect(opencode.defaultModel).toBe('claude-fable-5');
     expect(opencode.baseURL).toBe('https://opencode.ai/zen/v1');
+
+    const deepseek = ProviderFactory.create('deepseek');
+    expect(deepseek.providerType).toBe('deepseek');
+    expect(deepseek.defaultModel).toBe('deepseek-chat');
+    expect(deepseek.baseURL).toBe('https://api.deepseek.com/v1');
+
+    const dynamicCustom = ProviderFactory.create('company-vllm', {
+      baseURL: 'http://localhost:8080/v1',
+      model: 'qwen-coder-32b',
+    });
+    expect(dynamicCustom.providerType).toBe('company-vllm');
+    expect(dynamicCustom.getBaseURL()).toBe('http://localhost:8080/v1');
   });
 
   it('creates and executes MockProvider script', async () => {
