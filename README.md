@@ -1,5 +1,11 @@
 # Harni
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue.svg)](https://www.typescriptlang.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D20.0.0-green.svg)](https://nodejs.org/)
+[![pnpm](https://img.shields.io/badge/pnpm-%3E%3D9.0.0-orange.svg)](https://pnpm.io/)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
+
 > **純網頁版自主 Coding Agent 開發平台 (Web-based Autonomous Coding Agent IDE)**  
 > 獨立封裝自主編程核心引擎，搭配瀏覽器端現代化雙欄式 IDE 介面（Monaco Editor + Monaco Diff 比對器 + Xterm.js 終端機 + Agent 思考鏈面板）。  
 > 內建 **階層式多代理人編排 (Multi-Agent)**、**互動式決策釐清工具**、**自動測試驅動修復 (Auto Test-Driven Repair)**、**語法與 Linter 即時回饋**、**Git 快照與 Worktree 隔離沙盒**、**MCP (Model Context Protocol) 整合**、**多服務商官方 OAuth 2.0 認證**、**串流 DoS/OOM 防護** 與 **SQLite AES-256-GCM 加密保險箱**。
@@ -137,12 +143,18 @@ graph TD
 ### 1. 環境需求
 - **Node.js** >= 20.0.0
 - **pnpm** >= 9.0.0
+- **C/C++ 建置工具**（供原生終端模組 `node-pty` 編譯使用）：
+  - **Windows**：Visual Studio Build Tools (包含 C++ 套件) 或 Python
+  - **Linux / macOS**：`gcc` / `g++` / `make` / `python3`
 
-### 2. 安裝依賴
+### 2. 安裝與設定
 ```bash
 # 複製專案
-git clone https://github.com/<your-username>/harni.git
-cd harni
+git clone https://github.com/jerrymds/Harni.git
+cd Harni
+
+# 複製環境變數設定（可選，預設已配置為本機安全模式）
+cp .env.example .env
 
 # 安裝所有相依套件
 pnpm install
@@ -155,6 +167,22 @@ pnpm dev
 ```
 
 開啟瀏覽器造訪 **`http://localhost:3000`**，即可開始體驗專屬 Coding Agent IDE！
+
+> [!TIP]
+> **生產環境建置 (Production Build)**：
+> ```bash
+> pnpm build
+> ```
+
+---
+
+## 安全性須知 (Security Notice)
+
+> [!CAUTION]
+> Harni 具備終端指令執行 (PTY) 與本機檔案系統讀寫權限。
+> - **本機隔離**：預設僅監聽 `127.0.0.1`，僅供本機開發者存取。
+> - **公開網路防護**：若需對區域網路或公網開放（`HOST=0.0.0.0`），**系統強制要求在 `.env` 中設定強密碼 `AUTH_TOKEN`**，以嚴格防止未授權的遠端代碼執行 (RCE)。
+> - 完整安全政策請參閱 [SECURITY.md](SECURITY.md)。
 
 ---
 
@@ -228,5 +256,14 @@ pnpm lint
 
 ---
 
+## 社群參與與安全 (Community & Security)
+
+歡迎提交 Issue、建議或 Pull Request 共同完善 Harni！
+- **貢獻指引**：請詳閱 [CONTRIBUTING.md](CONTRIBUTING.md) 了解開發規範與 PR 流程。
+- **安全政策**：若發現安全漏洞，請參閱 [SECURITY.md](SECURITY.md) 進行負責任的私下通報。
+
+---
+
 ## License
-MIT
+
+本專案採用 [MIT License](LICENSE) 開源授權。

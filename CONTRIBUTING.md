@@ -17,8 +17,8 @@ Please treat all community members with respect, patience, and professional cour
 
 1. Fork and clone the repository:
    ```bash
-   git clone https://github.com/<your-username>/harni.git
-   cd harni
+   git clone https://github.com/jerrymds/Harni.git
+   cd Harni
    ```
 
 2. Install dependencies:
