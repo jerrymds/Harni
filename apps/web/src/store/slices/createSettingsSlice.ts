@@ -2,6 +2,7 @@ import type { StateCreator } from 'zustand';
 import type { ThinkingDepth } from '@harni/types';
 import type { AgentStoreState, SettingsSlice } from '../types.js';
 import {
+  apiFetch,
   DEFAULT_MCP_CONFIG,
   getServerAuthToken,
   loadSavedCustomProviders,
@@ -60,6 +61,8 @@ export const createSettingsSlice: StateCreator<AgentStoreState, [], [], Settings
   subagentsEnabled: localStorage.getItem('cline_web_subagents_enabled') !== 'false',
   contextWindow: savedContextWindow,
   modelContextWindows: loadSavedModelContextWindows(),
+  quotaInfo: null,
+  isLoadingQuota: false,
 
   setThinkingDepth: (depth) => {
     localStorage.setItem('cline_web_thinking_depth', depth);
@@ -227,5 +230,32 @@ export const createSettingsSlice: StateCreator<AgentStoreState, [], [], Settings
     set({ modelContextWindows: current });
   },
 
-  setSettingsOpen: (open) => set({ isSettingsOpen: open }),
+  setSettingsOpen: (open) => {
+    set({ isSettingsOpen: open });
+    if (open && get().selectedProvider === 'antigravity') {
+      get().fetchModelQuota('antigravity');
+    }
+  },
+
+  fetchModelQuota: async (providerParam, forceRefresh = false) => {
+    const provider = providerParam || get().selectedProvider;
+    set({ isLoadingQuota: true });
+    try {
+      const query = new URLSearchParams({
+        provider,
+        ...(forceRefresh ? { refresh: 'true' } : {}),
+      });
+      const res = await apiFetch(`/api/models/quota?${query.toString()}`);
+      if (res.ok) {
+        const data = await res.json();
+        set({ quotaInfo: data });
+        return data;
+      }
+    } catch (err) {
+      console.warn('[createSettingsSlice] Failed to fetch quota info:', err);
+    } finally {
+      set({ isLoadingQuota: false });
+    }
+    return null;
+  },
 });

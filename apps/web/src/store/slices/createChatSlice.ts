@@ -519,6 +519,9 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
     const cur = updatedSessions.find((s) => s.id === currentSessionId);
     if (cur) syncSessionToDB(cur);
     get().fetchModels(provider, undefined, providerBaseUrl || undefined);
+    if (provider === 'antigravity') {
+      get().fetchModelQuota('antigravity');
+    }
   },
 
   setModel: (model) => {

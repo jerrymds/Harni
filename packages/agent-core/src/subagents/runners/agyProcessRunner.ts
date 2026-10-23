@@ -77,14 +77,25 @@ export class AgyBinaryResolver {
     const homeDir = os.homedir();
     const isWindows = process.platform === 'win32';
     const binaryName = isWindows ? 'agy.exe' : 'agy';
-    const defaultGeminiBin = path.join(homeDir, '.gemini', 'bin', binaryName);
+    const candidatePaths = [
+      path.join(homeDir, '.gemini', 'bin', binaryName),
+      path.join(homeDir, '.antigravity', 'bin', binaryName),
+      ...(process.env.LOCALAPPDATA
+        ? [
+            path.join(process.env.LOCALAPPDATA, 'agy', 'bin', binaryName),
+            path.join(process.env.LOCALAPPDATA, 'Programs', 'agy', 'bin', binaryName),
+          ]
+        : []),
+    ];
 
-    try {
-      await fs.access(defaultGeminiBin);
-      this.cachedPath = defaultGeminiBin;
-      return defaultGeminiBin;
-    } catch {
-      // Continue
+    for (const cand of candidatePaths) {
+      try {
+        await fs.access(cand);
+        this.cachedPath = cand;
+        return cand;
+      } catch {
+        // Continue
+      }
     }
 
     // 3. Fallback to binary name expecting PATH resolution

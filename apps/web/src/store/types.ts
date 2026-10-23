@@ -11,6 +11,9 @@ import type {
   GoogleAuthInfo,
   LLMProviderType,
   ModelInfo,
+  ModelQuotaItem,
+  ModelQuotaPool,
+  ModelQuotaResponse,
   OpenAIAuthInfo,
   QuestionPrompt,
   SubagentInstanceInfo,
@@ -148,6 +151,8 @@ export interface SettingsSliceState {
   subagentsEnabled: boolean;
   contextWindow: number | null;
   modelContextWindows: Record<string, number>;
+  quotaInfo: ModelQuotaResponse | null;
+  isLoadingQuota: boolean;
 }
 
 export interface SettingsSliceActions {
@@ -175,6 +180,7 @@ export interface SettingsSliceActions {
   setContextWindow: (contextWindow: number | null) => void;
   setModelContextWindow: (modelId: string, contextWindow: number | null) => void;
   setSettingsOpen: (open: boolean) => void;
+  fetchModelQuota: (provider?: LLMProviderType, forceRefresh?: boolean) => Promise<ModelQuotaResponse | null>;
 }
 
 export type SettingsSlice = SettingsSliceState & SettingsSliceActions;

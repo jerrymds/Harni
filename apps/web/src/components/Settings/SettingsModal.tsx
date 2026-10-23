@@ -39,6 +39,7 @@ import { useAgentStore, useShallow } from '../../store/useAgentStore.js';
 import { formatTokenCount, resolveModelContextWindow } from '../../utils/modelContext.js';
 import { McpManager } from './Mcp/McpManager.js';
 import { ProviderModal } from './Models/ProviderModal.js';
+import { AntigravityQuotaPool } from './Models/AntigravityQuotaPool.js';
 import { getProviderConfig, resolveAllProviders } from './Models/providerRegistry.js';
 
 type SettingsTab = 'models' | 'tools' | 'skills' | 'mcp' | 'appearance';
@@ -740,6 +741,9 @@ tools: execute_command, read_file, replace_file_content
                         className="w-full rounded-xl border border-ag-border bg-white px-3.5 py-2 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft"
                       />
                     </div>
+
+                    {/* Google Antigravity Model Quota Pool Display */}
+                    <AntigravityQuotaPool />
                   </div>
                 ) : (
                   <div className="space-y-4">

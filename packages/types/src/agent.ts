@@ -142,6 +142,29 @@ export interface ToolCall {
 /**
  * API Rate Limit & Quota Information
  */
+export interface ModelQuotaItem {
+  name: string;
+  limitType: 'five_hour' | 'weekly' | 'custom';
+  remainingPercent: number;
+  resetTime?: string;
+  resetTimeFormatted?: string;
+}
+
+export interface ModelQuotaPool {
+  id: string;
+  name: string;
+  description?: string;
+  isShared?: boolean;
+  items: ModelQuotaItem[];
+}
+
+export interface ModelQuotaResponse {
+  provider: LLMProviderType;
+  updatedAt: number;
+  pools: ModelQuotaPool[];
+  error?: string | null;
+}
+
 export interface RateLimitInfo {
   isRateLimit: boolean;
   limitType?: 'RPM' | 'TPM' | 'RPD' | 'QUOTA' | 'RATE_LIMIT';

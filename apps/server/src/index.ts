@@ -48,5 +48,4 @@ export * from './services/dbService.js';
 export * from './services/antigravityBridgeManager.js';
 export * from './services/staticFileService.js';
 export * from './ws/wsHandler.js';
-
-
+export * from './services/antigravityQuotaService.js';

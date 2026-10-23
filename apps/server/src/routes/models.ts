@@ -31,7 +31,6 @@ export function registerModelRoutes(router: Router): void {
         }
       }
 
-
       // Claude subscription login: /v1/models doesn't accept OAuth tokens cleanly,
       // so serve the curated subscription model list.
       if (provider === 'anthropic') {
@@ -65,4 +64,38 @@ export function registerModelRoutes(router: Router): void {
       sendJsonResponse(res, 500, { error: errorMsg, models: [] });
     }
   });
+
+  const handleQuotaRequest = async ({ res, url }: { res: any; url: URL }) => {
+    try {
+      const provider = (url.searchParams.get('provider') || 'antigravity') as LLMProviderType;
+      const forceRefresh =
+        url.searchParams.get('refresh') === 'true' || url.searchParams.get('force') === 'true';
+
+      if (provider === 'antigravity') {
+        const { AntigravityQuotaService } = await import('../services/antigravityQuotaService.js');
+        const quotaService = AntigravityQuotaService.getInstance();
+        const quota = await quotaService.getQuota(forceRefresh);
+        sendJsonResponse(res, 200, quota);
+        return;
+      }
+
+      // Default empty pool response for other providers
+      sendJsonResponse(res, 200, {
+        provider,
+        updatedAt: Date.now(),
+        pools: [],
+      });
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      sendJsonResponse(res, 500, {
+        error: errorMsg,
+        pools: [],
+        provider: 'antigravity',
+        updatedAt: Date.now(),
+      });
+    }
+  };
+
+  router.get('/api/models/quota', handleQuotaRequest);
+  router.get('/api/antigravity/quota', handleQuotaRequest);
 }
