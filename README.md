@@ -188,18 +188,6 @@ pnpm dev
 
 ## 模型配置與服務商認證
 
-### 使用 Google Antigravity / Gemini (Gemini 3.8 / 3.7 / 2.5)
-若需要使用 Google Antigravity / Gemini 系列旗艦模型，可搭配獨立開源的 **[antigravity-bridge](https://github.com/jerrymds/antigravity-bridge.git)** 橋接服務使用：
-
-1. **取得並啟動 Antigravity Bridge**：
-   - 造訪開源專案：[https://github.com/jerrymds/antigravity-bridge.git](https://github.com/jerrymds/antigravity-bridge.git)
-   - 依照該專案說明啟動 Bridge 伺服器（預設監聽 `http://127.0.0.1:8123`）。
-2. **在 Harni 中設定**：
-   - 開啟右上角 **設定 (Settings)** -> **模型 (Models)**。
-   - 服務商選擇 **Google Antigravity**。
-   - 點擊「**執行 Google 身份認證**」，瀏覽器將彈出 Google 官方 OAuth 授權登入頁面（`accounts.google.com`）。
-   - 登入並同意授權後，認證資訊將自動以 **AES-256-GCM 加密存入本地 SQLite**，即可透過 Bridge 無縫調用 Gemini 系列旗艦模型！
-
 ### 使用 Claude 訂閱登入 (Pro / Max)
 1. 設定 -> 模型，服務商選擇 **Anthropic Claude**。
 2. 點擊「**使用 Claude 登入**」，新分頁開啟 `claude.ai` 授權頁。
