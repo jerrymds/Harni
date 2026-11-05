@@ -1,10 +1,77 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import type { SubagentDefinition } from '@harni/types';
+import type { LLMProviderType, SubagentDefinition, SubagentModelTier } from '@harni/types';
 import { ClinerulesParser } from './clinerulesParser.js';
 
 export class SubagentRegistry {
   private definitions = new Map<string, SubagentDefinition>();
+  private modelTierMap: Partial<Record<SubagentModelTier, string>> = {};
+
+  public setModelTierMap(map: Partial<Record<SubagentModelTier, string>>): void {
+    this.modelTierMap = { ...this.modelTierMap, ...map };
+  }
+
+  public getModelTierMap(): Partial<Record<SubagentModelTier, string>> {
+    return { ...this.modelTierMap };
+  }
+
+  public static resolveModel(options: {
+    explicitModel?: string;
+    definition?: SubagentDefinition;
+    provider?: LLMProviderType;
+    parentModel?: string;
+    customTierMap?: Partial<Record<SubagentModelTier, string>>;
+  }): string | undefined {
+    const { explicitModel, definition, provider, parentModel, customTierMap } = options;
+
+    const isTierKeyword = (m?: string): m is SubagentModelTier =>
+      m === 'fast' || m === 'reasoning' || m === 'inherit';
+
+    if (explicitModel && !isTierKeyword(explicitModel)) {
+      return explicitModel;
+    }
+
+    if (definition?.model && !isTierKeyword(definition.model) && !explicitModel) {
+      return definition.model;
+    }
+
+    const tier: SubagentModelTier = isTierKeyword(explicitModel)
+      ? explicitModel
+      : (definition?.modelTier || (isTierKeyword(definition?.model) ? definition.model : undefined) || 'inherit');
+
+    if (customTierMap?.[tier]) {
+      return customTierMap[tier];
+    }
+
+    if (tier === 'fast') {
+      if (provider === 'antigravity') return 'gemini-3.7-flash';
+      if (provider === 'anthropic') return 'claude-3-5-haiku-latest';
+      if (provider === 'openai') return 'gpt-4o-mini';
+      return parentModel || definition?.model;
+    }
+
+    if (tier === 'reasoning') {
+      if (provider === 'antigravity') return 'gemini-3.8-pro';
+      if (provider === 'anthropic') return 'claude-3-7-sonnet-latest';
+      if (provider === 'openai') return 'o3-mini';
+      return parentModel || definition?.model;
+    }
+
+    return parentModel || definition?.model;
+  }
+
+  public resolveModel(options: {
+    explicitModel?: string;
+    definition?: SubagentDefinition;
+    provider?: LLMProviderType;
+    parentModel?: string;
+    customTierMap?: Partial<Record<SubagentModelTier, string>>;
+  }): string | undefined {
+    return SubagentRegistry.resolveModel({
+      ...options,
+      customTierMap: options.customTierMap || this.modelTierMap,
+    });
+  }
 
   constructor(registerDefaults = true) {
     if (registerDefaults) {
@@ -16,12 +83,20 @@ export class SubagentRegistry {
     this.definitions.set(def.name.toLowerCase(), def);
   }
 
+  public normalizeArchetypeName(name: string): string {
+    const lower = name.toLowerCase();
+    if (lower === 'agy-researcher') return 'researcher';
+    if (lower === 'agy-worker' || lower === 'agy') return 'coder';
+    if (lower === 'agy-tester') return 'reviewer';
+    return lower;
+  }
+
   public get(name: string): SubagentDefinition | undefined {
-    return this.definitions.get(name.toLowerCase());
+    return this.definitions.get(this.normalizeArchetypeName(name));
   }
 
   public has(name: string): boolean {
-    return this.definitions.has(name.toLowerCase());
+    return this.definitions.has(this.normalizeArchetypeName(name));
   }
 
   public getAll(): SubagentDefinition[] {
@@ -29,7 +104,7 @@ export class SubagentRegistry {
   }
 
   public remove(name: string): boolean {
-    return this.definitions.delete(name.toLowerCase());
+    return this.definitions.delete(this.normalizeArchetypeName(name));
   }
 
   /**
@@ -101,10 +176,11 @@ Your goal is to investigate code, discover patterns, understand architecture, an
 - Provide actionable findings, structural summaries, and concrete recommendations.
 - Do NOT attempt to edit files or run non-existent modifying tools.
 - Once you have gathered sufficient information, synthesize your findings and present your complete final report.`,
-      allowedTools: ['read_file', 'list_files', 'search_files'],
+      allowedTools: ['read_file', 'list_files', 'search_files', 'ask_question'],
       enableWriteTools: false,
       enableSubagentTools: false,
-      enableMcpTools: false,
+      enableMcpTools: true,
+      modelTier: 'fast',
       maxTurns: 15,
     });
 
@@ -126,10 +202,12 @@ Your goal is to implement features, bug fixes, or refactoring as requested by yo
         'list_files',
         'search_files',
         'execute_command',
+        'ask_question',
       ],
       enableWriteTools: true,
       enableSubagentTools: false,
       enableMcpTools: true,
+      modelTier: 'inherit',
       maxTurns: 20,
     });
 
@@ -144,10 +222,11 @@ Your goal is to inspect code quality, run automated tests, identify potential bu
 - Use execute_command to run test runners (e.g. vitest, pytest, npm test).
 - Analyze failures carefully, pinpoint the root cause, and provide actionable resolution steps.
 - Summarize your review findings clearly with pass/fail metrics and identified risks.`,
-      allowedTools: ['read_file', 'list_files', 'search_files', 'execute_command'],
+      allowedTools: ['read_file', 'list_files', 'search_files', 'execute_command', 'ask_question'],
       enableWriteTools: false,
       enableSubagentTools: false,
       enableMcpTools: false,
+      modelTier: 'reasoning',
       maxTurns: 15,
     });
 
@@ -161,10 +240,11 @@ Your goal is to inspect code quality, run automated tests, identify potential bu
 Your goal is to analyze project architecture, evaluate trade-offs, define module interfaces, and produce high-level designs or ADRs.
 - Explore existing abstractions, dependencies, and protocols.
 - Deliver structured architectural blueprints with clear diagrams, contracts, and component responsibilities.`,
-      allowedTools: ['read_file', 'list_files', 'search_files'],
+      allowedTools: ['read_file', 'list_files', 'search_files', 'ask_question'],
       enableWriteTools: false,
       enableSubagentTools: false,
       enableMcpTools: false,
+      modelTier: 'reasoning',
       maxTurns: 15,
     });
 
@@ -179,69 +259,7 @@ Accomplish the requested objective thoroughly and report your results back clean
       enableWriteTools: true,
       enableSubagentTools: true,
       enableMcpTools: true,
-      maxTurns: 20,
-    });
-
-    // 6. AGY Worker / Antigravity CLI Autonomous Subagent
-    this.register({
-      name: 'agy',
-      role: 'Antigravity Autonomous Subagent',
-      description:
-        'Executes autonomous tasks via Antigravity CLI (agy) child process with full tool and reasoning capabilities.',
-      systemPrompt:
-        'You are an autonomous subagent powered by Antigravity CLI. Accomplish the assigned coding task precisely and efficiently.',
-      runnerType: 'agy',
-      agyOptions: {
-        timeoutMs: 600_000,
-      },
-      maxTurns: 20,
-    });
-
-    this.register({
-      name: 'agy-worker',
-      role: 'Antigravity Autonomous Worker',
-      description:
-        'Executes autonomous full-stack coding tasks via Antigravity CLI (agy) with file and command tools.',
-      systemPrompt:
-        'You are an autonomous coding worker powered by Antigravity CLI. Write clean code, run tests, and report results concisely.',
-      runnerType: 'agy',
-      agyOptions: {
-        mode: 'accept-edits',
-        timeoutMs: 600_000,
-      },
-      maxTurns: 25,
-    });
-
-    // 7. AGY Researcher
-    this.register({
-      name: 'agy-researcher',
-      role: 'Antigravity Codebase Researcher',
-      description:
-        'Specialized in codebase exploration, architecture analysis, and search using Antigravity CLI.',
-      systemPrompt:
-        'You are a specialized codebase researcher powered by Antigravity CLI. Investigate and provide structured reports. Keep your file exploration efficient: avoid deep recursive exploration into build outputs, dist, or node_modules. Focus on package.json, main configuration files, and core architectural components to deliver a clear and comprehensive summary promptly.',
-      runnerType: 'agy',
-      agyOptions: {
-        mode: 'plan',
-        effort: 'medium',
-        timeoutMs: 600_000,
-      },
-      maxTurns: 15,
-    });
-
-    // 8. AGY Tester
-    this.register({
-      name: 'agy-tester',
-      role: 'Antigravity Automated Tester',
-      description:
-        'Specialized in running test suites, analyzing failures, and repairing broken tests via Antigravity CLI.',
-      systemPrompt:
-        'You are a testing and quality engineer powered by Antigravity CLI. Run test suites and fix broken tests.',
-      runnerType: 'agy',
-      agyOptions: {
-        effort: 'high',
-        timeoutMs: 600_000,
-      },
+      modelTier: 'inherit',
       maxTurns: 20,
     });
   }

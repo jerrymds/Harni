@@ -19,7 +19,7 @@ export interface ServerToClientEvents {
   'chat:thinking': { thought: string; sessionId?: string; taskId?: string };
   'task:state': TaskState & { sessionId?: string };
   'task:status': { status: AgentStatus; taskId: string; sessionId?: string };
-  'question:ask': QuestionPrompt & { sessionId?: string; taskId?: string };
+  'question:ask': QuestionPrompt & { sessionId?: string; taskId?: string; subagentId?: string; subagentRole?: string };
   'tool:request': ToolCallRequest & { sessionId?: string; taskId?: string };
   'tool:result': ToolResult & { sessionId?: string; taskId?: string };
   'file:diff': FileDiff & { sessionId?: string; taskId?: string };
@@ -33,7 +33,19 @@ export interface ServerToClientEvents {
   'subagent:status': { sessionId?: string; subagentId: string; status: SubagentStatus; error?: string };
   'subagent:token': { sessionId?: string; subagentId: string; text: string; isThinking?: boolean };
   'subagent:tool': { sessionId?: string; subagentId: string; toolName: string; summary?: string; status: 'start' | 'complete' | 'error' };
-  'subagent:completed': { sessionId?: string; subagentId: string; result: string; durationMs: number };
+  'subagent:completed': {
+    sessionId?: string;
+    subagentId: string;
+    status: SubagentStatus;
+    result: string;
+    error?: string;
+    durationMs: number;
+    tokenUsage?: import('./agent.js').TokenUsage;
+    codeModified?: boolean;
+    structuredReport?: import('./agent.js').SubagentStructuredReport;
+    worktreePath?: string;
+    worktreeBranch?: string;
+  };
   'test:result': {
     passed: boolean;
     command: string;
@@ -81,6 +93,7 @@ export interface ClientToServerEvents {
   };
   'task:new': { sessionId?: string } | Record<string, never>;
   'task:cancel': { taskId?: string; sessionId?: string };
+  'subagent:kill': { subagentId: string; sessionId?: string };
   'checkpoint:rollback': { checkpointId?: string; sessionId?: string; workspaceRoot?: string };
   'checkpoint:prune': { workspaceRoot?: string; maxRetained?: number } | Record<string, never>;
   'worktree:merge': { sessionId?: string; commitMessage?: string; workspaceRoot?: string };

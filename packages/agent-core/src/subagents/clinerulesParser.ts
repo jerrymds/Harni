@@ -1,12 +1,15 @@
-import type { SubagentDefinition } from '@harni/types';
+import type { SubagentDefinition, SubagentModelTier } from '@harni/types';
 
 export interface ParsedSubagentRule {
   name: string;
   role?: string;
   model?: string;
+  modelTier?: SubagentModelTier;
   allowedTools?: string[];
   systemPrompt?: string;
   maxTurns?: number;
+  maxTokensBudget?: number;
+  timeoutMs?: number;
 }
 
 export class ClinerulesParser {
@@ -88,12 +91,27 @@ export class ClinerulesParser {
         if (bulletMatch) {
           const itemText = bulletMatch[1].trim();
 
-          // Model: gemini-3.8-flash
+          // Model Tier: fast | reasoning | inherit
+          const tierMatch = itemText.match(
+            /^(?:\*{1,2}|_{1,2})?(?:model\s*tier|tier|模型分流)(?:\*{1,2}|_{1,2})?\s*:\s*[`'"]?(fast|reasoning|inherit)[`'"]?/i,
+          );
+          if (tierMatch) {
+            currentRule.modelTier = tierMatch[1].toLowerCase() as SubagentModelTier;
+            continue;
+          }
+
+          // Model: gemini-3.8-flash (or fast / reasoning / inherit keyword)
           const modelMatch = itemText.match(
             /^(?:\*{1,2}|_{1,2})?model(?:\*{1,2}|_{1,2})?\s*:\s*[`'"]?([^`'"\r\n]+)[`'"]?/i,
           );
           if (modelMatch) {
-            currentRule.model = modelMatch[1].trim();
+            const rawModel = modelMatch[1].trim();
+            const lowerModel = rawModel.toLowerCase();
+            if (lowerModel === 'fast' || lowerModel === 'reasoning' || lowerModel === 'inherit') {
+              currentRule.modelTier = lowerModel as SubagentModelTier;
+            } else {
+              currentRule.model = rawModel;
+            }
             continue;
           }
 
@@ -137,6 +155,24 @@ export class ClinerulesParser {
             currentRule.maxTurns = parseInt(turnsMatch[1], 10);
             continue;
           }
+
+          // Max Tokens / Token Budget: 50000
+          const tokensMatch = itemText.match(
+            /^(?:\*{1,2}|_{1,2})?(?:max\s*tokens?(?:\s*budget)?|tokens?\s*budget|token預算|token上限)(?:\*{1,2}|_{1,2})?\s*:\s*(\d+)/i,
+          );
+          if (tokensMatch) {
+            currentRule.maxTokensBudget = parseInt(tokensMatch[1], 10);
+            continue;
+          }
+
+          // Timeout: 60000 / Timeout (ms): 60000
+          const timeoutMatch = itemText.match(
+            /^(?:\*{1,2}|_{1,2})?(?:timeout(?:\s*\(ms\))?|逾時(?:\(毫秒\))?|超時)(?:\*{1,2}|_{1,2})?\s*:\s*(\d+)/i,
+          );
+          if (timeoutMatch) {
+            currentRule.timeoutMs = parseInt(timeoutMatch[1], 10);
+            continue;
+          }
         }
       }
     }
@@ -160,8 +196,9 @@ export class ClinerulesParser {
     for (const rule of rules) {
       const existing = definitions.get(rule.name.toLowerCase());
       if (existing) {
-        // Update existing definition with specified model, role, instructions, tools
+        // Update existing definition with specified model, role, instructions, tools, budgets
         if (rule.model) existing.model = rule.model;
+        if (rule.modelTier) existing.modelTier = rule.modelTier;
         if (rule.role) existing.role = rule.role;
         if (rule.allowedTools && rule.allowedTools.length > 0) {
           existing.allowedTools = rule.allowedTools;
@@ -170,6 +207,8 @@ export class ClinerulesParser {
           existing.systemPrompt = `${existing.systemPrompt}\n\n[Project Custom Instructions (.clinerules)]:\n${rule.systemPrompt}`;
         }
         if (rule.maxTurns) existing.maxTurns = rule.maxTurns;
+        if (rule.maxTokensBudget) existing.maxTokensBudget = rule.maxTokensBudget;
+        if (rule.timeoutMs) existing.timeoutMs = rule.timeoutMs;
         appliedCount++;
       } else {
         // Create new dynamic subagent definition
@@ -179,11 +218,14 @@ export class ClinerulesParser {
           description: `Custom subagent defined in .clinerules`,
           systemPrompt: rule.systemPrompt || `You are a specialized subagent for ${rule.role || rule.name}.`,
           model: rule.model,
+          modelTier: rule.modelTier,
           allowedTools: rule.allowedTools,
           enableWriteTools: rule.allowedTools
             ? rule.allowedTools.includes('write_to_file') || rule.allowedTools.includes('replace_file_content')
             : true,
           maxTurns: rule.maxTurns || 15,
+          maxTokensBudget: rule.maxTokensBudget,
+          timeoutMs: rule.timeoutMs,
         };
         definitions.set(newDef.name, newDef);
         appliedCount++;

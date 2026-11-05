@@ -345,5 +345,261 @@ describe('useAgentStore and Slices', () => {
     expect(customPromptMsg.payload.apiKey).toBe('sk-freetoken-secret-key');
     expect(customPromptMsg.payload.baseURL).toBe('https://tibai.tibbuy.net/freetoken/api');
   });
+
+  it('handles subagent:completed with status cancelled and error in createWorkspaceSlice (A4)', () => {
+    let messageHandler: any = null;
+    const fakeWs = {
+      readyState: 1,
+      send: () => {},
+      set onmessage(fn: any) {
+        messageHandler = fn;
+      },
+      get onmessage() {
+        return messageHandler;
+      },
+    };
+
+    const originalWS = globalThis.WebSocket;
+    try {
+      globalThis.WebSocket = function () {
+        return fakeWs as any;
+      } as any;
+      useAgentStore.getState().connect();
+
+      useAgentStore.setState({
+        currentSessionId: 'sess_sub_test',
+        subagents: {
+          sess_sub_test: [
+            {
+              id: 'sub_test_1',
+              parentId: 'parent',
+              sessionId: 'sess_sub_test',
+              typeName: 'coder',
+              role: 'Coder',
+              prompt: 'code',
+              status: 'running',
+              depth: 1,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            },
+          ],
+        },
+      });
+
+      messageHandler({
+        data: JSON.stringify({
+          type: 'subagent:completed',
+          payload: {
+            sessionId: 'sess_sub_test',
+            subagentId: 'sub_test_1',
+            status: 'cancelled',
+            result: 'Subagent execution cancelled',
+            error: 'User killed subagent',
+            durationMs: 123,
+          },
+        }),
+      });
+
+      const updatedSub = useAgentStore.getState().subagents['sess_sub_test'][0];
+      expect(updatedSub.status).toBe('cancelled');
+      expect(updatedSub.error).toBe('User killed subagent');
+      expect(updatedSub.result).toBe('Subagent execution cancelled');
+    } finally {
+      globalThis.WebSocket = originalWS;
+    }
+  });
+
+  it('handles subagent:token to stream thinking and text to the target subagent and clears them on completion', async () => {
+    let messageHandler: any = null;
+    const fakeWs = {
+      readyState: 1,
+      send: () => {},
+      set onmessage(fn: any) {
+        messageHandler = fn;
+      },
+      get onmessage() {
+        return messageHandler;
+      },
+    };
+
+    const originalWS = globalThis.WebSocket;
+    try {
+      globalThis.WebSocket = function () {
+        return fakeWs as any;
+      } as any;
+      useAgentStore.getState().connect();
+
+      useAgentStore.setState({
+        currentSessionId: 'sess_stream_sub',
+        subagents: {
+          sess_stream_sub: [
+            {
+              id: 'sub_stream_1',
+              parentId: 'parent',
+              sessionId: 'sess_stream_sub',
+              typeName: 'coder',
+              role: 'Coder',
+              prompt: 'stream task',
+              status: 'running',
+              depth: 1,
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            },
+          ],
+        },
+      });
+
+      // Stream thinking token
+      messageHandler({
+        data: JSON.stringify({
+          type: 'subagent:token',
+          payload: {
+            sessionId: 'sess_stream_sub',
+            subagentId: 'sub_stream_1',
+            text: 'Thinking part 1... ',
+            isThinking: true,
+          },
+        }),
+      });
+
+      // Stream text token
+      messageHandler({
+        data: JSON.stringify({
+          type: 'subagent:token',
+          payload: {
+            sessionId: 'sess_stream_sub',
+            subagentId: 'sub_stream_1',
+            text: 'Executing step 1. ',
+            isThinking: false,
+          },
+        }),
+      });
+
+      let sub = useAgentStore.getState().subagents['sess_stream_sub'][0];
+      expect(sub.streamingThinking).toBe('Thinking part 1... ');
+      expect(sub.streamingText).toBe('Executing step 1. ');
+
+      // Stream next text token
+      messageHandler({
+        data: JSON.stringify({
+          type: 'subagent:token',
+          payload: {
+            sessionId: 'sess_stream_sub',
+            subagentId: 'sub_stream_1',
+            text: 'Step 2 done.',
+            isThinking: false,
+          },
+        }),
+      });
+
+      sub = useAgentStore.getState().subagents['sess_stream_sub'][0];
+      expect(sub.streamingText).toBe('Executing step 1. Step 2 done.');
+
+      // Complete subagent with structured report
+      messageHandler({
+        data: JSON.stringify({
+          type: 'subagent:completed',
+          payload: {
+            sessionId: 'sess_stream_sub',
+            subagentId: 'sub_stream_1',
+            status: 'completed',
+            result: 'All done.',
+            structuredReport: {
+              summary: 'Summary of work done.',
+              modifiedFiles: ['package.json'],
+              verification: 'Tests pass.',
+            },
+          },
+        }),
+      });
+
+      sub = useAgentStore.getState().subagents['sess_stream_sub'][0];
+      expect(sub.status).toBe('completed');
+      expect(sub.structuredReport?.modifiedFiles).toEqual(['package.json']);
+      // Streaming tokens should be cleared on completion
+      expect(sub.streamingThinking).toBeUndefined();
+      expect(sub.streamingText).toBeUndefined();
+    } finally {
+      globalThis.WebSocket = originalWS;
+    }
+  });
+
+  it('handles task:state synchronization with subagents and preserves worktree info (P3-1 & P3-2)', async () => {
+    let messageHandler: any;
+    const fakeWs = {
+      readyState: 1,
+      send: () => {},
+      set onmessage(fn: any) {
+        messageHandler = fn;
+      },
+      get onmessage() {
+        return messageHandler;
+      },
+    };
+
+    const originalWS = globalThis.WebSocket;
+    try {
+      globalThis.WebSocket = function () {
+        return fakeWs as any;
+      } as any;
+      useAgentStore.setState({ ws: null });
+      useAgentStore.getState().connect();
+
+      // Receive task:state with subagents
+      messageHandler({
+        data: JSON.stringify({
+          type: 'task:state',
+          payload: {
+            sessionId: 'sess_p3_sync',
+            status: 'idle',
+            messages: [],
+            subagents: [
+              {
+                id: 'sub_wt_1',
+                typeName: 'coder',
+                role: 'Worktree Agent',
+                status: 'running',
+                createdAt: 1000,
+                updatedAt: 1050,
+                worktreePath: '/isolated/wt',
+                worktreeBranch: 'cline/task-sub_wt_1',
+              },
+            ],
+          },
+        }),
+      });
+
+      let state = useAgentStore.getState();
+      expect(state.subagents['sess_p3_sync']).toHaveLength(1);
+      expect(state.subagents['sess_p3_sync'][0].worktreeBranch).toBe('cline/task-sub_wt_1');
+
+      // Now complete subagent with worktree info
+      messageHandler({
+        data: JSON.stringify({
+          type: 'subagent:completed',
+          payload: {
+            sessionId: 'sess_p3_sync',
+            subagentId: 'sub_wt_1',
+            status: 'completed',
+            result: 'Merged worktree',
+            worktreePath: '/isolated/wt',
+            worktreeBranch: 'cline/task-sub_wt_1',
+          },
+        }),
+      });
+
+      state = useAgentStore.getState();
+      expect(state.subagents['sess_p3_sync'][0].status).toBe('completed');
+      expect(state.subagents['sess_p3_sync'][0].worktreePath).toBe('/isolated/wt');
+      expect(state.subagents['sess_p3_sync'][0].worktreeBranch).toBe('cline/task-sub_wt_1');
+
+      // Test clearMessages clears session subagents
+      useAgentStore.setState({ currentSessionId: 'sess_p3_sync' });
+      useAgentStore.getState().clearMessages();
+      expect(useAgentStore.getState().subagents['sess_p3_sync']).toBeUndefined();
+    } finally {
+      globalThis.WebSocket = originalWS;
+    }
+  });
 });
 

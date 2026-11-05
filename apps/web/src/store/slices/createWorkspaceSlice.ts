@@ -10,6 +10,7 @@ import {
   PROVIDER_DEFAULT_MODELS,
   saveFoldersToStorage,
   saveSessionsToStorage,
+  saveSubagentsToStorage,
   syncFoldersToDB,
   syncSessionToDB,
 } from '../utils.js';
@@ -219,7 +220,11 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
       try {
         const msg = JSON.parse(event.data) as ServerMessage;
         // If a non-streaming message arrives, flush any pending stream buffers immediately
-        if (msg.type !== 'chat:thinking' && msg.type !== 'chat:token') {
+        if (
+          msg.type !== 'chat:thinking' &&
+          msg.type !== 'chat:token' &&
+          msg.type !== 'subagent:token'
+        ) {
           flushAllStreamBuffers(get, set);
         }
         switch (msg.type) {
@@ -301,6 +306,15 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
             saveSessionsToStorage(updatedSessions);
             const targetSession = updatedSessions.find((s) => s.id === targetSessionId);
             if (targetSession) syncSessionToDB(targetSession);
+
+            if (Array.isArray(msg.payload.subagents) && msg.payload.subagents.length > 0) {
+              const updatedSubagents = {
+                ...get().subagents,
+                [targetSessionId]: msg.payload.subagents,
+              };
+              set({ subagents: updatedSubagents });
+              saveSubagentsToStorage(updatedSubagents);
+            }
             break;
           }
 
@@ -403,12 +417,14 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
             const updated = existing.some((s) => s.id === sub.id)
               ? existing.map((s) => (s.id === sub.id ? sub : s))
               : [...existing, sub];
+            const updatedSubagents = {
+              ...subagents,
+              [sid]: updated,
+            };
             set({
-              subagents: {
-                ...subagents,
-                [sid]: updated,
-              },
+              subagents: updatedSubagents,
             });
+            saveSubagentsToStorage(updatedSubagents);
             break;
           }
 
@@ -427,12 +443,14 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
                   }
                 : s,
             );
+            const updatedSubagents = {
+              ...subagents,
+              [sid]: updated,
+            };
             set({
-              subagents: {
-                ...subagents,
-                [sid]: updated,
-              },
+              subagents: updatedSubagents,
             });
+            saveSubagentsToStorage(updatedSubagents);
             break;
           }
 
@@ -459,6 +477,36 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
             break;
           }
 
+          case 'subagent:token': {
+            const { subagents, currentSessionId } = get();
+            const sid = msg.payload.sessionId || currentSessionId;
+            const existing = subagents[sid] || [];
+            const { subagentId, text, isThinking } = msg.payload;
+            const updated = existing.map((s) => {
+              if (s.id !== subagentId) return s;
+              if (isThinking) {
+                return {
+                  ...s,
+                  streamingThinking: (s.streamingThinking || '') + text,
+                  updatedAt: Date.now(),
+                };
+              } else {
+                return {
+                  ...s,
+                  streamingText: (s.streamingText || '') + text,
+                  updatedAt: Date.now(),
+                };
+              }
+            });
+            set({
+              subagents: {
+                ...subagents,
+                [sid]: updated,
+              },
+            });
+            break;
+          }
+
           case 'subagent:completed': {
             const { subagents, currentSessionId } = get();
             const sid = msg.payload.sessionId || currentSessionId;
@@ -467,20 +515,29 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
               s.id === msg.payload.subagentId
                 ? {
                     ...s,
-                    status: 'completed' as const,
+                    status: (msg.payload.status ?? 'completed') as import('@harni/types').SubagentStatus,
                     result: msg.payload.result,
+                    error: msg.payload.error ?? s.error,
                     currentToolSummary: undefined,
                     completedAt: Date.now(),
                     updatedAt: Date.now(),
+                    tokenUsage: msg.payload.tokenUsage || s.tokenUsage,
+                    structuredReport: msg.payload.structuredReport || s.structuredReport,
+                    worktreePath: msg.payload.worktreePath ?? s.worktreePath,
+                    worktreeBranch: msg.payload.worktreeBranch ?? s.worktreeBranch,
+                    streamingText: undefined,
+                    streamingThinking: undefined,
                   }
                 : s,
             );
+            const updatedSubagents = {
+              ...subagents,
+              [sid]: updated,
+            };
             set({
-              subagents: {
-                ...subagents,
-                [sid]: updated,
-              },
+              subagents: updatedSubagents,
             });
+            saveSubagentsToStorage(updatedSubagents);
             break;
           }
 

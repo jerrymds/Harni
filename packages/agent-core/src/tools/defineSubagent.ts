@@ -11,6 +11,8 @@ export interface DefineSubagentParams {
   enableSubagentTools?: boolean;
   model?: string;
   maxTurns?: number;
+  maxTokensBudget?: number;
+  timeoutMs?: number;
 }
 
 export class DefineSubagentTool extends BaseTool<DefineSubagentParams> {
@@ -59,6 +61,14 @@ export class DefineSubagentTool extends BaseTool<DefineSubagentParams> {
         type: 'number',
         description: 'Maximum turns for this subagent execution (default 15).',
       },
+      maxTokensBudget: {
+        type: 'number',
+        description: 'Optional maximum total token budget for this subagent.',
+      },
+      timeoutMs: {
+        type: 'number',
+        description: 'Optional wall-clock timeout in milliseconds for this subagent.',
+      },
     },
     required: ['name', 'description', 'systemPrompt'],
   };
@@ -87,6 +97,8 @@ export class DefineSubagentTool extends BaseTool<DefineSubagentParams> {
         enableSubagentTools: params.enableSubagentTools,
         model: params.model,
         maxTurns: params.maxTurns,
+        maxTokensBudget: params.maxTokensBudget,
+        timeoutMs: params.timeoutMs,
       };
 
       context.subagentManager.defineSubagent(def);

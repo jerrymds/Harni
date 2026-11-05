@@ -7,6 +7,11 @@ export interface InvokeSubagentParams {
     role: string;
     prompt: string;
     model?: string;
+    background?: boolean;
+    maxTokensBudget?: number;
+    timeoutMs?: number;
+    isolation?: 'inherit' | 'worktree';
+    autoMergeWorktree?: boolean;
   }>;
 }
 
@@ -28,7 +33,7 @@ export class InvokeSubagentTool extends BaseTool<InvokeSubagentParams> {
             typeName: {
               type: 'string',
               description:
-                'Archetype of subagent. Recommended: "agy-worker" (autonomous implementation via Antigravity CLI), "agy-researcher" (codebase & architecture exploration via Antigravity CLI), "agy-tester" (test & repair via Antigravity CLI), or "researcher", "coder", "reviewer", "architect", "self".',
+                'Archetype of subagent: "researcher" (read-only codebase exploration), "coder" (code implementation & file edits), "reviewer" (testing & code review), "architect" (system design & planning), or "self" (general purpose).',
             },
             role: {
               type: 'string',
@@ -41,6 +46,30 @@ export class InvokeSubagentTool extends BaseTool<InvokeSubagentParams> {
             model: {
               type: 'string',
               description: 'Optional model override for this subagent.',
+            },
+            background: {
+              type: 'boolean',
+              description:
+                'If true, launches the subagent asynchronously in the background and returns its ID immediately without waiting for completion.',
+            },
+            maxTokensBudget: {
+              type: 'number',
+              description: 'Optional maximum total token budget for this subagent.',
+            },
+            timeoutMs: {
+              type: 'number',
+              description: 'Optional wall-clock timeout in milliseconds for this subagent.',
+            },
+            isolation: {
+              type: 'string',
+              enum: ['inherit', 'worktree'],
+              description:
+                'Workspace isolation mode: "inherit" (default, shares parent workspace) or "worktree" (creates an isolated Git worktree for safe parallel file modifications).',
+            },
+            autoMergeWorktree: {
+              type: 'boolean',
+              description:
+                'If isolation is "worktree", whether to automatically merge changes back into the parent workspace upon successful completion (default: true).',
             },
           },
           required: ['typeName', 'role', 'prompt'],
@@ -79,25 +108,53 @@ export class InvokeSubagentTool extends BaseTool<InvokeSubagentParams> {
       sessionId: context.sessionId || 'default',
       parentId: context.taskId || 'parent',
       workspaceRoot: context.workspaceRoot,
-      model: s.model || (s.typeName.toLowerCase().startsWith('agy') ? undefined : context.model),
+      depth: (context.depth ?? 0) + 1,
+      model: s.model,
+      parentModel: context.model,
       provider: context.provider,
       apiKey: context.apiKey,
       baseURL: context.baseURL,
+      parentSignal: context.parentSignal,
+      onFileDiff: context.onFileDiff,
+      onDiagnostics: context.onDiagnostics,
+      onTerminalData: context.onTerminalData,
+      onCodeModified: context.onCodeModified,
+      anthropicOAuth: context.anthropicOAuth,
+      openaiOAuth: context.openaiOAuth,
+      openaiAccountId: context.openaiAccountId,
+      background: s.background,
+      maxTokensBudget: s.maxTokensBudget,
+      timeoutMs: s.timeoutMs,
+      isolation: s.isolation,
+      autoMergeWorktree: s.autoMergeWorktree,
     }));
 
     try {
       const results = await context.subagentManager.spawnSubagents(spawnParams);
 
       const summaries = results.map((r, i) => {
-        const statusEmoji = r.status === 'completed' ? '✅' : '❌';
-        return `### Subagent [${i + 1}]: ${r.role} (${r.typeName})\n- **ID**: \`${r.id}\`\n- **Status**: ${statusEmoji} ${r.status}\n- **Duration**: ${r.durationMs}ms\n- **Tool Calls**: ${r.toolCallCount}\n\n**Report / Output**:\n${r.result}`;
+        const isBg = r.background || r.status === 'pending' || r.status === 'running';
+        const statusEmoji = isBg ? '⏳' : r.status === 'completed' ? '✅' : '❌';
+        const statusLabel = isBg ? `${r.status} (Background)` : r.status;
+        let meta = `### Subagent [${i + 1}]: ${r.role} (${r.typeName})\n- **ID**: \`${r.id}\`\n- **Status**: ${statusEmoji} ${statusLabel}\n- **Duration**: ${r.durationMs}ms\n- **Tool Calls**: ${r.toolCallCount}`;
+        if (r.worktreeBranch || r.worktreePath) {
+          meta += `\n- **Worktree**: \`${r.worktreeBranch || ''}\` (${r.worktreePath || ''})${r.worktreeMerged ? ' [Merged]' : ''}`;
+        }
+        if (r.structuredReport?.modifiedFiles && r.structuredReport.modifiedFiles.length > 0) {
+          meta += `\n- **Modified Files**: ${r.structuredReport.modifiedFiles.map((f) => `\`${f}\``).join(', ')}`;
+        }
+        return `${meta}\n\n**Report / Output**:\n${r.result}`;
       });
 
       const output = summaries.join('\n\n---\n\n');
+      const bgCount = results.filter((r) => r.background).length;
+      const completedCount = results.filter((r) => r.status === 'completed').length;
       return {
         toolCallId: '',
         output,
-        summary: `Executed ${results.length} subagent(s) (${results.filter((r) => r.status === 'completed').length} succeeded)`,
+        summary: bgCount > 0
+          ? `Spawned ${results.length} subagent(s) (${completedCount} completed, ${bgCount} background)`
+          : `Executed ${results.length} subagent(s) (${completedCount} succeeded)`,
       };
     } catch (err: unknown) {
       const errMessage = err instanceof Error ? err.message : String(err);

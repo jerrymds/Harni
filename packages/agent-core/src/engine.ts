@@ -23,7 +23,9 @@ import type {
   FileDiff,
   LLMProviderType,
   ServerToClientEvents,
+  SubagentModelTier,
   TaskState,
+  TokenUsage,
   ToolCallRequest,
   ToolResult,
   WorktreeStatusInfo,
@@ -47,6 +49,8 @@ export interface AgentEngineConfig {
   mcpServers?: Record<string, McpServerConfig>;
   subagentsEnabled?: boolean;
   maxSubagentDepth?: number;
+  maxSubagentConcurrent?: number;
+  modelTierMap?: Partial<Record<SubagentModelTier, string>>;
   autoTestEnabled?: boolean;
   testCommand?: string;
   maxTestRetries?: number;
@@ -77,6 +81,10 @@ interface SessionTask {
   isWorktree?: boolean;
   worktreeBranch?: string;
   subagentsEnabled: boolean;
+  anthropicOAuth?: boolean;
+  openaiOAuth?: boolean;
+  openaiAccountId?: string;
+  subagentTokenUsage: TokenUsage;
 }
 
 export class AgentCoreEngine extends EventEmitter {
@@ -109,6 +117,8 @@ export class AgentCoreEngine extends EventEmitter {
   private maxTestRetries: number = 5;
 
   private tasksBySession = new Map<string, SessionTask>();
+  private subagentApprovalQueues = new Map<string, Promise<void>>();
+  private subagentQuestionQueues = new Map<string, Promise<void>>();
   private lastActiveSessionId: string = 'default';
 
   constructor(config: AgentEngineConfig) {
@@ -141,7 +151,16 @@ export class AgentCoreEngine extends EventEmitter {
       apiKey: this.apiKey,
       baseURL: this.baseURL,
       maxDepth: config.maxSubagentDepth ?? 2,
+      maxConcurrent: config.maxSubagentConcurrent,
+      modelTierMap: config.modelTierMap,
       executeTerminalCommand: this.executeTerminalCommand,
+      mcpManager: this.mcpManager,
+      skillRegistry: this.skillRegistry,
+      gitCheckpointService: this.gitCheckpointService,
+      requestToolApproval: (sessionId, request, signal) =>
+        this.handleSubagentToolApproval(sessionId, request, signal),
+      askUserQuestion: (sessionId, params, signal) =>
+        this.handleSubagentAskQuestion(sessionId, params, signal),
     });
 
     this.bindSubagentEvents();
@@ -189,6 +208,14 @@ export class AgentCoreEngine extends EventEmitter {
     return this.subagentManager;
   }
 
+  public setSubagentModelTierMap(map: Partial<Record<SubagentModelTier, string>>): void {
+    this.subagentManager.setModelTierMap(map);
+  }
+
+  public getSubagentModelTierMap(): Partial<Record<SubagentModelTier, string>> {
+    return this.subagentManager.getModelTierMap();
+  }
+
   public getGitCheckpointService(): GitCheckpointService {
     return this.gitCheckpointService;
   }
@@ -196,9 +223,21 @@ export class AgentCoreEngine extends EventEmitter {
   private bindSubagentEvents(): void {
     this.subagentManager.on('subagent:spawned', (payload) => {
       this.emitEvent('subagent:spawned', payload);
+      if (payload.sessionId) {
+        const sessionTask = this.tasksBySession.get(payload.sessionId);
+        if (sessionTask) {
+          sessionTask.taskState.subagents = this.subagentManager.getInstancesBySession(payload.sessionId);
+        }
+      }
     });
     this.subagentManager.on('subagent:status', (payload) => {
       this.emitEvent('subagent:status', payload);
+      if (payload.sessionId) {
+        const sessionTask = this.tasksBySession.get(payload.sessionId);
+        if (sessionTask) {
+          sessionTask.taskState.subagents = this.subagentManager.getInstancesBySession(payload.sessionId);
+        }
+      }
     });
     this.subagentManager.on('subagent:token', (payload) => {
       this.emitEvent('subagent:token', payload);
@@ -208,18 +247,52 @@ export class AgentCoreEngine extends EventEmitter {
     });
     this.subagentManager.on('subagent:completed', (payload) => {
       this.emitEvent('subagent:completed', payload);
+      if (payload.sessionId) {
+        const sessionTask = this.tasksBySession.get(payload.sessionId);
+        if (sessionTask) {
+          sessionTask.taskState.subagents = this.subagentManager.getInstancesBySession(payload.sessionId);
+          if (payload.codeModified) {
+            sessionTask.codeModified = true;
+          }
+          if (payload.tokenUsage) {
+            sessionTask.subagentTokenUsage.promptTokens += payload.tokenUsage.promptTokens || 0;
+            sessionTask.subagentTokenUsage.completionTokens += payload.tokenUsage.completionTokens || 0;
+            sessionTask.subagentTokenUsage.totalTokens +=
+              payload.tokenUsage.totalTokens ||
+              (payload.tokenUsage.promptTokens || 0) + (payload.tokenUsage.completionTokens || 0);
+            if (payload.tokenUsage.cacheReadTokens) {
+              sessionTask.subagentTokenUsage.cacheReadTokens =
+                (sessionTask.subagentTokenUsage.cacheReadTokens || 0) + payload.tokenUsage.cacheReadTokens;
+            }
+            if (payload.tokenUsage.cacheWriteTokens) {
+              sessionTask.subagentTokenUsage.cacheWriteTokens =
+                (sessionTask.subagentTokenUsage.cacheWriteTokens || 0) + payload.tokenUsage.cacheWriteTokens;
+            }
+            this.syncTaskState(sessionTask);
+          }
+        }
+      }
     });
   }
 
   public getTaskState(sessionId?: string): TaskState | null {
     if (sessionId) {
       const task = this.tasksBySession.get(sessionId);
-      return task ? { ...task.taskState } : null;
+      if (!task) return null;
+      task.taskState.subagents = this.subagentManager.getInstancesBySession(task.sessionId);
+      return { ...task.taskState };
     }
     const lastSession = this.tasksBySession.get(this.lastActiveSessionId);
-    if (lastSession) return { ...lastSession.taskState };
+    if (lastSession) {
+      lastSession.taskState.subagents = this.subagentManager.getInstancesBySession(lastSession.sessionId);
+      return { ...lastSession.taskState };
+    }
     const first = this.tasksBySession.values().next().value;
-    return first ? { ...first.taskState } : null;
+    if (first) {
+      first.taskState.subagents = this.subagentManager.getInstancesBySession(first.sessionId);
+      return { ...first.taskState };
+    }
+    return null;
   }
 
   public getToolRegistry(): ToolRegistry {
@@ -280,17 +353,24 @@ export class AgentCoreEngine extends EventEmitter {
    * Reset conversation session and context
    */
   public resetSession(sessionId?: string): void {
+    this.subagentManager.clearSessionSubagents(sessionId);
     if (sessionId) {
       this.cancelTask(sessionId);
+      this.subagentApprovalQueues.delete(sessionId);
       const sessionTask = this.tasksBySession.get(sessionId);
       if (sessionTask) {
+        sessionTask.subagentTokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
         sessionTask.contextManager.clear();
+        sessionTask.taskState.subagents = [];
         this.tasksBySession.delete(sessionId);
       }
     } else {
       this.cancelTask();
+      this.subagentApprovalQueues.clear();
       for (const sessionTask of this.tasksBySession.values()) {
+        sessionTask.subagentTokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
         sessionTask.contextManager.clear();
+        sessionTask.taskState.subagents = [];
       }
       this.tasksBySession.clear();
     }
@@ -447,6 +527,10 @@ export class AgentCoreEngine extends EventEmitter {
         isWorktree,
         worktreeBranch,
         subagentsEnabled: effectiveSubagents,
+        anthropicOAuth: options.anthropicOAuth,
+        openaiOAuth: options.openaiOAuth,
+        openaiAccountId: options.openaiAccountId,
+        subagentTokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
         autoTestConfig: {
           enabled: effectiveAutoTest,
           testCommand: effectiveTestCommand,
@@ -468,6 +552,7 @@ export class AgentCoreEngine extends EventEmitter {
           worktreePath: isWorktree ? effectiveWorkspaceRoot : undefined,
           messages: [],
           tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+          subagents: this.subagentManager.getInstancesBySession(sessionId),
           createdAt: Date.now(),
           updatedAt: Date.now(),
         },
@@ -484,6 +569,9 @@ export class AgentCoreEngine extends EventEmitter {
       sessionTask.isWorktree = isWorktree;
       sessionTask.worktreeBranch = worktreeBranch;
       sessionTask.subagentsEnabled = effectiveSubagents;
+      sessionTask.anthropicOAuth = options.anthropicOAuth;
+      sessionTask.openaiOAuth = options.openaiOAuth;
+      sessionTask.openaiAccountId = options.openaiAccountId;
       sessionTask.autoTestConfig = {
         enabled: effectiveAutoTest,
         testCommand: effectiveTestCommand,
@@ -518,6 +606,8 @@ export class AgentCoreEngine extends EventEmitter {
       };
     } else if (options.resetContext) {
       sessionTask.contextManager.clear();
+      sessionTask.subagentTokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+      this.subagentManager.clearSessionSubagents(sessionId);
       sessionTask.taskState = {
         id: taskId,
         sessionId,
@@ -534,6 +624,7 @@ export class AgentCoreEngine extends EventEmitter {
         worktreePath: sessionTask.isWorktree ? sessionTask.workspaceRoot : undefined,
         messages: [],
         tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        subagents: [],
         createdAt: Date.now(),
         updatedAt: Date.now(),
       };
@@ -930,11 +1021,19 @@ export class AgentCoreEngine extends EventEmitter {
             workspaceRoot: sessionTask.workspaceRoot,
             sessionId: sessionTask.sessionId,
             taskId: sessionTask.taskState.id,
+            depth: 0,
             provider: sessionTask.taskState.provider,
             model: sessionTask.taskState.model,
             apiKey: provider.getApiKey() || this.apiKey,
             baseURL: provider.getBaseURL() || this.baseURL,
+            anthropicOAuth: sessionTask.anthropicOAuth,
+            openaiOAuth: sessionTask.openaiOAuth,
+            openaiAccountId: sessionTask.openaiAccountId,
             subagentManager: this.subagentManager,
+            parentSignal: sessionTask.abortController?.signal,
+            onCodeModified: () => {
+              sessionTask.codeModified = true;
+            },
             onFileDiff: (diff: FileDiff) => {
               this.emitEvent('file:diff', { ...diff, sessionId, taskId: sessionTask.taskState.id });
             },
@@ -1195,12 +1294,203 @@ export class AgentCoreEngine extends EventEmitter {
 
   private syncTaskState(sessionTask: SessionTask): void {
     sessionTask.taskState.messages = sessionTask.contextManager.getMessages();
-    sessionTask.taskState.tokenUsage = sessionTask.contextManager.getTokenUsage();
+    sessionTask.taskState.subagents = this.subagentManager.getInstancesBySession(sessionTask.sessionId);
+    const ctxUsage = sessionTask.contextManager.getTokenUsage();
+    const subUsage = sessionTask.subagentTokenUsage || {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+    };
+    sessionTask.taskState.tokenUsage = {
+      promptTokens: (ctxUsage.promptTokens || 0) + (subUsage.promptTokens || 0),
+      completionTokens: (ctxUsage.completionTokens || 0) + (subUsage.completionTokens || 0),
+      totalTokens: (ctxUsage.totalTokens || 0) + (subUsage.totalTokens || 0),
+      cacheReadTokens:
+        (ctxUsage.cacheReadTokens || 0) + (subUsage.cacheReadTokens || 0) || undefined,
+      cacheWriteTokens:
+        (ctxUsage.cacheWriteTokens || 0) + (subUsage.cacheWriteTokens || 0) || undefined,
+    };
     sessionTask.taskState.updatedAt = Date.now();
     this.emitEvent('task:state', {
       ...sessionTask.taskState,
       sessionId: sessionTask.sessionId,
     });
+  }
+
+  private async handleSubagentToolApproval(
+    sessionId: string,
+    request: ToolCallRequest & { subagentId: string; subagentRole: string },
+    signal?: AbortSignal,
+  ): Promise<{ approved: boolean; feedback?: string }> {
+    if (this.autoApprove) {
+      return { approved: true };
+    }
+    if (signal?.aborted) {
+      return { approved: false, feedback: 'Subagent cancelled' };
+    }
+
+    const previousQueue = this.subagentApprovalQueues.get(sessionId) || Promise.resolve();
+    let releaseQueue: () => void;
+    const currentQueue = new Promise<void>((r) => {
+      releaseQueue = r;
+    });
+    this.subagentApprovalQueues.set(
+      sessionId,
+      previousQueue.then(
+        () => currentQueue,
+        () => currentQueue,
+      ),
+    );
+
+    await previousQueue;
+    try {
+      if (signal?.aborted) {
+        return { approved: false, feedback: 'Subagent cancelled' };
+      }
+      const sessionTask = this.tasksBySession.get(sessionId);
+      if (!sessionTask) {
+        return { approved: false, feedback: 'Session not found' };
+      }
+      return await new Promise<{ approved: boolean; feedback?: string }>((resolve) => {
+        let finished = false;
+        const finish = (result: { approved: boolean; feedback?: string }) => {
+          if (finished) return;
+          finished = true;
+          if (signal) {
+            signal.removeEventListener('abort', onAbort);
+          }
+          if (sessionTask.pendingApproval?.toolCallId === request.id) {
+            sessionTask.pendingApproval = null;
+            this.setStatus(sessionTask, 'executing_tool');
+          }
+          resolve(result);
+        };
+
+        const onAbort = () => {
+          finish({ approved: false, feedback: 'Subagent cancelled' });
+        };
+
+        if (signal?.aborted) {
+          finish({ approved: false, feedback: 'Subagent cancelled' });
+          return;
+        }
+
+        if (signal) {
+          signal.addEventListener('abort', onAbort, { once: true });
+        }
+
+        sessionTask.pendingApproval = {
+          toolCallId: request.id,
+          resolve: (approved: boolean, feedback?: string) => {
+            finish({ approved, feedback });
+          },
+        };
+
+        this.emitEvent('tool:request', {
+          ...request,
+          requiresApproval: true,
+          sessionId,
+          taskId: sessionTask.taskState.id,
+        });
+        this.setStatus(sessionTask, 'waiting_approval');
+      });
+    } finally {
+      releaseQueue!();
+    }
+  }
+
+  private async handleSubagentAskQuestion(
+    sessionId: string,
+    params: {
+      question: string;
+      options?: string[];
+      isMultiSelect?: boolean;
+      allowCustomInput?: boolean;
+      subagentId: string;
+      subagentRole: string;
+    },
+    signal?: AbortSignal,
+  ): Promise<{ answers: string[]; customInput?: string }> {
+    if (signal?.aborted) {
+      return { answers: [] };
+    }
+
+    const previousQueue = this.subagentQuestionQueues.get(sessionId) || Promise.resolve();
+    let releaseQueue: () => void;
+    const currentQueue = new Promise<void>((r) => {
+      releaseQueue = r;
+    });
+    this.subagentQuestionQueues.set(
+      sessionId,
+      previousQueue.then(
+        () => currentQueue,
+        () => currentQueue,
+      ),
+    );
+
+    await previousQueue;
+    try {
+      if (signal?.aborted) {
+        return { answers: [] };
+      }
+      const sessionTask = this.tasksBySession.get(sessionId);
+      if (!sessionTask) {
+        return { answers: [] };
+      }
+
+      const toolCallId = `sub_q_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+      return await new Promise<{ answers: string[]; customInput?: string }>((resolve) => {
+        let finished = false;
+        const finish = (result: { answers: string[]; customInput?: string }) => {
+          if (finished) return;
+          finished = true;
+          if (signal) {
+            signal.removeEventListener('abort', onAbort);
+          }
+          if (sessionTask.pendingQuestion?.toolCallId === toolCallId) {
+            sessionTask.pendingQuestion = null;
+            this.setStatus(sessionTask, 'thinking');
+          }
+          resolve(result);
+        };
+
+        const onAbort = () => {
+          finish({ answers: [] });
+        };
+
+        if (signal?.aborted) {
+          finish({ answers: [] });
+          return;
+        }
+
+        if (signal) {
+          signal.addEventListener('abort', onAbort, { once: true });
+        }
+
+        sessionTask.pendingQuestion = {
+          toolCallId,
+          resolve: (answer) => {
+            finish(answer);
+          },
+        };
+
+        this.emitEvent('question:ask', {
+          toolCallId,
+          question: params.question,
+          options: params.options,
+          isMultiSelect: params.isMultiSelect,
+          allowCustomInput: params.allowCustomInput ?? true,
+          sessionId,
+          taskId: sessionTask.taskState.id,
+          subagentId: params.subagentId,
+          subagentRole: params.subagentRole,
+        });
+        this.setStatus(sessionTask, 'waiting_user_input');
+      });
+    } finally {
+      releaseQueue!();
+    }
   }
 
   /**

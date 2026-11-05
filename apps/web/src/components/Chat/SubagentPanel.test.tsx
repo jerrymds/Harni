@@ -132,36 +132,182 @@ describe('SubagentPanel Component', () => {
     expect(updated[0].status).toBe('cancelled');
   });
 
-  it('renders AGY subagent badge and details correctly', () => {
-    const mockAgySubagent: SubagentInstanceInfo = {
-      id: 'sub_agy_1',
+  it('renders currentToolSummary and model info correctly', () => {
+    const mockSubagent: SubagentInstanceInfo = {
+      id: 'sub_active_1',
       parentId: 'task_1',
       sessionId: 'session_123',
-      typeName: 'agy-worker',
-      role: 'Autonomous Worker',
-      prompt: 'Execute refactoring via agy CLI',
+      typeName: 'coder',
+      role: 'Code Implementer',
+      prompt: 'Execute refactoring',
       status: 'running',
       depth: 1,
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      runnerType: 'agy',
-      conversationId: 'conv_agy_999',
+      model: 'gemini-2.5-flash',
+      currentToolSummary: 'Subagent calling replace_file_content',
     };
 
     useAgentStore.setState({
       currentSessionId: 'session_123',
       subagents: {
-        session_123: [mockAgySubagent],
+        session_123: [mockSubagent],
       },
     });
 
     render(<SubagentPanel />);
 
-    expect(screen.getByText('AGY CLI')).toBeInTheDocument();
-    expect(screen.getByText('Autonomous Worker')).toBeInTheDocument();
-    expect(screen.getByText('執行器:')).toBeInTheDocument();
-    expect(screen.getByText('AGY')).toBeInTheDocument();
-    expect(screen.getByText(/conv_agy/)).toBeInTheDocument();
+    expect(screen.getByText('Code Implementer')).toBeInTheDocument();
+    expect(screen.getByText('Subagent calling replace_file_content')).toBeInTheDocument();
+    expect(screen.getByText('模型:')).toBeInTheDocument();
+    expect(screen.getByText('gemini-2.5-flash')).toBeInTheDocument();
+  });
+
+  it('renders tokenUsage correctly when available', () => {
+    const mockSubagent: SubagentInstanceInfo = {
+      id: 'sub_tokens_1',
+      parentId: 'task_1',
+      sessionId: 'session_123',
+      typeName: 'researcher',
+      role: 'Token Reporter',
+      prompt: 'Check token usage',
+      status: 'completed',
+      depth: 1,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      tokenUsage: {
+        promptTokens: 1200,
+        completionTokens: 350,
+        totalTokens: 1550,
+      },
+    };
+
+    useAgentStore.setState({
+      currentSessionId: 'session_123',
+      subagents: {
+        session_123: [mockSubagent],
+      },
+    });
+
+    render(<SubagentPanel />);
+
+    // Click to expand
+    fireEvent.click(screen.getByText('Token Reporter'));
+    expect(screen.getByText('Tokens:')).toBeInTheDocument();
+    expect(screen.getByText('1,550')).toBeInTheDocument();
+  });
+
+  it('renders live streaming text and thinking when subagent is running', () => {
+    const mockSubagent: SubagentInstanceInfo = {
+      id: 'sub_stream_1',
+      parentId: 'task_1',
+      sessionId: 'session_123',
+      typeName: 'coder',
+      role: 'Streaming Worker',
+      prompt: 'Work on streaming',
+      status: 'running',
+      depth: 1,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      streamingThinking: 'Analyzing project structure...',
+      streamingText: 'Writing code for SubagentPanel component...',
+    };
+
+    useAgentStore.setState({
+      currentSessionId: 'session_123',
+      subagents: {
+        session_123: [mockSubagent],
+      },
+    });
+
+    render(<SubagentPanel />);
+
+    expect(screen.getByText(/即時輸出 \(Live Stream\):/)).toBeInTheDocument();
+    expect(screen.getByText('思考過程:')).toBeInTheDocument();
+    expect(screen.getByText('Analyzing project structure...')).toBeInTheDocument();
+    expect(screen.getByText(/Writing code for SubagentPanel component\.\.\./)).toBeInTheDocument();
+  });
+
+  it('renders structured report chips, verification, findings, and open questions', () => {
+    const mockSubagent: SubagentInstanceInfo = {
+      id: 'sub_report_1',
+      parentId: 'task_1',
+      sessionId: 'session_123',
+      typeName: 'coder',
+      role: 'Report Worker',
+      prompt: 'Execute refactor',
+      status: 'completed',
+      depth: 1,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      result: 'Finished refactoring task.',
+      structuredReport: {
+        summary: 'Refactored successfully.',
+        modifiedFiles: ['src/subagentManager.ts', 'src/subagentInstance.ts'],
+        verification: 'All vitest assertions passed 100%.',
+        findings: ['Concurrency semaphore eliminates resource contention.'],
+        openQuestions: ['Should we add persistent queue state?'],
+      },
+    };
+
+    useAgentStore.setState({
+      currentSessionId: 'session_123',
+      subagents: {
+        session_123: [mockSubagent],
+      },
+    });
+
+    render(<SubagentPanel />);
+
+    // Click to expand
+    fireEvent.click(screen.getByText('Report Worker'));
+
+    // Check modified files
+    expect(screen.getByText(/修改檔案 \(2\):/)).toBeInTheDocument();
+    expect(screen.getByText('src/subagentManager.ts')).toBeInTheDocument();
+    expect(screen.getByText('src/subagentInstance.ts')).toBeInTheDocument();
+
+    // Check verification
+    expect(screen.getByText(/驗證結果 \(Verification\):/)).toBeInTheDocument();
+    expect(screen.getByText('All vitest assertions passed 100%.')).toBeInTheDocument();
+
+    // Check findings & open questions
+    expect(screen.getByText(/關鍵發現 \(Findings\):/)).toBeInTheDocument();
+    expect(screen.getByText('Concurrency semaphore eliminates resource contention.')).toBeInTheDocument();
+    expect(screen.getByText(/待決問題 \(Open Questions\):/)).toBeInTheDocument();
+    expect(screen.getByText('Should we add persistent queue state?')).toBeInTheDocument();
+  });
+
+  it('renders pending queued status badge and allows cancelling queued subagent', () => {
+    const mockSubagent: SubagentInstanceInfo = {
+      id: 'sub_queued_1',
+      parentId: 'task_1',
+      sessionId: 'session_123',
+      typeName: 'architect',
+      role: 'Queued Architect',
+      prompt: 'Design architecture',
+      status: 'pending',
+      depth: 1,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    useAgentStore.setState({
+      currentSessionId: 'session_123',
+      subagents: {
+        session_123: [mockSubagent],
+      },
+    });
+
+    render(<SubagentPanel />);
+
+    expect(screen.getByText('排隊中')).toBeInTheDocument();
+    const killBtn = screen.getByTitle('終止此子代理人');
+    expect(killBtn).toBeInTheDocument();
+    fireEvent.click(killBtn);
+
+    const updated = useAgentStore.getState().subagents['session_123'];
+    expect(updated[0].status).toBe('cancelled');
   });
 });
 

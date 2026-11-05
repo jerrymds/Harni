@@ -252,6 +252,7 @@ export interface TaskState {
   isWorktree?: boolean;
   worktreeBranch?: string;
   worktreePath?: string;
+  subagents?: SubagentInstanceInfo[];
   createdAt: number;
   updatedAt: number;
 }
@@ -277,6 +278,8 @@ export interface QuestionPrompt {
   options?: string[];
   isMultiSelect?: boolean;
   allowCustomInput?: boolean;
+  subagentId?: string;
+  subagentRole?: string;
 }
 
 /**
@@ -300,18 +303,7 @@ export interface ChatSession {
   tokenUsage?: TokenUsage;
 }
 
-export type SubagentRunnerType = 'internal' | 'agy';
-
-/**
- * Options specifically for the Antigravity CLI ('agy') subagent runner
- */
-export interface AgyRunnerOptions {
-  binaryPath?: string;
-  effort?: 'low' | 'medium' | 'high';
-  mode?: 'accept-edits' | 'plan';
-  dangerouslySkipPermissions?: boolean;
-  timeoutMs?: number;
-}
+export type SubagentModelTier = 'inherit' | 'fast' | 'reasoning';
 
 /**
  * Subagent Definition metadata and capabilities
@@ -326,9 +318,10 @@ export interface SubagentDefinition {
   enableSubagentTools?: boolean;
   enableMcpTools?: boolean;
   model?: string;
+  modelTier?: SubagentModelTier;
   maxTurns?: number;
-  runnerType?: SubagentRunnerType;
-  agyOptions?: AgyRunnerOptions;
+  maxTokensBudget?: number;
+  timeoutMs?: number;
 }
 
 /**
@@ -342,6 +335,14 @@ export type SubagentStatus =
   | 'completed'
   | 'error'
   | 'cancelled';
+
+export interface SubagentStructuredReport {
+  summary?: string;
+  modifiedFiles?: string[];
+  findings?: string[];
+  verification?: string;
+  openQuestions?: string[];
+}
 
 /**
  * Live Subagent instance state snapshot
@@ -362,9 +363,13 @@ export interface SubagentInstanceInfo {
   result?: string;
   error?: string;
   toolCallCount?: number;
-  runnerType?: SubagentRunnerType;
-  conversationId?: string;
   currentToolSummary?: string;
+  tokenUsage?: TokenUsage;
+  streamingText?: string;
+  streamingThinking?: string;
+  structuredReport?: SubagentStructuredReport;
+  worktreePath?: string;
+  worktreeBranch?: string;
 }
 
 

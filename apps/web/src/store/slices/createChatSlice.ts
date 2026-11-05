@@ -7,9 +7,11 @@ import {
   deleteSessionFromDB,
   loadSavedFolders,
   loadSavedSessions,
+  loadSavedSubagents,
   PROVIDER_DEFAULT_MODELS,
   saveFoldersToStorage,
   saveSessionsToStorage,
+  saveSubagentsToStorage,
   syncFoldersToDB,
   syncSessionToDB,
   syncSettingsToDB,
@@ -39,7 +41,7 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
   selectedModel: initialSessionsData.initialModel || savedModel,
   availableModels: {},
   isLoadingModels: false,
-  subagents: {},
+  subagents: loadSavedSubagents(),
 
   sendPrompt: (prompt, contextFiles, attachments) => {
     const {
@@ -350,6 +352,9 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
     const { ws, sessions, currentSessionId, folders, activeFolderId, selectedProvider, selectedModel, selectedMode } = get();
     const filtered = sessions.filter((s) => s.id !== sessionId);
 
+    const currentSubagents = { ...get().subagents };
+    delete currentSubagents[sessionId];
+
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(
         JSON.stringify({
@@ -382,7 +387,9 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
         currentSessionId: defaultId,
         messages: [],
         status: 'idle',
+        subagents: currentSubagents,
       });
+      saveSubagentsToStorage(currentSubagents);
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(
           JSON.stringify({
@@ -416,7 +423,9 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
       selectedProvider: nextProvider,
       selectedModel: nextModel,
       status: 'idle',
+      subagents: currentSubagents,
     });
+    saveSubagentsToStorage(currentSubagents);
     if (ws && ws.readyState === WebSocket.OPEN && nextActiveId) {
       ws.send(
         JSON.stringify({
@@ -449,6 +458,9 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
       ws.send(JSON.stringify({ type: 'task:new', payload: { sessionId: currentSessionId } }));
     }
 
+    const currentSubagents = { ...get().subagents };
+    delete currentSubagents[currentSessionId];
+
     const updatedSessions = sessions.map((s) =>
       s.id === currentSessionId
         ? {
@@ -471,7 +483,9 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
       activeThinking: '',
       pendingApproval: null,
       tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      subagents: currentSubagents,
     });
+    saveSubagentsToStorage(currentSubagents);
     saveSessionsToStorage(updatedSessions, true);
     clearMessagesInDB(currentSessionId);
   },
@@ -596,7 +610,7 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
   },
 
   killSubagent: (subagentId: string) => {
-    const { subagents, currentSessionId } = get();
+    const { subagents, currentSessionId, ws } = get();
     const sessionSubagents = subagents[currentSessionId] || [];
     const updated = sessionSubagents.map((s) =>
       s.id === subagentId ? { ...s, status: 'cancelled' as const } : s,
@@ -607,5 +621,14 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
         [currentSessionId]: updated,
       },
     });
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({
+          type: 'subagent:kill',
+          payload: { subagentId, sessionId: currentSessionId },
+        }),
+      );
+    }
   },
 });

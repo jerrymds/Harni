@@ -5,6 +5,7 @@ import type {
   GoogleAuthInfo,
   LLMProviderConfig,
   LLMProviderType,
+  SubagentInstanceInfo,
   WorkspaceFolder,
 } from '@harni/types';
 
@@ -416,3 +417,61 @@ export const DEFAULT_MCP_CONFIG = JSON.stringify(
   null,
   2,
 );
+
+export function loadSavedSubagents(): Record<string, SubagentInstanceInfo[]> {
+  try {
+    const raw = localStorage.getItem('cline_web_subagents');
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+        const result: Record<string, SubagentInstanceInfo[]> = {};
+        for (const [sessionId, list] of Object.entries(parsed)) {
+          if (Array.isArray(list)) {
+            result[sessionId] = list.map((sub: any) => {
+              if (
+                sub.status === 'running' ||
+                sub.status === 'pending' ||
+                sub.status === 'waiting_for_input'
+              ) {
+                return {
+                  ...sub,
+                  streamingText: undefined,
+                  streamingThinking: undefined,
+                };
+              }
+              return sub;
+            });
+          }
+        }
+        return result;
+      }
+    }
+  } catch {}
+  return {};
+}
+
+let saveSubagentsTimeout: any = null;
+export function saveSubagentsToStorage(subagents: Record<string, SubagentInstanceInfo[]>): void {
+  if (typeof window === 'undefined' || !window.localStorage) {
+    return;
+  }
+  if (saveSubagentsTimeout) {
+    clearTimeout(saveSubagentsTimeout);
+  }
+  saveSubagentsTimeout = setTimeout(() => {
+    try {
+      const sanitized: Record<string, SubagentInstanceInfo[]> = {};
+      for (const [sessionId, list] of Object.entries(subagents)) {
+        if (Array.isArray(list) && list.length > 0) {
+          sanitized[sessionId] = list.map((sub) => {
+            const { streamingText: _st, streamingThinking: _sth, ...rest } = sub;
+            return rest as SubagentInstanceInfo;
+          });
+        }
+      }
+      localStorage.setItem('cline_web_subagents', JSON.stringify(sanitized));
+    } catch (err) {
+      console.warn('[store] Failed to save subagents to localStorage:', err);
+    }
+  }, 300);
+}

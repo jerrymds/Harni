@@ -373,6 +373,14 @@ export class WebSocketHandler {
         break;
       }
 
+      case 'subagent:kill': {
+        const { subagentId, sessionId } = msg.payload;
+        if (subagentId) {
+          this.engine.getSubagentManager().manageSubagents('kill', [subagentId], sessionId);
+        }
+        break;
+      }
+
       case 'checkpoint:rollback': {
         const sessionId = msg.payload?.sessionId;
         const checkpointId = msg.payload?.checkpointId;

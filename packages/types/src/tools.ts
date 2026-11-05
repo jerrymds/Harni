@@ -50,6 +50,8 @@ export interface ToolCallRequest {
   name: string;
   arguments: Record<string, unknown>;
   requiresApproval: boolean;
+  subagentId?: string;
+  subagentRole?: string;
 }
 
 /**

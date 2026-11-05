@@ -18,6 +18,12 @@ export interface ToolExecutionContext {
     cwd?: string,
     onData?: (data: string) => void,
   ) => Promise<{ exitCode: number; output: string }>;
+  depth?: number;
+  parentSignal?: AbortSignal;
+  onCodeModified?: () => void;
+  anthropicOAuth?: boolean;
+  openaiOAuth?: boolean;
+  openaiAccountId?: string;
   askQuestion?: (params: {
     question: string;
     options?: string[];

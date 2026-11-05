@@ -4,7 +4,7 @@ import {
   type ProviderOptions,
   type StreamChunk,
 } from './baseProvider.js';
-import type { ChatMessage, LLMProviderType, ToolDefinition } from '@harni/types';
+import type { ChatMessage, LLMProviderType, TokenUsage, ToolDefinition } from '@harni/types';
 
 export interface MockScriptStep {
   thought?: string;
@@ -14,6 +14,9 @@ export interface MockScriptStep {
     name: string;
     arguments: Record<string, unknown>;
   }>;
+  usage?: TokenUsage;
+  usageChunk?: TokenUsage;
+  latencyMs?: number;
 }
 
 export class MockProvider extends BaseLLMProvider {
@@ -40,7 +43,12 @@ export class MockProvider extends BaseLLMProvider {
     _systemPrompt: string,
     _tools: ToolDefinition[],
     onChunk: (chunk: StreamChunk) => void,
+    signal?: AbortSignal,
   ): Promise<ProviderCompletionResult> {
+    if (signal?.aborted) {
+      throw new Error('Subagent execution cancelled');
+    }
+
     // If a custom script is provided, use the current step
     let step: MockScriptStep;
     if (this.scriptSteps.length > 0 && this.stepIndex < this.scriptSteps.length) {
@@ -69,9 +77,38 @@ export class MockProvider extends BaseLLMProvider {
       }
     }
 
+    if (step.latencyMs && step.latencyMs > 0) {
+      await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          signal?.removeEventListener('abort', onAbort);
+          resolve();
+        }, step.latencyMs);
+
+        const onAbort = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(new Error('Subagent execution cancelled'));
+        };
+
+        if (signal?.aborted) {
+          onAbort();
+          return;
+        }
+
+        signal?.addEventListener('abort', onAbort, { once: true });
+      });
+    }
+
     // Stream thinking
     if (step.thought) {
       for (const word of step.thought.split(' ')) {
+        if (signal?.aborted) {
+          throw new Error('Subagent execution cancelled');
+        }
         onChunk({ type: 'thinking', thought: word + ' ' });
         await new Promise((r) => setTimeout(r, 10));
       }
@@ -80,6 +117,9 @@ export class MockProvider extends BaseLLMProvider {
     // Stream text
     if (step.text) {
       for (const word of step.text.split(' ')) {
+        if (signal?.aborted) {
+          throw new Error('Subagent execution cancelled');
+        }
         onChunk({ type: 'token', content: word + ' ' });
         await new Promise((r) => setTimeout(r, 10));
       }
@@ -92,11 +132,15 @@ export class MockProvider extends BaseLLMProvider {
       }
     }
 
+    if (step.usageChunk) {
+      onChunk({ type: 'usage', usage: step.usageChunk });
+    }
+
     return {
       text: step.text || '',
       thinking: step.thought,
       toolCalls: step.toolCalls,
-      usage: {
+      usage: step.usage || {
         promptTokens: 100,
         completionTokens: 50,
         totalTokens: 150,

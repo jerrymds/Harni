@@ -11,6 +11,7 @@ interface McpToolEntry {
   serverName: string;
   toolName: string;
   requiresApproval: boolean;
+  allowedForReadOnly: boolean;
 }
 
 export interface McpManagerConnectResult {
@@ -134,6 +135,11 @@ export class McpServerManager {
     const qualifiedName = this.buildQualifiedName(client.serverName, tool.name);
     const requiresApproval =
       config.requiresApproval !== undefined ? config.requiresApproval : true;
+    const isDenied =
+      tool.annotations?.destructiveHint === true ||
+      tool.annotations?.readOnlyHint === false ||
+      (config.readOnlyDenyTools?.includes(tool.name) ?? false);
+    const allowedForReadOnly = !isDenied;
 
     const definition: ToolDefinition = {
       name: qualifiedName,
@@ -152,6 +158,7 @@ export class McpServerManager {
       serverName: client.serverName,
       toolName: tool.name,
       requiresApproval,
+      allowedForReadOnly,
     });
   }
 
@@ -168,6 +175,11 @@ export class McpServerManager {
   /** Approval requirement for a qualified tool (inherits from server config). */
   public getToolRequiresApproval(name: string): boolean {
     return this.tools.get(name)?.requiresApproval ?? false;
+  }
+
+  /** Whether an MCP tool is allowed for read-only subagents. */
+  public isToolAllowedForReadOnly(name: string): boolean {
+    return this.tools.get(name)?.allowedForReadOnly ?? true;
   }
 
   /** Execute an MCP tool by its qualified name. */

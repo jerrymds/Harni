@@ -22,6 +22,8 @@ export interface McpServerConfig {
   disabled?: boolean;
   /** Optional SSE remote server URL */
   serverUrl?: string;
+  /** Explicit list of tool names that are denied for read-only subagents */
+  readOnlyDenyTools?: string[];
 }
 
 /** Full MCP configuration object as persisted in settings / localStorage. */
@@ -38,6 +40,10 @@ export interface McpToolInfo {
     type?: string;
     properties?: Record<string, unknown>;
     required?: string[];
+  };
+  annotations?: {
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
   };
 }
 

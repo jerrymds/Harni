@@ -2,14 +2,14 @@ import type { ToolParametersSchema, ToolResult } from '@harni/types';
 import { BaseTool, type ToolExecutionContext } from './baseTool.js';
 
 export interface ManageSubagentsParams {
-  action: 'list' | 'kill' | 'kill_all';
+  action: 'list' | 'kill' | 'kill_all' | 'wait';
   subagentIds?: string[];
 }
 
 export class ManageSubagentsTool extends BaseTool<ManageSubagentsParams> {
   public readonly name = 'manage_subagents';
   public readonly description =
-    'Manages active subagents: "list" to view current subagents and their states, "kill" to terminate specific subagents, or "kill_all" to terminate all subagents.';
+    'Manages active subagents: "list" to view current subagents and their states, "kill" to terminate specific subagents, "kill_all" to terminate all subagents, or "wait" to block until specified (or all active) background subagents finish and return their results.';
   public readonly requiresApproval = false;
 
   public readonly parameters: ToolParametersSchema = {
@@ -17,13 +17,14 @@ export class ManageSubagentsTool extends BaseTool<ManageSubagentsParams> {
     properties: {
       action: {
         type: 'string',
-        enum: ['list', 'kill', 'kill_all'],
-        description: 'The management action: list, kill, or kill_all.',
+        enum: ['list', 'kill', 'kill_all', 'wait'],
+        description:
+          'The management action: "list", "kill", "kill_all", or "wait" to block until specified (or all active) background subagents finish and return their results.',
       },
       subagentIds: {
         type: 'array',
         items: { type: 'string' },
-        description: 'List of subagent IDs to kill (required when action is "kill").',
+        description: 'List of subagent IDs to kill or wait for (optional for "wait" / required when action is "kill").',
       },
     },
     required: ['action'],
@@ -43,6 +44,40 @@ export class ManageSubagentsTool extends BaseTool<ManageSubagentsParams> {
     }
 
     try {
+      if (params.action === 'wait') {
+        const waited = await context.subagentManager.waitForSubagents(
+          params.subagentIds,
+          context.sessionId,
+        );
+        if (waited.length === 0) {
+          return {
+            toolCallId: '',
+            output: 'No active background subagents to wait for in this session.',
+            summary: '0 subagents waited',
+          };
+        }
+
+        const lines = waited.map((info) => {
+          const emoji = info.status === 'completed' ? '✅' : '❌';
+          let str = `### Subagent: ${info.role} (\`${info.id}\`)\n- **Status**: ${emoji} ${info.status}\n- **Duration**: ${info.completedAt && info.createdAt ? info.completedAt - info.createdAt : 0}ms\n- **Tool Calls**: ${info.toolCallCount || 0}`;
+          if (info.structuredReport?.modifiedFiles && info.structuredReport.modifiedFiles.length > 0) {
+            str += `\n- **Modified Files**: ${info.structuredReport.modifiedFiles.map((f) => `\`${f}\``).join(', ')}`;
+          }
+          if (info.result) {
+            str += `\n\n**Output**:\n${info.result}`;
+          } else if (info.error) {
+            str += `\n\n**Error**:\n${info.error}`;
+          }
+          return str;
+        });
+
+        return {
+          toolCallId: '',
+          output: `Background subagents completed (${waited.length}):\n\n${lines.join('\n\n---\n\n')}`,
+          summary: `Waited for ${waited.length} subagent(s)`,
+        };
+      }
+
       const list = context.subagentManager.manageSubagents(
         params.action,
         params.subagentIds,

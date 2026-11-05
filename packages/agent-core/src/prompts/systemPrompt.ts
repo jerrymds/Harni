@@ -8,6 +8,7 @@ export interface SystemPromptOptions {
   tools?: ToolDefinition[];
   skillsFormatted?: string;
   skills?: AgentSkill[];
+  isSubagent?: boolean;
 }
 
 export class SystemPromptBuilder {
@@ -20,6 +21,7 @@ export class SystemPromptBuilder {
       tools = [],
       skillsFormatted,
       skills = [],
+      isSubagent = false,
     } = options;
 
     const sections: string[] = [];
@@ -50,7 +52,9 @@ export class SystemPromptBuilder {
     }
 
     // 6. Planning Mode & Implementation Plan Section
-    sections.push(this.getPlanningModeSection());
+    if (!isSubagent) {
+      sections.push(this.getPlanningModeSection());
+    }
 
     // 7. Skills Integration Section
     if (skillsFormatted && skillsFormatted.trim().length > 0) {
@@ -60,7 +64,29 @@ export class SystemPromptBuilder {
     }
 
     // 8. Operating Principles & Best Practices
-    sections.push(`==== OPERATING PRINCIPLES ====
+    if (isSubagent) {
+      sections.push(`==== SUBAGENT OPERATING RULES ====
+- You are a subagent delegated by a parent orchestrator. Execute the task autonomously to completion.
+- Do NOT produce an implementation plan and wait for approval; do NOT ask the user questions. If something is ambiguous, make a reasonable assumption and state it in your report.
+- Your final message (with no tool calls) is returned to the parent as your report: include what you did, files changed, findings, and any unresolved issues.
+- Structure your final report clearly using Markdown headings where applicable:
+  - \`## Summary\`: Concise overview of what was accomplished.
+  - \`## Modified Files\`: Bullet list of file paths created or modified (if any).
+  - \`## Key Findings\`: Bullet list of important architectural or code findings (with file:line references).
+  - \`## Verification\`: Commands run and pass/fail status (if applicable).
+  - \`## Open Questions\`: Any remaining risks or unresolved questions (if any).
+
+==== OPERATING PRINCIPLES ====
+1. **Scope Analysis & Autonomy**: Assess requirements and execute your delegated task directly without pausing for an implementation plan approval.
+2. **Thorough Exploration**: Before modifying code, read and inspect relevant files to fully understand existing architecture, conventions, and dependencies.
+3. **Skill Chaining & SOPs**: Use the \`use_skill\` tool to activate specialized domain procedures (e.g. testing, commit, code review) whenever a task matches a skill domain.
+4. **Minimal & Surgical Changes**: Preserve existing formatting, comments, and unrelated functionality. Avoid rewriting entire files when replacing specific lines or functions.
+5. **Verify Changes**: After modifying code or creating files, execute tests or run build/typecheck commands when applicable to ensure changes work cleanly.
+6. **Safety & Permission**: Dangerous operations or terminal commands will be prompted for approval if configured. Explain clearly why an operation is needed.
+7. **Autonomous Decision Making**: Do NOT invoke \`ask_question\` or wait for interactive input. Make reasonable assumptions and state them in your report.
+8. **Concise Communication**: Be direct, professional, and explain what you did and why in concise markdown.`);
+    } else {
+      sections.push(`==== OPERATING PRINCIPLES ====
 1. **Scope Analysis & Planning**: Assess request complexity before editing. Complex, multi-file, or architectural changes require an Implementation Plan with a Verification Plan and explicit user approval before executing code changes. Simple one-off tweaks or investigatory queries proceed directly.
 2. **Thorough Exploration**: Before modifying code, read and inspect relevant files to fully understand existing architecture, conventions, and dependencies.
 3. **Skill Chaining & SOPs**: Use the \`use_skill\` tool to activate specialized domain procedures (e.g. testing, commit, code review) whenever a task matches a skill domain.
@@ -69,11 +95,14 @@ export class SystemPromptBuilder {
 6. **Safety & Permission**: Dangerous operations or terminal commands will be prompted to the user for approval. Explain clearly why an operation is needed.
 7. **Interactive Clarification**: When user requirements are underspecified, multiple architectural approaches exist, or design decisions are needed, use the \`ask_question\` tool to present structured options and receive user input rather than assuming.
 8. **Concise Communication**: Be direct, professional, and explain what you did and why in concise markdown.`);
+    }
 
     // 9. Custom User Instructions
     if (customInstructions && customInstructions.trim().length > 0) {
-      sections.push(`==== USER CUSTOM INSTRUCTIONS (.clinerules) ====
-${customInstructions.trim()}`);
+      const header = isSubagent
+        ? '==== SUBAGENT ROLE INSTRUCTIONS ===='
+        : '==== USER CUSTOM INSTRUCTIONS (.clinerules) ====';
+      sections.push(`${header}\n${customInstructions.trim()}`);
     }
 
     return sections.join('\n\n');
@@ -125,24 +154,22 @@ Focus on full-stack implementation, bug fixing, refactoring, and feature develop
     return `==== HIERARCHICAL MULTI-AGENT ORCHESTRATION ====
 You are the primary coordinator (Orchestrator). You can spawn specialized subagents with isolated context windows to delegate complex subtasks:
 - **invoke_subagent**: Launch one or multiple subagents concurrently. Built-in archetypes:
-  - \`agy-worker\`: Autonomous full-stack coding & terminal worker powered directly by Antigravity CLI (\`agy\`). Recommended for implementation, file edits, and commands.
-  - \`agy-researcher\`: Codebase & architectural investigator powered directly by Antigravity CLI (\`agy\`). Recommended for broad codebase exploration, directory analysis, and architectural reports.
-  - \`agy-tester\`: Automated test runner and debugging repair engineer powered by Antigravity CLI (\`agy\`).
-  - \`agy\`: General-purpose Antigravity CLI autonomous subagent.
   - \`researcher\`: Read-only codebase explorer. Delegate searching, reading, and architectural analysis to researcher to keep your own context clean.
   - \`coder\`: Code implementer. Delegate file writing, refactoring, and code edits.
   - \`reviewer\`: Code reviewer and test runner. Delegate running test suites and verifying diffs.
   - \`architect\`: High-level system architect. Delegate structural planning and decomposition.
-  - \`self\`: General-purpose subagent inheriting full capabilities.
+  - \`self\`: General-purpose subagent inheriting full capabilities in an isolated context window.
 - **send_message**: Follow up or send additional guidance to an active subagent.
 - **manage_subagents**: List active subagents, or terminate subagents.
 - **define_subagent**: Declare a custom subagent archetype for specialized domain tasks.
 
 Guidelines for Subagent Delegation:
-1. When a task involves exploring many files, directory structure, or broad codebase investigation, invoke \`agy-researcher\` (or \`researcher\`) to conduct the investigation and return a concise report.
-2. When the user requests delegating to an agy subagent, or when implementing coding changes via agy, invoke \`agy-worker\`.
-3. When multiple independent subtasks can be tackled at once (e.g. researching frontend and backend simultaneously), invoke them in parallel with a single \`invoke_subagent\` call.
-4. Review and synthesize findings from subagents before concluding the overall user task.`;
+1. When a task involves exploring many files, directory structure, or broad codebase investigation, invoke \`researcher\` to conduct the investigation and return a concise report.
+2. When implementing feature code, refactoring, or file modifications, invoke \`coder\`.
+3. When testing changes, running test suites, or reviewing diffs, invoke \`reviewer\`.
+4. When planning complex architecture or decomposing large tasks, invoke \`architect\`.
+5. When multiple independent subtasks can be tackled at once (e.g. researching frontend and backend simultaneously), invoke them in parallel with a single \`invoke_subagent\` call.
+6. Review and synthesize findings from subagents before concluding the overall user task.`;
   }
 
   private static getPlanningModeSection(): string {
