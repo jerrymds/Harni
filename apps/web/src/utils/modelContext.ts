@@ -77,6 +77,12 @@ export const MODEL_EXACT_CONTEXT: Record<string, number> = {
   'deepseek-v4.1-flash': 1048576,
   'deepseek-v4-flash': 1048576,
   'deepseek-v4-pro': 131072,
+
+  // Antigravity ACP & Next-Gen
+  'claude-sonnet-5-5': 200000,
+  'claude-opus-5-5': 200000,
+  'gpt-oss-120b': 131072,
+  'gpt-oss-120b-medium': 131072,
 };
 
 /**
@@ -104,7 +110,8 @@ export function resolveModelContextWindow(
     return modelInfo.contextWindow;
   }
 
-  const modelId = (selectedModel || '').toLowerCase().trim();
+  const cleanModel = (selectedModel || '').replace(/:acp$/i, '').replace(/-(low|medium|high)$/i, '');
+  const modelId = cleanModel.toLowerCase().trim();
 
   // 2. Exact match
   if (modelId && MODEL_EXACT_CONTEXT[modelId]) {
@@ -172,4 +179,44 @@ export function formatTokenCount(num: number): string {
     return `${val.toFixed(num % 1_000 === 0 ? 0 : 1)}k`;
   }
   return `${num}`;
+}
+
+/**
+ * Normalizes an Antigravity model ID by stripping thinking level suffixes.
+ * Special exception: gpt-oss-120b-medium preserves '-medium'.
+ */
+export function normalizeAntigravityModelId(rawId?: string): string {
+  const trimmed = (rawId || '').trim();
+  const hasAcp = trimmed.toLowerCase().endsWith(':acp');
+  let base = hasAcp ? trimmed.slice(0, -4) : trimmed;
+
+  if (base.toLowerCase() !== 'gpt-oss-120b-medium') {
+    base = base.replace(/-(low|medium|high)$/i, '');
+  }
+
+  return hasAcp ? `${base}:acp` : base;
+}
+
+/**
+ * Strips thinking level badges and provider labels from model names:
+ * (Low), (Medium), (High), (Antigravity), (ACP Mode).
+ * Pure ACP models are normalized with '(ACP)' suffix.
+ */
+export function cleanAntigravityDisplayName(name?: string, id?: string): string {
+  let cleaned = (name || id || '').trim();
+  cleaned = cleaned
+    .replace(/\s*\((?:low|medium|high)\)/gi, '')
+    .replace(/\s*-\s*(?:low|medium|high)$/gi, '')
+    .replace(/\s*\(antigravity\)/gi, '')
+    .replace(/\s*\(acp\s+mode\)/gi, '')
+    .trim();
+
+  const isAcp = (id || '').toLowerCase().endsWith(':acp') || /\(acp\)/i.test(name || '');
+  if (isAcp) {
+    cleaned = cleaned.replace(/\s*\(acp\)/gi, '').trim();
+    cleaned = `${cleaned} (ACP)`;
+  } else {
+    cleaned = cleaned.replace(/\s*\(acp\)/gi, '').trim();
+  }
+  return cleaned;
 }

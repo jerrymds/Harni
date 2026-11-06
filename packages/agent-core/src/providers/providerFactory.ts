@@ -15,25 +15,30 @@ export class ProviderFactory {
       throw new Error(`Unsupported LLM provider type: ${String(type)}`);
     }
 
+    const providerOptions: ProviderOptions = {
+      ...options,
+      sessionId: options.sessionId,
+    };
+
     if (type === 'cline') {
-      return new ClineProvider(options);
+      return new ClineProvider(providerOptions);
     }
 
     if (type === 'anthropic' || type.startsWith('anthropic-')) {
-      return new AnthropicProvider(options);
+      return new AnthropicProvider(providerOptions);
     }
 
     if (type === 'antigravity') {
       if (options.mockScript) {
-        return new MockProvider({ ...options, script: options.mockScript });
+        return new MockProvider({ ...providerOptions, script: options.mockScript });
       }
-      return new AntigravityProvider(options);
+      return new AntigravityProvider(providerOptions);
     }
 
     if (options.mockScript) {
-      return new MockProvider({ ...options, script: options.mockScript });
+      return new MockProvider({ ...providerOptions, script: options.mockScript });
     }
 
-    return new OpenAIProvider(type, options);
+    return new OpenAIProvider(type, providerOptions);
   }
 }

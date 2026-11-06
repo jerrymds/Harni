@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { Header } from './Header.js';
 import { useAgentStore } from '../../store/useAgentStore.js';
 
@@ -46,15 +46,15 @@ describe('Header Component', () => {
   });
 
   it('displays status beacon when status changes', () => {
-    useAgentStore.setState({ status: 'thinking' });
+    act(() => { useAgentStore.setState({ status: 'thinking' }); });
     const { rerender } = render(<Header />);
     expect(screen.getByText('AI 思考與推理中...')).toBeInTheDocument();
 
-    useAgentStore.setState({ status: 'executing_tool' });
+    act(() => { useAgentStore.setState({ status: 'executing_tool' }); });
     rerender(<Header />);
     expect(screen.getByText('執行工具操作中')).toBeInTheDocument();
 
-    useAgentStore.setState({ status: 'testing' });
+    act(() => { useAgentStore.setState({ status: 'testing' }); });
     rerender(<Header />);
     expect(screen.getByText('背景測試驗證中...')).toBeInTheDocument();
   });
@@ -64,5 +64,53 @@ describe('Header Component', () => {
     const settingsBtn = screen.getByText('設定');
     fireEvent.click(settingsBtn);
     expect(useAgentStore.getState().isSettingsOpen).toBe(true);
+  });
+
+  it('filters out thinking depth suffixes and cleans model display names for antigravity provider', () => {
+    act(() => {
+      useAgentStore.setState({
+        selectedProvider: 'antigravity',
+        selectedModel: 'gemini-3.8-flash',
+        availableModels: {
+          antigravity: [
+            { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' },
+            { id: 'gemini-3.8-flash-high', name: 'Gemini 3.8 Flash (High)' },
+            { id: 'gemini-3.8-flash-low', name: 'Gemini 3.8 Flash (Low)' },
+            { id: 'claude-sonnet-5-5:acp', name: 'Claude 3.5 Sonnet (ACP)' },
+            { id: 'gpt-oss-120b-medium:acp', name: 'GPT-OSS 120B (ACP Mode)' },
+          ],
+        },
+      });
+    });
+
+    render(<Header />);
+
+    // gemini-3.8-flash-high and gemini-3.8-flash-low should be filtered out
+    expect(screen.queryByRole('option', { name: 'Gemini 3.8 Flash (High)' })).toBeNull();
+    expect(screen.queryByRole('option', { name: 'Gemini 3.8 Flash (Low)' })).toBeNull();
+
+    // Cleaned display names
+    expect(screen.getByRole('option', { name: 'Gemini 3.8 Flash' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Claude 3.5 Sonnet (ACP)' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'GPT-OSS 120B (ACP)' })).toBeInTheDocument();
+  });
+
+  it('auto-corrects legacy selectedModel containing -(low|medium|high) to clean base model', () => {
+    act(() => {
+      useAgentStore.setState({
+        selectedProvider: 'antigravity',
+        selectedModel: 'gemini-3.8-flash-medium',
+        availableModels: {
+          antigravity: [
+            { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' },
+            { id: 'gemini-3.8-pro', name: 'Gemini 3.8 Pro' },
+          ],
+        },
+      });
+    });
+
+    render(<Header />);
+
+    expect(useAgentStore.getState().selectedModel).toBe('gemini-3.8-flash');
   });
 });

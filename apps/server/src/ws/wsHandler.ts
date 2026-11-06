@@ -1,6 +1,7 @@
 import type { WebSocket } from 'ws';
 import * as path from 'node:path';
-import type { AgentCoreEngine } from '@harni/agent-core';
+import * as fs from 'node:fs/promises';
+import { type AgentCoreEngine, composeAntigravityModel } from '@harni/agent-core';
 import type {
   ClientMessage,
   ServerMessage,
@@ -281,6 +282,9 @@ export class WebSocketHandler {
         let openaiOAuth = false;
         let openaiAccountId: string | undefined;
         let effectiveModel = model;
+        if (provider === 'antigravity' && effectiveModel) {
+          effectiveModel = composeAntigravityModel(effectiveModel, thinkingDepth);
+        }
         if (provider === 'anthropic' && !effectiveApiKey && this.dbService) {
           try {
             const session = await AnthropicAuthPage.ensureSession(this.dbService);
@@ -523,7 +527,16 @@ export class WebSocketHandler {
           const root = msg.payload.workspaceRoot
             ? path.resolve(msg.payload.workspaceRoot)
             : this.getClientWorkspaceRoot(ws);
-          const content = await this.fsService.readFile(msg.payload.path, root);
+          let content: string;
+          try {
+            content = await this.fsService.readFile(msg.payload.path, root);
+          } catch (readErr: unknown) {
+            if (path.isAbsolute(msg.payload.path)) {
+              content = await fs.readFile(msg.payload.path, 'utf-8');
+            } else {
+              throw readErr;
+            }
+          }
           this.send(ws, 'file:content', { path: msg.payload.path, content });
         } catch (err: unknown) {
           const errorMsg = err instanceof Error ? err.message : String(err);

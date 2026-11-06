@@ -5,22 +5,64 @@ import {
   type StreamChunk,
 } from './baseProvider.js';
 import { normalizeToolCall } from '../tools/toolAdapter.js';
-import type { ChatMessage, LLMProviderType, ToolDefinition } from '@harni/types';
+import type { ChatMessage, LLMProviderType, ThinkingDepth, ToolDefinition } from '@harni/types';
+
+/**
+ * 組裝 Antigravity 模型名稱與思考等級。
+ *
+ * 規則：
+ * 1. 若 model 為空，預設回傳 'gemini-3.8-flash-medium'。
+ * 2. 若包含 :acp 後綴，先分離後綴；若是 gpt-oss-120b-medium 或已包含 -(low|medium|high)，不重複加後綴，維持原名稱。
+ * 3. 思考等級映射：'low' ➜ 'low'；'high' 或 'ultra' ➜ 'high'；'medium'、'off' 或預設 ➜ 'medium'。
+ * 4. 組裝成 `${base}-${targetDepth}`，並視情況補回 :acp（例如 claude-sonnet-5-5-high:acp）。
+ */
+export function composeAntigravityModel(model?: string, depth?: ThinkingDepth): string {
+  const trimmed = (model || '').trim();
+  if (!trimmed) {
+    return 'gemini-3.8-flash-medium';
+  }
+
+  const hasAcp = trimmed.toLowerCase().endsWith(':acp');
+  const base = hasAcp ? trimmed.slice(0, -4) : trimmed;
+
+  if (base.toLowerCase() === 'gpt-oss-120b-medium' || /-(low|medium|high)$/i.test(base)) {
+    return trimmed;
+  }
+
+  let targetDepth = 'medium';
+  if (depth === 'low') {
+    targetDepth = 'low';
+  } else if (depth === 'high' || depth === 'ultra') {
+    targetDepth = 'high';
+  } else {
+    targetDepth = 'medium';
+  }
+
+  const composed = `${base}-${targetDepth}`;
+  return hasAcp ? `${composed}:acp` : composed;
+}
 
 /** 串流 idle timeout：超過此時間未收到任何資料即視為 Bridge 卡住並拋錯 (預設 90 秒) */
 const DEFAULT_IDLE_TIMEOUT_MS = 90_000;
 
+export interface AntigravityProviderOptions extends ProviderOptions {
+  authData?: Record<string, unknown>;
+}
+
 export class AntigravityProvider extends BaseLLMProvider {
   public readonly providerType: LLMProviderType = 'antigravity';
-  public readonly defaultModel = 'gemini-3.7-flash';
+  public readonly defaultModel = 'gemini-3.8-flash';
 
   /** 可透過環境變數 ANTIGRAVITY_IDLE_TIMEOUT_MS 覆寫的串流 idle timeout */
   private readonly idleTimeoutMs: number;
+  private readonly customAuthData?: Record<string, unknown>;
 
-  constructor(options: ProviderOptions = {}) {
+  constructor(options: AntigravityProviderOptions = {}) {
     super(options);
     this.model = options.model || this.defaultModel;
     this.baseURL = (options.baseURL || process.env.ANTIGRAVITY_BRIDGE_URL || 'http://127.0.0.1:8123').replace(/\/+$/, '');
+    this.customAuthData = options.authData;
+    this.requestApproval = options.requestApproval;
     const envTimeout = Number(process.env.ANTIGRAVITY_IDLE_TIMEOUT_MS);
     this.idleTimeoutMs =
       Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : DEFAULT_IDLE_TIMEOUT_MS;
@@ -35,7 +77,7 @@ export class AntigravityProvider extends BaseLLMProvider {
   ): Promise<ProviderCompletionResult> {
     const url = `${this.baseURL}/api/chat`;
 
-    let authData: Record<string, unknown> | undefined;
+    let authData: Record<string, unknown> = { ...(this.customAuthData || {}) };
     const effectiveKey =
       this.apiKey ||
       process.env.GEMINI_API_KEY ||
@@ -44,11 +86,33 @@ export class AntigravityProvider extends BaseLLMProvider {
 
     if (effectiveKey) {
       try {
-        authData = JSON.parse(effectiveKey);
+        const parsed = JSON.parse(effectiveKey);
+        if (typeof parsed === 'object' && parsed !== null) {
+          authData = { ...authData, ...parsed };
+        } else {
+          authData = { ...authData, token: effectiveKey, apiKey: effectiveKey };
+        }
       } catch {
-        authData = { token: effectiveKey, apiKey: effectiveKey };
+        authData = { ...authData, token: effectiveKey, apiKey: effectiveKey };
       }
     }
+
+    const isAcp =
+      (this.model || '').toLowerCase().includes(':acp') ||
+      (authData as any)?.agy_mode === 'acp' ||
+      (authData as any)?.mode === 'acp';
+
+    const defaultToolSettings = isAcp
+      ? {
+          disable_builtin_tools: false,
+          allow_tools: true,
+          dangerously_skip_permissions: false,
+          interactive_permissions: true,
+        }
+      : {
+          disable_builtin_tools: true,
+          allow_tools: false,
+        };
 
     const payload = {
       messages: messages.map((m) => ({
@@ -66,10 +130,14 @@ export class AntigravityProvider extends BaseLLMProvider {
         description: t.description,
         parameters: t.parameters,
       })),
-      model: this.model || this.defaultModel,
+      model: composeAntigravityModel(this.model || this.defaultModel, this.thinkingDepth),
       thinkingDepth: this.thinkingDepth,
       workspaceRoot: this.workspaceRoot,
-      authData,
+      authData: {
+        ...defaultToolSettings,
+        ...authData,
+        ...(this.sessionId ? { conversation_id: this.sessionId, sessionId: this.sessionId } : {}),
+      },
     };
 
     let response: Response;
@@ -79,6 +147,7 @@ export class AntigravityProvider extends BaseLLMProvider {
         headers: {
           'content-type': 'application/json',
           ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
+          ...(this.sessionId ? { 'x-session-id': this.sessionId, 'x-conversation-id': this.sessionId } : {}),
         },
         body: JSON.stringify(payload),
         signal,
@@ -165,40 +234,75 @@ export class AntigravityProvider extends BaseLLMProvider {
           break;
         }
 
+        let chunk: any;
         try {
-          const chunk = JSON.parse(dataStr);
-          if (chunk.type === 'done') {
-            isStreamDone = true;
-            break;
+          chunk = JSON.parse(dataStr);
+        } catch {
+          continue;
+        }
+
+        if (chunk.type === 'done') {
+          isStreamDone = true;
+          break;
+        }
+        if (chunk.type === 'error') {
+          throw new Error(chunk.message || 'Antigravity bridge stream error');
+        }
+        if (chunk.type === 'token' && typeof chunk.content === 'string') {
+          fullText += chunk.content;
+          onChunk({ type: 'token', content: chunk.content });
+        } else if (chunk.type === 'thinking' && typeof chunk.thought === 'string') {
+          fullThinking += chunk.thought;
+          onChunk({ type: 'thinking', thought: chunk.thought });
+        } else if (chunk.type === 'tool_call' && chunk.name) {
+          const thoughtSig = chunk.thoughtSignature || chunk.thought_signature;
+          const normalized = normalizeToolCall(chunk.name, chunk.arguments || {});
+          const tcObj = {
+            id: chunk.id || `ag_call_${Date.now()}_${toolCalls.length}`,
+            name: normalized.name,
+            arguments: normalized.arguments,
+            ...(thoughtSig ? { thoughtSignature: thoughtSig } : {}),
+          };
+          toolCalls.push(tcObj);
+          onChunk({ type: 'tool_call', ...tcObj });
+        } else if (chunk.type === 'usage' && chunk.usage) {
+          onChunk({ type: 'usage', usage: chunk.usage });
+        } else if (chunk.type === 'permission_request') {
+          let approved = false;
+          let feedback: string | undefined;
+          if (this.requestApproval) {
+            try {
+              const approval = await this.requestApproval({
+                toolCallId: chunk.toolCallId || chunk.permissionId,
+                name: chunk.name || 'tool',
+                arguments: chunk.arguments || {},
+                title: chunk.title,
+              });
+              approved = approval.approved;
+              feedback = approval.feedback;
+            } catch (approvalErr) {
+              console.error('[AntigravityProvider] requestApproval threw error:', approvalErr);
+              approved = false;
+            }
           }
-          if (chunk.type === 'error') {
-            throw new Error(chunk.message || 'Antigravity bridge stream error');
+          try {
+            await fetch(`${this.baseURL}/api/permission_response`, {
+              method: 'POST',
+              headers: {
+                'content-type': 'application/json',
+                ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
+                ...(this.sessionId ? { 'x-session-id': this.sessionId, 'x-conversation-id': this.sessionId } : {}),
+              },
+              body: JSON.stringify({
+                permissionId: chunk.permissionId,
+                approved,
+                optionId: approved ? 'allow' : 'deny',
+                feedback,
+              }),
+            });
+          } catch (err) {
+            console.error('Failed to send permission response to Bridge:', err);
           }
-          if (chunk.type === 'token' && typeof chunk.content === 'string') {
-            fullText += chunk.content;
-            onChunk({ type: 'token', content: chunk.content });
-          } else if (chunk.type === 'thinking' && typeof chunk.thought === 'string') {
-            fullThinking += chunk.thought;
-            onChunk({ type: 'thinking', thought: chunk.thought });
-          } else if (chunk.type === 'tool_call' && chunk.name) {
-            const thoughtSig = chunk.thoughtSignature || chunk.thought_signature;
-            const normalized = normalizeToolCall(chunk.name, chunk.arguments || {});
-            const tcObj = {
-              id: chunk.id || `ag_call_${Date.now()}_${toolCalls.length}`,
-              name: normalized.name,
-              arguments: normalized.arguments,
-              ...(thoughtSig ? { thoughtSignature: thoughtSig } : {}),
-            };
-            toolCalls.push(tcObj);
-            onChunk({ type: 'tool_call', ...tcObj });
-          } else if (chunk.type === 'usage' && chunk.usage) {
-            onChunk({ type: 'usage', usage: chunk.usage });
-          }
-        } catch (err: any) {
-          if (err?.message?.includes('Antigravity bridge stream error')) {
-            throw err;
-          }
-          // Ignore JSON parse chunk errors
         }
       }
       if (isStreamDone) {

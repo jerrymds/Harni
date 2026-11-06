@@ -16,6 +16,7 @@ import {
 import type { AgentMode, LLMProviderType, ModelInfo, ThinkingDepth } from '@harni/types';
 import { useAgentStore, useShallow } from '../../store/useAgentStore.js';
 import { resolveAllProviders } from '../Settings/Models/providerRegistry.js';
+import { cleanAntigravityDisplayName } from '../../utils/modelContext.js';
 import { HarniLogo } from './HarniLogo.js';
 
 export const Header: React.FC = () => {
@@ -68,9 +69,57 @@ export const Header: React.FC = () => {
   );
 
   const rawLiveModels: ModelInfo[] = availableModels[selectedProvider] || [];
-  const liveModels = selectedProvider === 'cline'
-    ? rawLiveModels.filter((m) => m.id.startsWith('cline-pass/') || m.id.startsWith('deepseek/'))
-    : rawLiveModels;
+  const liveModels = React.useMemo(() => {
+    if (selectedProvider === 'cline') {
+      return rawLiveModels.filter((m) => m.id.startsWith('cline-pass/') || m.id.startsWith('deepseek/'));
+    }
+    if (selectedProvider === 'antigravity') {
+      const seen = new Set<string>();
+      const result: ModelInfo[] = [];
+
+      for (const m of rawLiveModels) {
+        if (!m || !m.id) continue;
+        const base = m.id.replace(/:acp$/i, '');
+        // 去除 ID 帶有 -(low|medium|high) 的多餘選項 (保留 gpt-oss-120b-medium)
+        if (base.toLowerCase() !== 'gpt-oss-120b-medium' && /-(low|medium|high)$/i.test(base)) {
+          continue;
+        }
+
+        if (!seen.has(m.id)) {
+          seen.add(m.id);
+          result.push({
+            ...m,
+            name: cleanAntigravityDisplayName(m.name, m.id),
+          });
+        }
+      }
+      return result;
+    }
+    return rawLiveModels;
+  }, [selectedProvider, rawLiveModels]);
+
+  // 若當前 selectedModel 帶有 -(low|medium|high)（例如歷史 localStorage 殘留的 gemini-3.8-flash-medium），自動校正為基礎模型
+  React.useEffect(() => {
+    if (selectedProvider === 'antigravity' && selectedModel) {
+      const hasAcp = selectedModel.toLowerCase().endsWith(':acp');
+      const base = hasAcp ? selectedModel.slice(0, -4) : selectedModel;
+      if (base.toLowerCase() !== 'gpt-oss-120b-medium' && /-(low|medium|high)$/i.test(base)) {
+        const cleanBase = base.replace(/-(low|medium|high)$/i, '');
+        const acpCandidate = `${cleanBase}:acp`;
+        const corrected = hasAcp
+          ? acpCandidate
+          : liveModels.some((m) => m.id === acpCandidate)
+            ? acpCandidate
+            : cleanBase;
+        if (corrected !== selectedModel) {
+          setModel(corrected);
+        }
+      }
+    }
+  }, [selectedProvider, selectedModel, liveModels, setModel]);
+
+
+
   const activeFolder = folders.find((f) => f.id === activeFolderId);
   const currentPath = activeFolder?.path || workspaceInfo?.rootPath || '';
   const currentName = activeFolder?.name || currentPath.split(/[\\/]/).pop() || 'Workspace';
@@ -245,7 +294,7 @@ export const Header: React.FC = () => {
             {selectedModel &&
               !liveModels.some((m) => m.id === selectedModel) && (
                 <option value={selectedModel} className="bg-ag-panel text-ag-textPrimary">
-                  {selectedModel}
+                  {selectedProvider === 'antigravity' ? cleanAntigravityDisplayName(selectedModel) : selectedModel}
                 </option>
               )}
 

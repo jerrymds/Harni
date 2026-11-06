@@ -2,6 +2,7 @@ import React, { useEffect } from 'react';
 import { Header } from './components/Layout/Header.js';
 import { LeftSidebar } from './components/Sidebar/LeftSidebar.js';
 import { ChatPanel } from './components/Chat/ChatPanel.js';
+import { DocumentViewerDrawer } from './components/Viewer/DocumentViewerDrawer.js';
 import { SettingsModal } from './components/Settings/SettingsModal.js';
 import { useAgentStore } from './store/useAgentStore.js';
 import { useThemeClasses } from './hooks/useThemeClasses.js';
@@ -22,13 +23,16 @@ export function App() {
       {/* Top Application Navigation & Status Beacon */}
       <Header />
 
-      {/* Main 2-Column Antigravity Layout */}
-      <div className="flex flex-1 overflow-hidden">
+      {/* Main 2-Column Antigravity Layout with Floating Document Viewer */}
+      <div className="relative flex flex-1 overflow-hidden">
         {/* Left: Project Explorer & Conversation History */}
         <LeftSidebar />
 
         {/* Right: Main Agent Conversation Workspace */}
         <ChatPanel />
+
+        {/* Floating Right Document Viewer Drawer */}
+        <DocumentViewerDrawer />
       </div>
     </div>
   );

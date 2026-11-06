@@ -161,6 +161,8 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
   workspaceInfo: null,
   activeFile: null,
   activeDiff: null,
+  isDocumentViewerOpen: false,
+  documentViewerWidth: 50,
   skills: [],
   isLoadingSkills: false,
   fileDiagnostics: {},
@@ -542,7 +544,7 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
           }
 
           case 'file:diff':
-            set({ activeDiff: msg.payload });
+            set({ activeDiff: msg.payload, isDocumentViewerOpen: true });
             break;
 
           case 'file:diagnostics': {
@@ -597,7 +599,7 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
           }
 
           case 'file:content':
-            set({ activeFile: msg.payload, activeDiff: null });
+            set({ activeFile: msg.payload, activeDiff: null, isDocumentViewerOpen: true });
             break;
 
           case 'workspace:tree':
@@ -898,11 +900,19 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
   },
 
   closeActiveFile: () => {
-    set({ activeFile: null });
+    set({ activeFile: null, isDocumentViewerOpen: false });
   },
 
   setActiveDiff: (diff) => {
     set({ activeDiff: diff });
+  },
+
+  setDocumentViewerOpen: (open) => {
+    set({ isDocumentViewerOpen: open });
+  },
+
+  setDocumentViewerWidth: (width) => {
+    set({ documentViewerWidth: width });
   },
 
   fetchSkills: async (refresh = false) => {

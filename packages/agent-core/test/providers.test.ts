@@ -9,7 +9,7 @@ describe('ProviderFactory & Providers', () => {
   it('creates AntigravityProvider instance with default model', () => {
     const agProvider = ProviderFactory.create('antigravity');
     expect(agProvider).toBeInstanceOf(AntigravityProvider);
-    expect(agProvider.defaultModel).toBe('gemini-3.7-flash');
+    expect(agProvider.defaultModel).toBe('gemini-3.8-flash');
   });
 
   it('creates OpenRouter and OpenCode provider instances with default endpoints', () => {

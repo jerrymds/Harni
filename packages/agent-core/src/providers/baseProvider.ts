@@ -25,11 +25,18 @@ export interface ProviderOptions {
   maxTokens?: number;
   thinkingDepth?: ThinkingDepth;
   workspaceRoot?: string;
+  sessionId?: string;
   /** The `anthropic` provider's apiKey is a Claude Pro/Max OAuth token (Bearer + oauth beta header). */
   anthropicOAuth?: boolean;
   /** OpenAI access token issued by the Codex ChatGPT subscription OAuth flow. */
   openaiOAuth?: boolean;
   openaiAccountId?: string;
+  requestApproval?: (request: {
+    toolCallId: string;
+    name: string;
+    arguments: Record<string, unknown>;
+    title?: string;
+  }) => Promise<{ approved: boolean; feedback?: string }>;
 }
 
 export interface ProviderCompletionResult {
@@ -47,6 +54,7 @@ export interface ProviderCompletionResult {
 export abstract class BaseLLMProvider {
   public abstract readonly providerType: LLMProviderType;
   public abstract readonly defaultModel: string;
+  public sessionId?: string;
 
   protected apiKey?: string;
   protected baseURL?: string;
@@ -55,6 +63,12 @@ export abstract class BaseLLMProvider {
   protected maxTokens: number;
   protected thinkingDepth: ThinkingDepth;
   protected workspaceRoot?: string;
+  protected requestApproval?: (request: {
+    toolCallId: string;
+    name: string;
+    arguments: Record<string, unknown>;
+    title?: string;
+  }) => Promise<{ approved: boolean; feedback?: string }>;
 
   constructor(options: ProviderOptions = {}) {
     this.apiKey = options.apiKey;
@@ -64,6 +78,8 @@ export abstract class BaseLLMProvider {
     this.maxTokens = options.maxTokens ?? 8192;
     this.thinkingDepth = options.thinkingDepth ?? 'medium';
     this.workspaceRoot = options.workspaceRoot;
+    this.sessionId = options.sessionId;
+    this.requestApproval = options.requestApproval;
   }
 
   public getApiKey(): string | undefined {

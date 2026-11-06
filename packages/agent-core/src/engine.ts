@@ -694,6 +694,26 @@ export class AgentCoreEngine extends EventEmitter {
         openaiOAuth: options.openaiOAuth,
         openaiAccountId: options.openaiAccountId,
         workspaceRoot: sessionTask.workspaceRoot,
+        sessionId: sessionTask.sessionId,
+        requestApproval: async (req) => {
+          if (this.autoApprove) {
+            return { approved: true };
+          }
+          this.setStatus(sessionTask, 'waiting_approval');
+          const toolCallRequest: ToolCallRequest = {
+            id: req.toolCallId,
+            name: req.name,
+            arguments: req.arguments,
+            requiresApproval: true,
+          };
+          this.emitEvent('tool:request', { ...toolCallRequest, sessionId, taskId: sessionTask.taskState.id });
+          return new Promise<{ approved: boolean; feedback?: string }>((resolve) => {
+            sessionTask.pendingApproval = {
+              toolCallId: req.toolCallId,
+              resolve: (approved, feedback) => resolve({ approved, feedback }),
+            };
+          });
+        },
       });
     }
 

@@ -91,6 +91,8 @@ export interface WorkspaceSliceState {
   workspaceInfo: WorkspaceInfo | null;
   activeFile: { path: string; content: string } | null;
   activeDiff: FileDiff | null;
+  isDocumentViewerOpen: boolean;
+  documentViewerWidth: number;
   skills: AgentSkill[];
   isLoadingSkills: boolean;
   fileDiagnostics: Record<string, import('@harni/types').FileDiagnostic[]>;
@@ -115,6 +117,8 @@ export interface WorkspaceSliceActions {
   saveActiveFile: (content: string) => void;
   closeActiveFile: () => void;
   setActiveDiff: (diff: FileDiff | null) => void;
+  setDocumentViewerOpen: (open: boolean) => void;
+  setDocumentViewerWidth: (width: number) => void;
   fetchSkills: (refresh?: boolean) => Promise<void>;
   rollbackCheckpoint: (sessionId?: string, checkpointId?: string) => Promise<boolean>;
   mergeWorktree: (sessionId: string, commitMessage?: string) => Promise<boolean>;

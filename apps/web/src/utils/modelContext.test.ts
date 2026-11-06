@@ -4,6 +4,8 @@ import {
   formatTokenCount,
   PROVIDER_DEFAULT_CONTEXT,
   MODEL_EXACT_CONTEXT,
+  normalizeAntigravityModelId,
+  cleanAntigravityDisplayName,
 } from './modelContext.js';
 
 describe('Model Context Window Resolver & Formatting', () => {
@@ -82,5 +84,26 @@ describe('Model Context Window Resolver & Formatting', () => {
     expect(formatTokenCount(128000)).toBe('128k');
     expect(formatTokenCount(65536)).toBe('65.5k');
     expect(formatTokenCount(850)).toBe('850');
+  });
+
+  it('normalizes Antigravity model IDs and cleans model display names correctly', () => {
+    // Normalization of IDs
+    expect(normalizeAntigravityModelId('gemini-3.8-flash-high')).toBe('gemini-3.8-flash');
+    expect(normalizeAntigravityModelId('gemini-3.8-flash-low')).toBe('gemini-3.8-flash');
+    expect(normalizeAntigravityModelId('claude-sonnet-5-5-high:acp')).toBe('claude-sonnet-5-5:acp');
+    expect(normalizeAntigravityModelId('claude-opus-5-5-low:acp')).toBe('claude-opus-5-5:acp');
+    expect(normalizeAntigravityModelId('gpt-oss-120b-medium:acp')).toBe('gpt-oss-120b-medium:acp');
+    expect(normalizeAntigravityModelId('gpt-oss-120b-medium')).toBe('gpt-oss-120b-medium');
+    expect(normalizeAntigravityModelId('gpt-oss-120b-medium-high')).toBe('gpt-oss-120b-medium');
+
+    // Display Name cleaning
+    expect(cleanAntigravityDisplayName('Gemini 3.8 Flash (High)')).toBe('Gemini 3.8 Flash');
+    expect(cleanAntigravityDisplayName('Gemini 3.8 Flash (Low)')).toBe('Gemini 3.8 Flash');
+    expect(cleanAntigravityDisplayName('Gemini 3.8 Flash (Medium)')).toBe('Gemini 3.8 Flash');
+    expect(cleanAntigravityDisplayName('Gemini 4 Argon (Medium) (Antigravity)')).toBe('Gemini 4 Argon');
+    expect(cleanAntigravityDisplayName('Claude Sonnet 5.5 (High)', 'claude-sonnet-5-5:acp')).toBe('Claude Sonnet 5.5 (ACP)');
+    expect(cleanAntigravityDisplayName('Claude 3.5 Sonnet (ACP)', 'claude-sonnet-5-5:acp')).toBe('Claude 3.5 Sonnet (ACP)');
+    expect(cleanAntigravityDisplayName('GPT-OSS 120B (ACP Mode)', 'gpt-oss-120b-medium:acp')).toBe('GPT-OSS 120B (ACP)');
+    expect(cleanAntigravityDisplayName('gemini-3.8-flash-high')).toBe('gemini-3.8-flash');
   });
 });

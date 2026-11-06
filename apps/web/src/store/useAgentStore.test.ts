@@ -89,7 +89,7 @@ describe('useAgentStore and Slices', () => {
   });
 
   it('manages workspace fileTree, activeFile and closeActiveFile', () => {
-    const { closeActiveFile } = useAgentStore.getState();
+    const { closeActiveFile, setDocumentViewerOpen, setDocumentViewerWidth } = useAgentStore.getState();
 
     const mockTree = [
       { name: 'src', path: 'src', type: 'directory' as const, children: [{ name: 'index.ts', path: 'src/index.ts', type: 'file' as const }] },
@@ -97,11 +97,26 @@ describe('useAgentStore and Slices', () => {
     useAgentStore.setState({ fileTree: mockTree });
     expect(useAgentStore.getState().fileTree.length).toBe(1);
 
-    useAgentStore.setState({ activeFile: { path: 'src/index.ts', content: 'test' } });
+    useAgentStore.setState({ activeFile: { path: 'src/index.ts', content: 'test' }, isDocumentViewerOpen: true });
     expect(useAgentStore.getState().activeFile?.path).toBe('src/index.ts');
+    expect(useAgentStore.getState().isDocumentViewerOpen).toBe(true);
 
     closeActiveFile();
     expect(useAgentStore.getState().activeFile).toBeNull();
+    expect(useAgentStore.getState().isDocumentViewerOpen).toBe(false);
+
+    // Test Document Viewer actions
+    setDocumentViewerOpen(true);
+    expect(useAgentStore.getState().isDocumentViewerOpen).toBe(true);
+
+    setDocumentViewerWidth(80);
+    expect(useAgentStore.getState().documentViewerWidth).toBe(80);
+
+    setDocumentViewerWidth(50);
+    expect(useAgentStore.getState().documentViewerWidth).toBe(50);
+
+    setDocumentViewerOpen(false);
+    expect(useAgentStore.getState().isDocumentViewerOpen).toBe(false);
   });
 
   it('manages folder operations like rename and toggleCollapse', () => {
@@ -597,6 +612,64 @@ describe('useAgentStore and Slices', () => {
       useAgentStore.setState({ currentSessionId: 'sess_p3_sync' });
       useAgentStore.getState().clearMessages();
       expect(useAgentStore.getState().subagents['sess_p3_sync']).toBeUndefined();
+    } finally {
+      globalThis.WebSocket = originalWS;
+    }
+  });
+
+  it('automatically opens document viewer when receiving file:content and file:diff WebSocket messages', () => {
+    let messageHandler: any;
+    const fakeWs = {
+      readyState: 1,
+      send: () => {},
+      set onmessage(fn: any) {
+        messageHandler = fn;
+      },
+      get onmessage() {
+        return messageHandler;
+      },
+    };
+
+    const originalWS = globalThis.WebSocket;
+    try {
+      globalThis.WebSocket = function () {
+        return fakeWs as any;
+      } as any;
+      useAgentStore.setState({ ws: null, isDocumentViewerOpen: false, activeFile: null, activeDiff: null });
+      useAgentStore.getState().connect();
+
+      // Test file:content
+      messageHandler({
+        data: JSON.stringify({
+          type: 'file:content',
+          payload: { path: 'src/main.ts', content: 'console.log("hello");' },
+        }),
+      });
+
+      expect(useAgentStore.getState().isDocumentViewerOpen).toBe(true);
+      expect(useAgentStore.getState().activeFile?.path).toBe('src/main.ts');
+      expect(useAgentStore.getState().activeFile?.content).toBe('console.log("hello");');
+      expect(useAgentStore.getState().activeDiff).toBeNull();
+
+      // Close it
+      useAgentStore.getState().closeActiveFile();
+      expect(useAgentStore.getState().isDocumentViewerOpen).toBe(false);
+
+      // Test file:diff
+      messageHandler({
+        data: JSON.stringify({
+          type: 'file:diff',
+          payload: {
+            path: 'src/main.ts',
+            originalContent: 'old',
+            newContent: 'new',
+            isNewFile: false,
+          },
+        }),
+      });
+
+      expect(useAgentStore.getState().isDocumentViewerOpen).toBe(true);
+      expect(useAgentStore.getState().activeDiff?.path).toBe('src/main.ts');
     } finally {
       globalThis.WebSocket = originalWS;
     }

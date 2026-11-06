@@ -10,6 +10,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  FolderTree,
   History,
   MessageSquare,
   Plus,
@@ -21,6 +22,7 @@ import {
 import type { ChatSession, WorkspaceFolder } from '../../store/useAgentStore.js';
 import { useAgentStore, useShallow } from '../../store/useAgentStore.js';
 import { pickDirectoryFromExplorer } from '../../utils/filePicker.js';
+import { FileTree } from '../Tree/FileTree.js';
 
 export const LeftSidebar: React.FC = () => {
   const {
@@ -55,6 +57,7 @@ export const LeftSidebar: React.FC = () => {
     }))
   );
 
+  const [activeTab, setActiveTab] = useState<'sessions' | 'files'>('sessions');
   const [isCreatingFolder, setIsCreatingFolder] = useState(false);
   const [isPickingDirectory, setIsPickingDirectory] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
@@ -136,8 +139,44 @@ export const LeftSidebar: React.FC = () => {
 
   return (
     <aside className="flex h-full w-72 flex-col border-r border-ag-border bg-ag-sidebar select-none shrink-0 z-10">
-      {/* Top: New Project Folder Button */}
-      <div className="p-3 border-b border-ag-border bg-ag-panel/70 space-y-2">
+      {/* Top: Segmented Tab Control (Sessions vs Files) */}
+      <div className="p-2.5 border-b border-ag-border bg-ag-panel/50">
+        <div className="flex rounded-xl bg-ag-sidebar p-0.5 border border-ag-border text-xs">
+          <button
+            type="button"
+            onClick={() => setActiveTab('sessions')}
+            className={`flex-1 flex items-center justify-center space-x-1.5 py-1.5 px-2 rounded-lg font-medium transition-all duration-150 cursor-pointer ${
+              activeTab === 'sessions'
+                ? 'bg-ag-panel text-ag-primary shadow-soft font-semibold'
+                : 'text-ag-textMuted hover:text-ag-textPrimary'
+            }`}
+          >
+            <MessageSquare className="h-3.5 w-3.5" />
+            <span>對話歷史</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('files')}
+            className={`flex-1 flex items-center justify-center space-x-1.5 py-1.5 px-2 rounded-lg font-medium transition-all duration-150 cursor-pointer ${
+              activeTab === 'files'
+                ? 'bg-ag-panel text-ag-primary shadow-soft font-semibold'
+                : 'text-ag-textMuted hover:text-ag-textPrimary'
+            }`}
+          >
+            <FolderTree className="h-3.5 w-3.5" />
+            <span>專案檔案</span>
+          </button>
+        </div>
+      </div>
+
+      {activeTab === 'files' ? (
+        <div className="flex-1 overflow-hidden flex flex-col">
+          <FileTree />
+        </div>
+      ) : (
+        <>
+          {/* Top: New Project Folder Button */}
+          <div className="p-3 border-b border-ag-border bg-ag-panel/70 space-y-2">
         <div>
           {/* + New Project Folder (Pop up OS File Explorer) */}
           <button
@@ -544,6 +583,8 @@ export const LeftSidebar: React.FC = () => {
           );
         })}
       </div>
+        </>
+      )}
     </aside>
   );
 };

@@ -119,6 +119,8 @@ export interface ModelInfo {
   description?: string;
   contextWindow?: number;
   maxTokens?: number;
+  provider?: string;
+  isCustom?: boolean;
 }
 
 /**

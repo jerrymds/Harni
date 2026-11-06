@@ -13,7 +13,7 @@ describe('Store Utils & Network Helpers', () => {
   });
 
   it('provides default models for all supported providers', () => {
-    expect(PROVIDER_DEFAULT_MODELS.antigravity).toBe('gemini-3.7-flash');
+    expect(PROVIDER_DEFAULT_MODELS.antigravity).toBe('gemini-3.8-flash');
     expect(PROVIDER_DEFAULT_MODELS.anthropic).toBe('claude-3-5-sonnet-20241022');
     expect(PROVIDER_DEFAULT_MODELS.openai).toBe('gpt-5.6-sol');
     expect(PROVIDER_DEFAULT_MODELS.cline).toBe('cline-pass/deepseek-v4-pro');

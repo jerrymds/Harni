@@ -304,6 +304,7 @@ export class SubagentManager extends EventEmitter {
           anthropicOAuth: params.anthropicOAuth,
           openaiOAuth: params.openaiOAuth,
           openaiAccountId: params.openaiAccountId,
+          sessionId: params.sessionId,
         });
 
       const instance = new SubagentInstance({

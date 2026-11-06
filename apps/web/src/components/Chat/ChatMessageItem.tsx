@@ -21,6 +21,47 @@ function formatFileSize(bytes: number): string {
 import type { ChatMessage } from '@harni/types';
 import { ThinkingAccordion } from './ThinkingAccordion.js';
 import { ToolAccordion } from './ToolAccordion.js';
+import { useAgentStore } from '../../store/useAgentStore.js';
+
+export function isFileLink(href: string): boolean {
+  if (!href || href.startsWith('#')) return false;
+  if (href.startsWith('file://')) return true;
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i.test(href)) return true;
+  if (!href.startsWith('http://') && !href.startsWith('https://') && !href.startsWith('mailto:')) {
+    return true;
+  }
+  return false;
+}
+
+export function cleanFilePath(href: string): string {
+  let p = href.split('#')[0] || '';
+  try {
+    p = decodeURIComponent(p);
+  } catch {
+    // ignore decode errors if malformed
+  }
+
+  if (p.startsWith('file://')) {
+    p = p.replace(/^file:\/\//, '');
+    // If Windows path like /C:/foo or /c:/foo
+    if (/^\/[a-zA-Z]:[\\/]/.test(p)) {
+      p = p.slice(1);
+    }
+  } else if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//i.test(p)) {
+    p = p.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//i, '');
+    if (/^\/[a-zA-Z]:[\\/]/.test(p)) {
+      p = p.slice(1);
+    }
+  }
+
+  return p;
+}
+
+export function safeUrlTransform(url: string): string {
+  if (!url) return '';
+  if (/^javascript:/i.test(url.trim())) return '';
+  return url;
+}
 
 export const MarkdownCode: React.FC<any> = memo(({ className, children, ...props }) => {
   const match = /language-(\w+)/.exec(className || '');
@@ -128,16 +169,42 @@ const markdownComponents = {
   td: ({ children }: any) => (
     <td className="px-3 py-2 border-t border-r last:border-r-0 border-ag-border text-ag-textPrimary select-text">{children}</td>
   ),
-  a: ({ href, children }: any) => (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="text-ag-primary hover:underline font-medium select-text"
-    >
-      {children}
-    </a>
-  ),
+  a: ({ href, children }: any) => {
+    if (!href) {
+      return <>{children}</>;
+    }
+
+    if (isFileLink(href)) {
+      return (
+        <a
+          href={href}
+          onClick={(e) => {
+            e.preventDefault();
+            const clean = cleanFilePath(href);
+            if (clean) {
+              const store = useAgentStore.getState();
+              store.openFile(clean);
+              store.setDocumentViewerOpen(true);
+            }
+          }}
+          className="text-ag-primary hover:underline font-medium select-text cursor-pointer"
+        >
+          {children}
+        </a>
+      );
+    }
+
+    return (
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-ag-primary hover:underline font-medium select-text"
+      >
+        {children}
+      </a>
+    );
+  },
   ul: ({ children }: any) => (
     <ul className="list-disc pl-5 my-2 space-y-1 text-ag-textPrimary select-text">{children}</ul>
   ),
@@ -225,7 +292,11 @@ export const RateLimitCard: React.FC<{ msg: ChatMessage }> = memo(({ msg }) => {
       </div>
 
       {/* Markdown Body */}
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={markdownComponents}
+        urlTransform={safeUrlTransform}
+      >
         {msg.content}
       </ReactMarkdown>
     </div>
@@ -342,6 +413,7 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = memo(({ msg }) =>
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
                   components={markdownComponents}
+                  urlTransform={safeUrlTransform}
                 >
                   {msg.content}
                 </ReactMarkdown>

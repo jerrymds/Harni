@@ -9,45 +9,38 @@ export interface FetchModelsOptions {
 export const ANTIGRAVITY_OFFICIAL_MODELS: ModelInfo[] = [
   {
     id: 'gemini-3.8-flash',
-    name: 'Gemini 3.8 Flash (Antigravity)',
+    name: 'Gemini 3.8 Flash',
     description: 'Google 官方 - 最新一代高性價比、深度推理與長程 Agent 主力模型 (推薦預設)',
     contextWindow: 1048576,
     maxTokens: 8192,
   },
   {
     id: 'gemini-3.8-pro',
-    name: 'Gemini 3.8 Pro (Antigravity)',
+    name: 'Gemini 3.8 Pro',
     description: 'Google 官方 - 旗艦頂級編程、複雜架構設計與極致多步推理',
     contextWindow: 2097152,
     maxTokens: 8192,
   },
   {
-    id: 'gemini-3.7-flash',
-    name: 'Gemini 3.7 Flash (Antigravity)',
-    description: 'Google 官方 - 新一代高速智慧與深度推理模型',
-    contextWindow: 1048576,
-    maxTokens: 8192,
+    id: 'claude-sonnet-5-5:acp',
+    name: 'Claude 3.5 Sonnet (ACP)',
+    provider: 'antigravity',
+    contextWindow: 200000,
+    isCustom: false,
   },
   {
-    id: 'gemini-3.7-pro',
-    name: 'Gemini 3.7 Pro (Antigravity)',
-    description: 'Google 官方 - 旗艦頂級編程、複雜架構設計與多步推理',
-    contextWindow: 2097152,
-    maxTokens: 8192,
+    id: 'claude-opus-5-5:acp',
+    name: 'Claude 3.5 Opus (ACP)',
+    provider: 'antigravity',
+    contextWindow: 200000,
+    isCustom: false,
   },
   {
-    id: 'gemini-2.5-flash',
-    name: 'Gemini 2.5 Flash (Antigravity)',
-    description: 'Google 官方 - 極低延遲、高性價比 Agent 執行模型',
-    contextWindow: 1048576,
-    maxTokens: 8192,
-  },
-  {
-    id: 'gemini-2.5-pro',
-    name: 'Gemini 2.5 Pro (Antigravity)',
-    description: 'Google 官方 - 高精度程式碼理解與深度多模態分析',
-    contextWindow: 2097152,
-    maxTokens: 8192,
+    id: 'gpt-oss-120b-medium:acp',
+    name: 'GPT-OSS 120B (ACP)',
+    provider: 'antigravity',
+    contextWindow: 131072,
+    isCustom: false,
   },
 ];
 
@@ -180,7 +173,7 @@ export class ModelService {
           if (res.ok) {
             const data = (await res.json()) as any;
             if (Array.isArray(data.models) && data.models.length > 0) {
-              return data.models;
+              return this.mergeAntigravityModels(data.models, ANTIGRAVITY_OFFICIAL_MODELS);
             }
           }
         } catch {
@@ -198,7 +191,7 @@ export class ModelService {
               const googleData = (await googleRes.json()) as any;
               const liveModels = this.parseGoogleGeminiModelsResponse(googleData);
               if (liveModels.length > 0) {
-                return this.mergeModelsWithOfficial(liveModels, ANTIGRAVITY_OFFICIAL_MODELS);
+                return this.mergeAntigravityModels(liveModels, ANTIGRAVITY_OFFICIAL_MODELS);
               }
             }
           } catch (err: any) {
@@ -461,9 +454,121 @@ export class ModelService {
   }
 
   /**
+   * Normalizes an Antigravity model ID by stripping thinking level suffixes.
+   * Special exception: gpt-oss-120b-medium preserves '-medium'.
+   */
+  public static normalizeAntigravityModelId(rawId: string): string {
+    const trimmed = (rawId || '').trim();
+    const hasAcp = trimmed.toLowerCase().endsWith(':acp');
+    let base = hasAcp ? trimmed.slice(0, -4) : trimmed;
+
+    if (base.toLowerCase() !== 'gpt-oss-120b-medium') {
+      base = base.replace(/-(low|medium|high)$/i, '');
+    }
+
+    return hasAcp ? `${base}:acp` : base;
+  }
+
+  /**
+   * Normalizes an Antigravity model display name:
+   * - Strips (Low), (Medium), (High), (Antigravity), (ACP Mode).
+   * - Ensures pure ACP models end with '(ACP)', while dual-mode models have no suffix.
+   */
+  public static normalizeAntigravityModelName(rawName?: string, normalizedId?: string): string {
+    let name = (rawName || normalizedId || '').trim();
+    name = name
+      .replace(/\s*\((?:low|medium|high)\)/gi, '')
+      .replace(/\s*-\s*(?:low|medium|high)$/gi, '')
+      .replace(/\s*\(antigravity\)/gi, '')
+      .replace(/\s*\(acp\s+mode\)/gi, '')
+      .trim();
+
+    const isAcp = (normalizedId || '').toLowerCase().endsWith(':acp') || /\(acp\)/i.test(rawName || '');
+    if (isAcp) {
+      name = name.replace(/\s*\(acp\)/gi, '').trim();
+      name = `${name} (ACP)`;
+    } else {
+      name = name.replace(/\s*\(acp\)/gi, '').trim();
+    }
+    return name;
+  }
+
+  /**
+   * Normalizes and merges live Antigravity models with official curated models:
+   * - Strips thinking level suffixes (-(low|medium|high)) and badges ((Low), (Medium), (High)).
+   * - De-duplicates models based on normalized IDs and maps known models to official definitions.
+   * - Retains new discovered models (e.g. gemini-4-argon) in pure form without duplicate thinking variants.
+   */
+  public static mergeAntigravityModels(
+    liveModels: ModelInfo[],
+    officialModels: ModelInfo[] = ANTIGRAVITY_OFFICIAL_MODELS,
+  ): ModelInfo[] {
+    const result: ModelInfo[] = [];
+    const seenIds = new Set<string>();
+
+    const officialByExactId = new Map<string, ModelInfo>();
+    const officialByBaseId = new Map<string, ModelInfo>();
+
+    for (const official of officialModels) {
+      result.push(official);
+      seenIds.add(official.id.toLowerCase());
+      officialByExactId.set(official.id.toLowerCase(), official);
+
+      const base = official.id.replace(/:acp$/i, '').toLowerCase();
+      seenIds.add(base);
+      officialByBaseId.set(base, official);
+    }
+
+    for (const live of liveModels) {
+      const rawId = (live.id || live.name || '').trim();
+      if (!rawId) continue;
+
+      const normalizedId = this.normalizeAntigravityModelId(rawId);
+      const normalizedBase = normalizedId.replace(/:acp$/i, '').toLowerCase();
+
+      // Check if this normalized model matches an official model or already added model
+      if (
+        officialByExactId.has(normalizedId.toLowerCase()) ||
+        officialByBaseId.has(normalizedBase) ||
+        seenIds.has(normalizedId.toLowerCase()) ||
+        seenIds.has(normalizedBase)
+      ) {
+        continue;
+      }
+
+      const hasAcpInRaw =
+        rawId.toLowerCase().endsWith(':acp') ||
+        /\(acp\s*mode\)/i.test(live.name || '') ||
+        /\(acp\)/i.test(live.name || '');
+
+      const finalId =
+        hasAcpInRaw && !normalizedId.endsWith(':acp')
+          ? `${normalizedId}:acp`
+          : normalizedId;
+
+      const cleanName = this.normalizeAntigravityModelName(live.name, finalId);
+
+      const newModel: ModelInfo = {
+        ...live,
+        id: finalId,
+        name: cleanName,
+      };
+
+      seenIds.add(finalId.toLowerCase());
+      seenIds.add(finalId.replace(/:acp$/i, '').toLowerCase());
+      result.push(newModel);
+    }
+
+    return result;
+  }
+
+  /**
    * Merges live discovered models with curated official models, keeping curated metadata.
    */
-  private static mergeModelsWithOfficial(liveModels: ModelInfo[], officialModels: ModelInfo[]): ModelInfo[] {
+  public static mergeModelsWithOfficial(liveModels: ModelInfo[], officialModels: ModelInfo[]): ModelInfo[] {
+    if (officialModels === ANTIGRAVITY_OFFICIAL_MODELS || officialModels.some((m) => m.id === 'gemini-3.8-flash')) {
+      return this.mergeAntigravityModels(liveModels, officialModels);
+    }
     const officialMap = new Map(officialModels.map((m) => [m.id, m]));
     const result: ModelInfo[] = [];
 

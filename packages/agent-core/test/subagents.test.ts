@@ -469,7 +469,7 @@ describe('Hierarchical Multi-Agent Orchestration', () => {
         provider: 'antigravity',
         parentModel: 'gemini-3.8-pro',
       }),
-    ).toBe('gemini-3.7-flash');
+    ).toBe('gemini-3.8-flash');
 
     expect(
       SubagentRegistry.resolveModel({
@@ -791,7 +791,12 @@ describe('Hierarchical Multi-Agent Orchestration', () => {
       },
     ]);
 
-    await new Promise((r) => setTimeout(r, 60));
+    const waitStart = Date.now();
+    while (Date.now() - waitStart < 2000) {
+      const task = engineWait['tasksBySession'].get('sess_a1_4');
+      if (task?.pendingApproval?.toolCallId === 'cmd_wait') break;
+      await new Promise((r) => setTimeout(r, 20));
+    }
     const sessionTask = engineWait['tasksBySession'].get('sess_a1_4');
     expect(sessionTask?.pendingApproval?.toolCallId).toBe('cmd_wait');
 

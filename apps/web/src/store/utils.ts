@@ -13,7 +13,7 @@ export const PROVIDER_DEFAULT_MODELS: Record<string, string> = {
   cline: 'cline-pass/deepseek-v4-pro',
   anthropic: 'claude-3-5-sonnet-20241022',
   openai: 'gpt-5.6-sol',
-  antigravity: 'gemini-3.7-flash',
+  antigravity: 'gemini-3.8-flash',
   ollama: 'llama3.3',
   openrouter: 'anthropic/claude-3.5-sonnet',
   opencode: 'claude-fable-5',

@@ -1,8 +1,9 @@
 import React from 'react';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { ChatMessageItem } from './ChatMessageItem.js';
 import type { ChatMessage } from '@harni/types';
+import { useAgentStore } from '../../store/useAgentStore.js';
 
 describe('ChatMessageItem Component', () => {
   it('renders user message correctly', () => {
@@ -141,5 +142,52 @@ describe('ChatMessageItem Component', () => {
     expect(screen.getByText('SPEC.md')).toBeInTheDocument();
     expect(screen.getByText('2.0 KB')).toBeInTheDocument();
     expect(screen.getByText('請審查此說明文檔')).toBeInTheDocument();
+  });
+
+  it('handles clicking file links: opens file and document viewer without opening a new tab', () => {
+    const mockOpenFile = vi.fn();
+    const mockSetDocumentViewerOpen = vi.fn();
+    useAgentStore.setState({
+      openFile: mockOpenFile,
+      setDocumentViewerOpen: mockSetDocumentViewerOpen,
+    });
+
+    const msgWithFileLinks: ChatMessage = {
+      id: 'msg_links_1',
+      role: 'assistant',
+      content: 'Please check [App.tsx](file:///d:/Work/Project/Harni/apps/web/src/App.tsx#L10-L20) and [SPEC.md](SPEC.md).',
+      timestamp: Date.now(),
+    };
+
+    render(<ChatMessageItem msg={msgWithFileLinks} />);
+
+    const appLink = screen.getByText('App.tsx');
+    expect(appLink).toBeInTheDocument();
+
+    fireEvent.click(appLink);
+    expect(mockOpenFile).toHaveBeenCalledWith('d:/Work/Project/Harni/apps/web/src/App.tsx');
+    expect(mockSetDocumentViewerOpen).toHaveBeenCalledWith(true);
+
+    const specLink = screen.getByText('SPEC.md');
+    fireEvent.click(specLink);
+    expect(mockOpenFile).toHaveBeenCalledWith('SPEC.md');
+    expect(mockSetDocumentViewerOpen).toHaveBeenCalledWith(true);
+  });
+
+  it('keeps default target="_blank" behavior for external links', () => {
+    const msgWithExternalLink: ChatMessage = {
+      id: 'msg_links_2',
+      role: 'assistant',
+      content: 'Visit [GitHub](https://github.com/example/repo) for details.',
+      timestamp: Date.now(),
+    };
+
+    render(<ChatMessageItem msg={msgWithExternalLink} />);
+
+    const extLink = screen.getByText('GitHub');
+    expect(extLink).toBeInTheDocument();
+    expect(extLink).toHaveAttribute('href', 'https://github.com/example/repo');
+    expect(extLink).toHaveAttribute('target', '_blank');
+    expect(extLink).toHaveAttribute('rel', 'noopener noreferrer');
   });
 });

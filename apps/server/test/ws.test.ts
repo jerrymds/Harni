@@ -5,6 +5,7 @@ import { WebSocket } from 'ws';
 import { MockProvider } from '@harni/agent-core';
 import type { ClientMessage, ServerMessage } from '@harni/types';
 import { createApp } from '../src/server.js';
+import { AntigravityBridgeManager } from '../src/services/antigravityBridgeManager.js';
 
 describe('Server WebSocket Protocol & Agent Flow', () => {
   const tempDir = path.resolve('temp_server_test_ws');
@@ -109,6 +110,30 @@ describe('Server WebSocket Protocol & Agent Flow', () => {
     );
     expect(contentReceived).toBeDefined();
     expect((contentReceived?.payload as any).content).toBe('Created by WebSocket Client');
+
+    // Also verify file:open fallback with an external absolute file outside workspace
+    const externalFile = path.resolve(tempDir, '..', `ext_file_${Date.now()}.txt`);
+    await fs.writeFile(externalFile, 'External Absolute File Content', 'utf-8');
+
+    ws.send(JSON.stringify({
+      type: 'file:open',
+      payload: { path: externalFile },
+    }));
+
+    const startExtOpen = Date.now();
+    while (Date.now() - startExtOpen < 2000) {
+      if (receivedMessages.some((m) => m.type === 'file:content' && (m.payload as any).path === externalFile)) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    const extContentReceived = receivedMessages.find(
+      (m) => m.type === 'file:content' && (m.payload as any).path === externalFile,
+    );
+    expect(extContentReceived).toBeDefined();
+    expect((extContentReceived?.payload as any).content).toBe('External Absolute File Content');
+    await fs.unlink(externalFile).catch(() => {});
 
     ws.close();
   });
@@ -220,5 +245,43 @@ describe('Server WebSocket Protocol & Agent Flow', () => {
 
     startTaskSpy.mockRestore();
     ws.close();
+  });
+
+  it('composes dynamic model name with thinking depth for antigravity provider', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    await new Promise<void>((resolve) => ws.on('open', () => resolve()));
+
+    const checkHealthSpy = vi.spyOn(AntigravityBridgeManager.prototype, 'checkHealth').mockResolvedValue(true);
+    const startTaskSpy = vi.spyOn(app.engine, 'startTask').mockImplementation(async () => {});
+
+    try {
+      const promptMsg: ClientMessage = {
+        type: 'user:prompt',
+        payload: {
+          sessionId: 'sess_antigravity_model_test',
+          prompt: 'antigravity prompt test',
+          provider: 'antigravity',
+          model: 'gemini-3.8-flash',
+          thinkingDepth: 'high',
+        },
+      };
+      ws.send(JSON.stringify(promptMsg));
+
+      const start = Date.now();
+      while (Date.now() - start < 4000) {
+        if (startTaskSpy.mock.calls.length > 0) break;
+        await new Promise((r) => setTimeout(r, 50));
+      }
+
+      expect(startTaskSpy).toHaveBeenCalled();
+      const calledOptions = startTaskSpy.mock.calls[0]?.[1];
+      expect(calledOptions?.provider).toBe('antigravity');
+      expect(calledOptions?.model).toBe('gemini-3.8-flash-high');
+      expect(calledOptions?.thinkingDepth).toBe('high');
+    } finally {
+      checkHealthSpy.mockRestore();
+      startTaskSpy.mockRestore();
+      ws.close();
+    }
   });
 });

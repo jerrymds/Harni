@@ -44,7 +44,7 @@ export class SubagentRegistry {
     }
 
     if (tier === 'fast') {
-      if (provider === 'antigravity') return 'gemini-3.7-flash';
+      if (provider === 'antigravity') return 'gemini-3.8-flash';
       if (provider === 'anthropic') return 'claude-3-5-haiku-latest';
       if (provider === 'openai') return 'gpt-4o-mini';
       return parentModel || definition?.model;
