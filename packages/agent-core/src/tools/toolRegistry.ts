@@ -11,6 +11,7 @@ import { SendMessageTool } from './sendMessage.js';
 import { ManageSubagentsTool } from './manageSubagents.js';
 import { DefineSubagentTool } from './defineSubagent.js';
 import { AskQuestionTool } from './askQuestion.js';
+import { ContrastiveProbeTool } from './contrastiveProbe.js';
 import {
   normalizeToolArguments,
   resolveCanonicalToolName,
@@ -85,6 +86,7 @@ export class ToolRegistry {
     this.register(new ManageSubagentsTool());
     this.register(new DefineSubagentTool());
     this.register(new AskQuestionTool());
+    this.register(new ContrastiveProbeTool());
     if (this.skillRegistry) {
       this.register(new UseSkillTool(this.skillRegistry));
     }

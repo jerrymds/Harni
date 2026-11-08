@@ -1,11 +1,13 @@
 import { EventEmitter } from 'node:events';
 import type {
+  HarnessExperience,
   LLMProviderType,
   SubagentDefinition,
   SubagentInstanceInfo,
   SubagentModelTier,
   ToolCallRequest,
 } from '@harni/types';
+import { DynamicSubagentHarness } from '../harness/dynamicSubagentHarness.js';
 import type { McpServerManager } from '../mcp/mcpServerManager.js';
 import { ProviderFactory } from '../providers/providerFactory.js';
 import type { SkillRegistry } from '../skills/skillRegistry.js';
@@ -44,6 +46,12 @@ export interface SubagentManagerConfig {
   gitCheckpointService?: GitCheckpointService;
   mcpManager?: McpServerManager;
   skillRegistry?: SkillRegistry;
+  dynamicHarnessEnabled?: boolean;
+  getExperiencesForPrompt?: (
+    query: string,
+    workspaceRoot: string,
+    sessionId?: string,
+  ) => Promise<HarnessExperience[]>;
   executeTerminalCommand?: (
     command: string,
     cwd?: string,
@@ -86,6 +94,12 @@ export class SubagentManager extends EventEmitter {
   private gitCheckpointService?: GitCheckpointService;
   private mcpManager?: McpServerManager;
   private skillRegistry?: SkillRegistry;
+  private dynamicHarnessEnabled: boolean;
+  private getExperiencesForPrompt?: (
+    query: string,
+    workspaceRoot: string,
+    sessionId?: string,
+  ) => Promise<HarnessExperience[]>;
   private executeTerminalCommand?: (
     command: string,
     cwd?: string,
@@ -120,6 +134,8 @@ export class SubagentManager extends EventEmitter {
     this.maxConcurrent = config.maxConcurrent ?? 3;
     this.maxRateLimitRetries = config.maxRateLimitRetries ?? 2;
     this.rateLimitBaseDelayMs = config.rateLimitBaseDelayMs ?? 1000;
+    this.dynamicHarnessEnabled = config.dynamicHarnessEnabled ?? true;
+    this.getExperiencesForPrompt = config.getExperiencesForPrompt;
     this.gitCheckpointService = config.gitCheckpointService;
     this.mcpManager = config.mcpManager;
     this.skillRegistry = config.skillRegistry;
@@ -146,6 +162,14 @@ export class SubagentManager extends EventEmitter {
 
   public setWorkspaceRoot(newRoot: string): void {
     this.workspaceRoot = newRoot;
+  }
+
+  public setDynamicHarnessEnabled(enabled: boolean): void {
+    this.dynamicHarnessEnabled = enabled;
+  }
+
+  public getDynamicHarnessEnabled(): boolean {
+    return this.dynamicHarnessEnabled;
   }
 
   public setMaxConcurrent(max: number): void {
@@ -251,132 +275,168 @@ export class SubagentManager extends EventEmitter {
       | { ok: true; instance: SubagentInstance; params: SpawnSubagentParams; subagentId: string }
       | { ok: false; error: Error; params: SpawnSubagentParams };
 
-    const created: CreatedItem[] = subagents.map((params) => {
-      const depth = params.depth ?? 1;
-      if (depth > this.maxDepth) {
-        return {
-          ok: false,
-          error: new Error(
-            `Subagent depth limit exceeded (current depth: ${depth}, max depth: ${this.maxDepth}). Orchestration recursion stopped.`,
-          ),
-          params,
-        };
-      }
-
-      let resolvedTypeName = params.typeName;
-      let definition = this.registry.get(resolvedTypeName);
-
-      if (!definition) {
-        definition =
-          this.registry.get('self') ||
-          {
-            name: resolvedTypeName,
-            description: `Dynamic subagent ${resolvedTypeName}`,
-            role: params.role,
-            systemPrompt: `You are a specialized subagent for ${params.role}. Complete the assigned task.`,
-            maxTurns: 15,
+    const created: CreatedItem[] = await Promise.all(
+      subagents.map(async (params) => {
+        const depth = params.depth ?? 1;
+        if (depth > this.maxDepth) {
+          return {
+            ok: false,
+            error: new Error(
+              `Subagent depth limit exceeded (current depth: ${depth}, max depth: ${this.maxDepth}). Orchestration recursion stopped.`,
+            ),
+            params,
           };
-      }
+        }
 
-      const subagentId = `sub_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-      const workspace = params.workspaceRoot || this.workspaceRoot;
+        let resolvedTypeName = params.typeName;
+        let definition = this.registry.get(resolvedTypeName);
 
-      // Restrict tools based on definition
-      const subagentToolRegistry = this.createScopedToolRegistry(definition);
+        if (!definition) {
+          definition =
+            this.registry.get('self') ||
+            {
+              name: resolvedTypeName,
+              description: `Dynamic subagent ${resolvedTypeName}`,
+              role: params.role,
+              systemPrompt: `You are a specialized subagent for ${params.role}. Complete the assigned task.`,
+              maxTurns: 15,
+            };
+        }
 
-      const effectiveProvider = params.provider || this.defaultProvider;
-      const resolvedModel = this.registry.resolveModel({
-        explicitModel: params.model,
-        definition,
-        provider: effectiveProvider,
-        parentModel: params.parentModel || this.defaultModel,
-      });
+        const subagentId = `sub_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+        const workspace = params.workspaceRoot || this.workspaceRoot;
 
-      // Create provider for subagent
-      const provider =
-        params.customProvider ||
-        ProviderFactory.create(effectiveProvider, {
-          apiKey: params.apiKey || this.apiKey,
-          baseURL: params.baseURL || this.baseURL,
+        let effectiveDefinition: SubagentDefinition = definition;
+        if (this.dynamicHarnessEnabled) {
+          let experiences: HarnessExperience[] | undefined;
+          if (this.getExperiencesForPrompt && params.prompt) {
+            try {
+              experiences = await this.getExperiencesForPrompt(params.prompt, workspace, params.sessionId);
+            } catch {
+              experiences = undefined;
+            }
+          }
+
+          const effectiveRole = params.role || definition.role || definition.name;
+          const isDynamicOrSelf = !this.registry.has(resolvedTypeName) || resolvedTypeName === 'self';
+          const hasExplicitAllowedTools = Array.isArray(definition.allowedTools);
+          const skipIntentPruning = hasExplicitAllowedTools && !isDynamicOrSelf;
+
+          const tailored = DynamicSubagentHarness.tailor({
+            taskPrompt: params.prompt,
+            role: effectiveRole,
+            baseDefinition: definition,
+            experiences,
+            skipIntentPruning,
+          });
+
+          effectiveDefinition = {
+            ...definition,
+            systemPrompt: tailored.systemPrompt,
+            allowedTools:
+              hasExplicitAllowedTools || isDynamicOrSelf
+                ? tailored.prunedTools
+                : definition.allowedTools,
+          };
+        }
+
+        // Restrict tools based on definition
+        const subagentToolRegistry = this.createScopedToolRegistry(effectiveDefinition);
+
+        const effectiveProvider = params.provider || this.defaultProvider;
+        const resolvedModel = this.registry.resolveModel({
+          explicitModel: params.model,
+          definition: effectiveDefinition,
+          provider: effectiveProvider,
+          parentModel: params.parentModel || this.defaultModel,
+        });
+
+        // Create provider for subagent
+        const provider =
+          params.customProvider ||
+          ProviderFactory.create(effectiveProvider, {
+            apiKey: params.apiKey || this.apiKey,
+            baseURL: params.baseURL || this.baseURL,
+            model: resolvedModel,
+            thinkingDepth: params.thinkingDepth,
+            workspaceRoot: workspace,
+            anthropicOAuth: params.anthropicOAuth,
+            openaiOAuth: params.openaiOAuth,
+            openaiAccountId: params.openaiAccountId,
+            sessionId: params.sessionId,
+          });
+
+        const instance = new SubagentInstance({
+          id: subagentId,
+          parentId: params.parentId,
+          sessionId: params.sessionId,
+          depth,
+          definition: effectiveDefinition,
+          role: params.role || effectiveDefinition.role || effectiveDefinition.name,
+          prompt: params.prompt,
           model: resolvedModel,
-          thinkingDepth: params.thinkingDepth,
           workspaceRoot: workspace,
+          provider,
+          toolRegistry: subagentToolRegistry,
+          mcpManager: this.mcpManager,
+          subagentManager: this,
+          parentSignal: params.parentSignal,
+          onFileDiff: params.onFileDiff,
+          onDiagnostics: params.onDiagnostics,
+          onTerminalData: params.onTerminalData,
+          onCodeModified: params.onCodeModified,
+          executeTerminalCommand: this.executeTerminalCommand,
+          requestToolApproval: this.requestToolApproval,
+          askUserQuestion: this.askUserQuestion,
+          maxTokensBudget: params.maxTokensBudget ?? effectiveDefinition.maxTokensBudget,
+          timeoutMs: params.timeoutMs ?? effectiveDefinition.timeoutMs,
           anthropicOAuth: params.anthropicOAuth,
           openaiOAuth: params.openaiOAuth,
           openaiAccountId: params.openaiAccountId,
-          sessionId: params.sessionId,
+          maxRateLimitRetries: this.maxRateLimitRetries,
+          rateLimitBaseDelayMs: this.rateLimitBaseDelayMs,
         });
 
-      const instance = new SubagentInstance({
-        id: subagentId,
-        parentId: params.parentId,
-        sessionId: params.sessionId,
-        depth,
-        definition,
-        role: params.role || definition.role || definition.name,
-        prompt: params.prompt,
-        model: resolvedModel,
-        workspaceRoot: workspace,
-        provider,
-        toolRegistry: subagentToolRegistry,
-        mcpManager: this.mcpManager,
-        subagentManager: this,
-        parentSignal: params.parentSignal,
-        onFileDiff: params.onFileDiff,
-        onDiagnostics: params.onDiagnostics,
-        onTerminalData: params.onTerminalData,
-        onCodeModified: params.onCodeModified,
-        executeTerminalCommand: this.executeTerminalCommand,
-        requestToolApproval: this.requestToolApproval,
-        askUserQuestion: this.askUserQuestion,
-        maxTokensBudget: params.maxTokensBudget ?? definition.maxTokensBudget,
-        timeoutMs: params.timeoutMs ?? definition.timeoutMs,
-        anthropicOAuth: params.anthropicOAuth,
-        openaiOAuth: params.openaiOAuth,
-        openaiAccountId: params.openaiAccountId,
-        maxRateLimitRetries: this.maxRateLimitRetries,
-        rateLimitBaseDelayMs: this.rateLimitBaseDelayMs,
-      });
+        this.instances.set(subagentId, instance);
 
-      this.instances.set(subagentId, instance);
-
-      // Wire instance events to SubagentManager events
-      instance.on('status', (payload) => {
-        this.emit('subagent:status', {
-          sessionId: params.sessionId,
-          subagentId,
-          status: payload.status,
-          error: payload.error,
+        // Wire instance events to SubagentManager events
+        instance.on('status', (payload) => {
+          this.emit('subagent:status', {
+            sessionId: params.sessionId,
+            subagentId,
+            status: payload.status,
+            error: payload.error,
+          });
         });
-      });
 
-      instance.on('token', (payload) => {
-        this.emit('subagent:token', {
-          sessionId: params.sessionId,
-          subagentId,
-          text: payload.text,
-          isThinking: payload.isThinking,
+        instance.on('token', (payload) => {
+          this.emit('subagent:token', {
+            sessionId: params.sessionId,
+            subagentId,
+            text: payload.text,
+            isThinking: payload.isThinking,
+          });
         });
-      });
 
-      instance.on('tool', (payload) => {
-        this.emit('subagent:tool', {
-          sessionId: params.sessionId,
-          subagentId,
-          toolName: payload.toolName,
-          summary: payload.summary,
-          status: payload.status,
+        instance.on('tool', (payload) => {
+          this.emit('subagent:tool', {
+            sessionId: params.sessionId,
+            subagentId,
+            toolName: payload.toolName,
+            summary: payload.summary,
+            status: payload.status,
+          });
         });
-      });
 
-      // Emit spawned event (initially in pending status)
-      this.emit('subagent:spawned', {
-        sessionId: params.sessionId,
-        subagent: instance.getInfo(),
-      });
+        // Emit spawned event (initially in pending status)
+        this.emit('subagent:spawned', {
+          sessionId: params.sessionId,
+          subagent: instance.getInfo(),
+        });
 
-      return { ok: true, instance, params, subagentId };
-    });
+        return { ok: true, instance, params, subagentId };
+      }),
+    );
 
     // 2. Map created instances to parallel execution promises regulated by concurrency semaphore
     const results: Promise<SubagentExecutionResult>[] = created.map((item) => {

@@ -1,4 +1,5 @@
-import type { AgentMode, AgentSkill, ToolDefinition } from '@harni/types';
+import type { AgentMode, AgentSkill, ToolDefinition, HarnessExperience } from '@harni/types';
+import { formatExperiencesForPrompt } from '../harness/experienceFormat.js';
 
 export interface SystemPromptOptions {
   workspaceRoot: string;
@@ -9,6 +10,8 @@ export interface SystemPromptOptions {
   skillsFormatted?: string;
   skills?: AgentSkill[];
   isSubagent?: boolean;
+  experiences?: HarnessExperience[];
+  experiencesFormatted?: string;
 }
 
 export class SystemPromptBuilder {
@@ -22,6 +25,8 @@ export class SystemPromptBuilder {
       skillsFormatted,
       skills = [],
       isSubagent = false,
+      experiences,
+      experiencesFormatted,
     } = options;
 
     const sections: string[] = [];
@@ -63,7 +68,17 @@ export class SystemPromptBuilder {
       sections.push(this.getSkillsSection(skills));
     }
 
-    // 8. Operating Principles & Best Practices
+    // 8. Harness Learned Experiences Section
+    if (experiencesFormatted && experiencesFormatted.trim().length > 0) {
+      sections.push(experiencesFormatted.trim());
+    } else if (experiences && experiences.length > 0) {
+      const expSection = formatExperiencesForPrompt(experiences);
+      if (expSection.length > 0) {
+        sections.push(expSection);
+      }
+    }
+
+    // 9. Operating Principles & Best Practices
     if (isSubagent) {
       sections.push(`==== SUBAGENT OPERATING RULES ====
 - You are a subagent delegated by a parent orchestrator. Execute the task autonomously to completion.
@@ -97,7 +112,7 @@ export class SystemPromptBuilder {
 8. **Concise Communication**: Be direct, professional, and explain what you did and why in concise markdown.`);
     }
 
-    // 9. Custom User Instructions
+    // 10. Custom User Instructions
     if (customInstructions && customInstructions.trim().length > 0) {
       const header = isSubagent
         ? '==== SUBAGENT ROLE INSTRUCTIONS ===='

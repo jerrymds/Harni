@@ -1,5 +1,6 @@
 import * as http from 'node:http';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import { WebSocketServer } from 'ws';
 import { AgentCoreEngine } from '@harni/agent-core';
 import type { AppInstance, ReadBodyOptions, ServerConfig, ServerContext } from './types/server.js';
@@ -69,6 +70,8 @@ export function createApp(config: ServerConfig = {}): AppInstance {
     }
   }
 
+  const isTestEnv = process.env.NODE_ENV === 'test' || Boolean(process.env.VITEST);
+
   const engine = new AgentCoreEngine({
     workspaceRoot,
     defaultProvider: config.defaultProvider || 'anthropic',
@@ -77,6 +80,11 @@ export function createApp(config: ServerConfig = {}): AppInstance {
     baseURL: config.baseURL,
     mcpEnabled,
     mcpServers,
+    experienceLearningEnabled: config.experienceLearningEnabled ?? !isTestEnv,
+    experienceStorageDir:
+      config.experienceStorageDir ||
+      process.env.HARNI_EXPERIENCE_DIR ||
+      path.join(os.homedir(), '.harni', 'experiences'),
     executeTerminalCommand: async (cmd, cwd, onData) => {
       return await ptyService.executeCommand(cmd, cwd, onData);
     },

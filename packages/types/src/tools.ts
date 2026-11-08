@@ -11,7 +11,8 @@ export type BuiltInToolName =
   | 'browser_action'
   | 'mcp_call'
   | 'use_skill'
-  | 'ask_question';
+  | 'ask_question'
+  | 'contrastive_probe';
 
 /**
  * JSON Schema parameter definition for Tool calling
@@ -115,4 +116,17 @@ export interface AskQuestionParams {
   is_multi_select?: boolean;
   allow_custom_input?: boolean;
 }
+
+export interface ContrastiveProbeParams {
+  taskDescription: string;
+  candidates: Array<{
+    id: string;
+    name: string;
+    description: string;
+    patchDiff?: string;
+    codeSnippets?: Array<{ file: string; content: string }>;
+    metadata?: Record<string, unknown>;
+  }>;
+}
+
 

@@ -680,6 +680,7 @@ export class WebSocketHandler {
       'checkpoint:restored',
       'checkpoint:pruned',
       'worktree:status',
+      'probe:result',
       'error',
     ];
 

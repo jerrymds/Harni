@@ -1,6 +1,8 @@
 import { EventEmitter } from 'node:events';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
+import * as crypto from 'node:crypto';
+import * as os from 'node:os';
 import { ContextManager } from './context/contextManager.js';
 import { SystemPromptBuilder } from './prompts/systemPrompt.js';
 import { BaseLLMProvider } from './providers/baseProvider.js';
@@ -12,6 +14,8 @@ import { SubagentManager } from './subagents/subagentManager.js';
 import { AutoTestRunner } from './testing/autoTestRunner.js';
 import { GitCheckpointService } from './git/gitCheckpointService.js';
 import { parseRateLimitError } from './utils/rateLimit.js';
+import { ExperienceManager } from './harness/experienceManager.js';
+import { ContrastiveProbeRunner } from './harness/contrastiveProbeRunner.js';
 import type { ToolExecutionContext } from './tools/baseTool.js';
 import type {
   AgentMode,
@@ -20,8 +24,12 @@ import type {
   ChatMessage,
   FileAttachment,
   CheckpointInfo,
+  ContrastiveProbeParams,
+  ContrastiveProbeResult,
   FileDiff,
+  HarnessExperience,
   LLMProviderType,
+  ProbeCandidate,
   ServerToClientEvents,
   SubagentModelTier,
   TaskState,
@@ -57,6 +65,9 @@ export interface AgentEngineConfig {
   gitCheckpointEnabled?: boolean;
   worktreeIsolationEnabled?: boolean;
   worktreeTimeoutMs?: number;
+  experienceLearningEnabled?: boolean;
+  experienceStorageDir?: string;
+  dynamicHarnessEnabled?: boolean;
 }
 
 interface SessionTask {
@@ -75,6 +86,7 @@ interface SessionTask {
   workspaceRoot: string;
   mainWorkspaceRoot?: string;
   codeModified: boolean;
+  hasModifiedCodeInTask: boolean;
   autoTestRetries: number;
   autoTestConfig: AutoTestConfig;
   checkpointId?: string;
@@ -85,6 +97,13 @@ interface SessionTask {
   openaiOAuth?: boolean;
   openaiAccountId?: string;
   subagentTokenUsage: TokenUsage;
+  cachedExperiences?: HarnessExperience[];
+  successfulActions: string[];
+  encounteredErrors: string[];
+  modifiedFiles: Set<string>;
+  testFailureDiffs: string[];
+  experienceSaved?: boolean;
+  pendingExperiencePromise?: Promise<void>;
 }
 
 export class AgentCoreEngine extends EventEmitter {
@@ -113,6 +132,18 @@ export class AgentCoreEngine extends EventEmitter {
   public worktreeIsolationEnabled: boolean = false;
   public worktreeTimeoutMs: number = 180000;
   public subagentsEnabled: boolean = true;
+  private _dynamicHarnessEnabled: boolean = true;
+  public get dynamicHarnessEnabled(): boolean {
+    return this._dynamicHarnessEnabled;
+  }
+  public set dynamicHarnessEnabled(enabled: boolean) {
+    this._dynamicHarnessEnabled = enabled;
+    this.subagentManager?.setDynamicHarnessEnabled(enabled);
+  }
+  public experienceLearningEnabled: boolean = false;
+  private experienceStorageDir?: string;
+  public experienceManager?: ExperienceManager;
+  private experienceManagersByRoot = new Map<string, ExperienceManager>();
   private defaultTestCommand?: string;
   private maxTestRetries: number = 5;
 
@@ -139,6 +170,13 @@ export class AgentCoreEngine extends EventEmitter {
     this.worktreeIsolationEnabled = config.worktreeIsolationEnabled ?? false;
     this.worktreeTimeoutMs = config.worktreeTimeoutMs ?? 180000;
     this.subagentsEnabled = config.subagentsEnabled ?? true;
+    this.dynamicHarnessEnabled = config.dynamicHarnessEnabled ?? true;
+    this.experienceLearningEnabled = config.experienceLearningEnabled ?? false;
+    this.experienceStorageDir = config.experienceStorageDir;
+
+    if (this.experienceLearningEnabled) {
+      this.experienceManager = this.getExperienceManagerForRoot(this.workspaceRoot);
+    }
 
     this.gitCheckpointService = new GitCheckpointService();
     this.skillRegistry = new SkillRegistry(true);
@@ -153,6 +191,7 @@ export class AgentCoreEngine extends EventEmitter {
       maxDepth: config.maxSubagentDepth ?? 2,
       maxConcurrent: config.maxSubagentConcurrent,
       modelTierMap: config.modelTierMap,
+      dynamicHarnessEnabled: this.dynamicHarnessEnabled,
       executeTerminalCommand: this.executeTerminalCommand,
       mcpManager: this.mcpManager,
       skillRegistry: this.skillRegistry,
@@ -161,6 +200,19 @@ export class AgentCoreEngine extends EventEmitter {
         this.handleSubagentToolApproval(sessionId, request, signal),
       askUserQuestion: (sessionId, params, signal) =>
         this.handleSubagentAskQuestion(sessionId, params, signal),
+      getExperiencesForPrompt: async (query, wsRoot, sessionId) => {
+        if (!this.experienceLearningEnabled) return [];
+        const sessionTask = sessionId ? this.tasksBySession.get(sessionId) : undefined;
+        const targetRoot =
+          sessionTask?.mainWorkspaceRoot ??
+          wsRoot ??
+          this.workspaceRoot;
+        const mgr =
+          this.getExperienceManagerForRoot(targetRoot) ??
+          this.experienceManager;
+        if (!mgr) return [];
+        return await mgr.searchExperiences({ query, limit: 3 });
+      },
     });
 
     this.bindSubagentEvents();
@@ -194,6 +246,46 @@ export class AgentCoreEngine extends EventEmitter {
     return 'idle';
   }
 
+  private getExperienceManagerForRoot(rootPath: string): ExperienceManager | undefined {
+    if (!this.experienceLearningEnabled) return undefined;
+    const resolvedRoot = path.resolve(rootPath);
+    let mgr = this.experienceManagersByRoot.get(resolvedRoot);
+    if (mgr) {
+      // Re-insert to refresh recency in Map iteration order
+      this.experienceManagersByRoot.delete(resolvedRoot);
+      this.experienceManagersByRoot.set(resolvedRoot, mgr);
+      return mgr;
+    }
+
+    const MAX_EXPERIENCE_MANAGERS = 20;
+    while (this.experienceManagersByRoot.size >= MAX_EXPERIENCE_MANAGERS) {
+      let evicted = false;
+      for (const [key, val] of this.experienceManagersByRoot.entries()) {
+        if (val !== this.experienceManager) {
+          this.experienceManagersByRoot.delete(key);
+          evicted = true;
+          break;
+        }
+      }
+      if (!evicted) {
+        break;
+      }
+    }
+
+    const hash = crypto
+      .createHash('sha1')
+      .update(resolvedRoot)
+      .digest('hex')
+      .slice(0, 12);
+    const storage = path.join(
+      this.experienceStorageDir || path.join(os.homedir(), '.harni', 'experiences'),
+      hash,
+    );
+    mgr = new ExperienceManager({ storageDir: storage, maxRetained: 200 });
+    this.experienceManagersByRoot.set(resolvedRoot, mgr);
+    return mgr;
+  }
+
   public getWorkspaceRoot(): string {
     return this.workspaceRoot;
   }
@@ -202,6 +294,9 @@ export class AgentCoreEngine extends EventEmitter {
     this.workspaceRoot = path.resolve(newRoot);
     this.mcpManager.setWorkspaceRoot(this.workspaceRoot);
     this.subagentManager.setWorkspaceRoot(this.workspaceRoot);
+    if (this.experienceLearningEnabled) {
+      this.experienceManager = this.getExperienceManagerForRoot(this.workspaceRoot);
+    }
   }
 
   public getSubagentManager(): SubagentManager {
@@ -253,8 +348,23 @@ export class AgentCoreEngine extends EventEmitter {
           sessionTask.taskState.subagents = this.subagentManager.getInstancesBySession(payload.sessionId);
           if (payload.codeModified) {
             sessionTask.codeModified = true;
+            sessionTask.hasModifiedCodeInTask = true;
+          }
+          if (payload.structuredReport?.modifiedFiles && Array.isArray(payload.structuredReport.modifiedFiles)) {
+            for (const f of payload.structuredReport.modifiedFiles) {
+              if (typeof f === 'string' && f.trim()) {
+                sessionTask.modifiedFiles.add(f.trim());
+                if (AutoTestRunner.isCodeFile(f.trim())) {
+                  sessionTask.codeModified = true;
+                  sessionTask.hasModifiedCodeInTask = true;
+                }
+              }
+            }
           }
           if (payload.tokenUsage) {
+            if (!sessionTask.subagentTokenUsage) {
+              sessionTask.subagentTokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+            }
             sessionTask.subagentTokenUsage.promptTokens += payload.tokenUsage.promptTokens || 0;
             sessionTask.subagentTokenUsage.completionTokens += payload.tokenUsage.completionTokens || 0;
             sessionTask.subagentTokenUsage.totalTokens +=
@@ -522,6 +632,7 @@ export class AgentCoreEngine extends EventEmitter {
         abortController,
         pendingApproval: null,
         codeModified: false,
+        hasModifiedCodeInTask: false,
         autoTestRetries: 0,
         checkpointId,
         isWorktree,
@@ -531,6 +642,12 @@ export class AgentCoreEngine extends EventEmitter {
         openaiOAuth: options.openaiOAuth,
         openaiAccountId: options.openaiAccountId,
         subagentTokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+        cachedExperiences: undefined,
+        successfulActions: [],
+        encounteredErrors: [],
+        modifiedFiles: new Set<string>(),
+        testFailureDiffs: [],
+        experienceSaved: false,
         autoTestConfig: {
           enabled: effectiveAutoTest,
           testCommand: effectiveTestCommand,
@@ -564,7 +681,14 @@ export class AgentCoreEngine extends EventEmitter {
       sessionTask.abortController = abortController;
       sessionTask.pendingApproval = null;
       sessionTask.codeModified = false;
+      sessionTask.hasModifiedCodeInTask = false;
       sessionTask.autoTestRetries = 0;
+      sessionTask.successfulActions = [];
+      sessionTask.encounteredErrors = [];
+      sessionTask.modifiedFiles = new Set<string>();
+      sessionTask.testFailureDiffs = [];
+      sessionTask.cachedExperiences = undefined;
+      sessionTask.experienceSaved = false;
       sessionTask.checkpointId = checkpointId || sessionTask.checkpointId;
       sessionTask.isWorktree = isWorktree;
       sessionTask.worktreeBranch = worktreeBranch;
@@ -819,12 +943,33 @@ export class AgentCoreEngine extends EventEmitter {
         // Safe to ignore if .clinerules does not exist
       }
 
+      const expManager =
+        this.getExperienceManagerForRoot(sessionTask.mainWorkspaceRoot || sessionTask.workspaceRoot) ??
+        this.experienceManager;
+
+      if (this.experienceLearningEnabled && expManager && !sessionTask.cachedExperiences) {
+        try {
+          const userMessages = sessionTask.contextManager.getMessages().filter((m) => m.role === 'user');
+          const lastUserMsg = userMessages[userMessages.length - 1];
+          const currentPrompt =
+            sessionTask.taskState.prompt?.trim() || (lastUserMsg ? lastUserMsg.content : '');
+          sessionTask.cachedExperiences = await expManager.searchExperiences({
+            query: currentPrompt,
+            limit: 3,
+          });
+        } catch (expErr) {
+          console.warn('[Engine] Failed to retrieve experiences:', expErr);
+          sessionTask.cachedExperiences = [];
+        }
+      }
+
       const systemPrompt = SystemPromptBuilder.build({
         workspaceRoot: sessionTask.workspaceRoot,
         mode: sessionTask.taskState.mode,
         customInstructions: effectiveCustomInstructions,
         tools: allDefinitions,
         skillsFormatted: this.skillRegistry.formatSkillsForPrompt(),
+        experiences: sessionTask.cachedExperiences,
       });
 
       // Call LLM with streaming
@@ -913,6 +1058,28 @@ export class AgentCoreEngine extends EventEmitter {
             });
 
             if (!testResult.passed) {
+              const testErrSummary = `Test failed (${testCmd}): ${AutoTestRunner.extractErrorStacktrace(testResult.output, 200).trim() || 'Exit code ' + testResult.exitCode}`;
+              sessionTask.encounteredErrors.push(testErrSummary);
+              if (sessionTask.encounteredErrors.length > 5) {
+                sessionTask.encounteredErrors.shift();
+              }
+
+              try {
+                const isGit = await this.gitCheckpointService.isGitRepo(sessionTask.workspaceRoot);
+                if (isGit) {
+                  const diffRes = await this.gitCheckpointService.runGit(
+                    ['diff', 'HEAD'],
+                    sessionTask.workspaceRoot,
+                  );
+                  const currentDiff = (diffRes.stdout || '').slice(0, 8000);
+                  if (currentDiff && !sessionTask.testFailureDiffs.includes(currentDiff)) {
+                    sessionTask.testFailureDiffs.push(currentDiff);
+                  }
+                }
+              } catch (diffErr) {
+                console.warn('[Engine] Failed to capture git diff on test failure:', diffErr);
+              }
+
               const maxRetries = sessionTask.autoTestConfig.maxRetries ?? this.maxTestRetries;
               if (sessionTask.autoTestRetries < maxRetries) {
                 sessionTask.autoTestRetries++;
@@ -936,14 +1103,81 @@ export class AgentCoreEngine extends EventEmitter {
                 // Re-enter loop to allow the agent to repair
                 continue;
               } else {
+                let probeReport = '';
+                if (sessionTask.testFailureDiffs.length >= 2) {
+                  try {
+                    const diffSlice = sessionTask.testFailureDiffs.slice(-3);
+                    const candidates: ProbeCandidate[] = diffSlice.map((diff, idx) => ({
+                      id: `attempt_${idx + 1}`,
+                      name: `修復嘗試方案 ${idx + 1}`,
+                      description: `第 ${idx + 1} 次自動修復的代碼補丁`,
+                      patchDiff: diff,
+                    }));
+
+                    const llmCaller = async (promptText: string): Promise<string> => {
+                      const comp = await provider.streamCompletion(
+                        [
+                          {
+                            id: `msg_probe_${Date.now()}`,
+                            role: 'user',
+                            content: promptText,
+                            timestamp: Date.now(),
+                          },
+                        ],
+                        'You are an expert evaluator assessing and comparing code solution candidates.',
+                        [],
+                        () => {},
+                        sessionTask.abortController?.signal,
+                      );
+                      return comp.text;
+                    };
+
+                    const probeResult = await ContrastiveProbeRunner.evaluateCandidates({
+                      taskDescription:
+                        sessionTask.taskState.prompt || `Repair failing test: ${testCmd}`,
+                      candidates,
+                      llmCaller,
+                    });
+
+                    this.emitEvent('probe:result', {
+                      sessionId,
+                      taskId: sessionTask.taskState.id,
+                      result: probeResult,
+                    });
+
+                    if (probeResult.status === 'parse_failed') {
+                      probeReport =
+                        `\n\n### 🔬 對比探測評估建議\n` +
+                        `- **評估狀態**: 評估輸出解析失敗 (\`parse_failed\`)，無法自動選出最佳候選方案。\n` +
+                        `- **評估摘要**: ${probeResult.comparisonSummary}\n`;
+                    } else {
+                      probeReport =
+                        `\n\n### 🔬 對比探測評估建議（最接近成功的修改與建議）\n` +
+                        `- **推薦最佳方案**: ${probeResult.winnerName} (${probeResult.winnerId})\n` +
+                        `- **評估摘要**: ${probeResult.comparisonSummary}\n` +
+                        `- **建議理由**: ${probeResult.rationale}\n` +
+                        (probeResult.improvementSuggestions &&
+                        probeResult.improvementSuggestions.length > 0
+                          ? `- **改進建議**: ${probeResult.improvementSuggestions.join('; ')}\n`
+                          : '');
+                    }
+                  } catch (probeErr) {
+                    console.warn(
+                      '[Engine] Contrastive probe evaluation failed on retry limit:',
+                      probeErr,
+                    );
+                  }
+                }
+
                 // Exceeded max retries: stop and report to user
                 const limitMsg: ChatMessage = {
                   id: `msg_test_max_${Date.now()}`,
                   role: 'assistant',
-                  content: `⚠️ **自動測試驅動修復已達重試上限 (${maxRetries} 次)**：經過多次修復嘗試，背景測試仍未通過。\n\n**最後測試指令**: \`${testCmd}\` (結束碼: ${testResult.exitCode})\n\n**錯誤摘要**:\n\`\`\`\n${AutoTestRunner.extractErrorStacktrace(testResult.output, 2000)}\n\`\`\`\n\n已停止自動重試，請檢視上方錯誤堆疊。`,
+                  content: `⚠️ **自動測試驅動修復已達重試上限 (${maxRetries} 次)**：經過多次修復嘗試，背景測試仍未通過。\n\n**最後測試指令**: \`${testCmd}\` (結束碼: ${testResult.exitCode})\n\n**錯誤摘要**:\n\`\`\`\n${AutoTestRunner.extractErrorStacktrace(testResult.output, 2000)}\n\`\`\`\n\n已停止自動重試，請檢視上方錯誤堆疊。${probeReport}`,
                   timestamp: Date.now(),
                 };
                 sessionTask.contextManager.addMessage(limitMsg);
+                sessionTask.experienceSaved = true;
                 this.setStatus(sessionTask, 'completed');
                 this.syncTaskState(sessionTask);
                 break;
@@ -1053,6 +1287,7 @@ export class AgentCoreEngine extends EventEmitter {
             parentSignal: sessionTask.abortController?.signal,
             onCodeModified: () => {
               sessionTask.codeModified = true;
+              sessionTask.hasModifiedCodeInTask = true;
             },
             onFileDiff: (diff: FileDiff) => {
               this.emitEvent('file:diff', { ...diff, sessionId, taskId: sessionTask.taskState.id });
@@ -1093,6 +1328,37 @@ export class AgentCoreEngine extends EventEmitter {
               this.setStatus(sessionTask, 'executing_tool');
               return answer;
             },
+            runContrastiveProbe: async (probeParams: ContrastiveProbeParams): Promise<ContrastiveProbeResult> => {
+              const llmCaller = async (promptText: string): Promise<string> => {
+                const comp = await provider.streamCompletion(
+                  [
+                    {
+                      id: `msg_probe_${Date.now()}`,
+                      role: 'user',
+                      content: promptText,
+                      timestamp: Date.now(),
+                    },
+                  ],
+                  'You are an expert evaluator assessing and comparing code solution candidates.',
+                  [],
+                  () => {},
+                  sessionTask.abortController?.signal,
+                );
+                return comp.text;
+              };
+
+              const probeResult = await ContrastiveProbeRunner.evaluateCandidates({
+                taskDescription: probeParams.taskDescription,
+                candidates: probeParams.candidates,
+                llmCaller,
+              });
+              this.emitEvent('probe:result', {
+                sessionId,
+                taskId: sessionTask.taskState.id,
+                result: probeResult,
+              });
+              return probeResult;
+            },
           };
 
           try {
@@ -1119,14 +1385,43 @@ export class AgentCoreEngine extends EventEmitter {
             };
           }
           toolResult.toolCallId = toolCall.id;
-          if (!toolResult.isError && (canonicalToolName === 'write_to_file' || canonicalToolName === 'replace_file_content')) {
-            const targetPath = String(
-              toolCall.arguments.path ??
-                toolCall.arguments.TargetFile ??
-                toolCall.arguments.AbsolutePath ??
-                '',
-            );
-            if (AutoTestRunner.isCodeFile(targetPath)) sessionTask.codeModified = true; // Prose/asset edits (.md, .txt, images) never arm the auto test-driven repair loop
+          if (!toolResult.isError) {
+            const toolSummary =
+              toolResult.summary ||
+              `${toolCall.name} executed successfully`;
+            sessionTask.successfulActions.push(toolSummary);
+            if (sessionTask.successfulActions.length > 15) {
+              sessionTask.successfulActions.shift();
+            }
+
+            if (
+              canonicalToolName === 'write_to_file' ||
+              canonicalToolName === 'replace_file_content'
+            ) {
+              const targetPath = String(
+                toolCall.arguments.path ??
+                  toolCall.arguments.TargetFile ??
+                  toolCall.arguments.AbsolutePath ??
+                  '',
+              );
+              if (targetPath) {
+                sessionTask.modifiedFiles.add(targetPath);
+              }
+              if (AutoTestRunner.isCodeFile(targetPath)) {
+                sessionTask.codeModified = true;
+                sessionTask.hasModifiedCodeInTask = true;
+              } // Prose/asset edits (.md, .txt, images) never arm the auto test-driven repair loop
+            }
+          } else {
+            const errSummary =
+              toolResult.summary ||
+              (typeof toolResult.output === 'string'
+                ? toolResult.output.slice(0, 200)
+                : `Error executing ${toolCall.name}`);
+            sessionTask.encounteredErrors.push(errSummary);
+            if (sessionTask.encounteredErrors.length > 5) {
+              sessionTask.encounteredErrors.shift();
+            }
           }
         }
 
@@ -1179,8 +1474,17 @@ export class AgentCoreEngine extends EventEmitter {
         timestamp: Date.now(),
       };
       sessionTask.contextManager.addMessage(pauseMsg);
+      sessionTask.experienceSaved = true;
       this.setStatus(sessionTask, 'completed');
       this.syncTaskState(sessionTask);
+    }
+
+    if (sessionTask.pendingExperiencePromise) {
+      try {
+        await sessionTask.pendingExperiencePromise;
+      } catch {
+        // Safe to ignore, warning is already logged inside autoSynthesizeAndSaveExperience
+      }
     }
   }
 
@@ -1302,6 +1606,38 @@ export class AgentCoreEngine extends EventEmitter {
     }
   }
 
+  private async autoSynthesizeAndSaveExperience(sessionTask: SessionTask): Promise<void> {
+    const expManager =
+      this.getExperienceManagerForRoot(sessionTask.mainWorkspaceRoot || sessionTask.workspaceRoot) ??
+      this.experienceManager;
+
+    if (!this.experienceLearningEnabled || !expManager) {
+      return;
+    }
+    if (!sessionTask.hasModifiedCodeInTask && sessionTask.modifiedFiles.size === 0) {
+      return;
+    }
+
+    try {
+      const userMessages = sessionTask.contextManager.getMessages().filter((m) => m.role === 'user');
+      const lastUserMsg = userMessages[userMessages.length - 1];
+      const taskDescription =
+        sessionTask.taskState.prompt?.trim() || (lastUserMsg ? lastUserMsg.content : '');
+      if (!taskDescription.trim()) return;
+
+      const synthesized = expManager.synthesizeFromResolution({
+        taskDescription,
+        successfulActions: [...sessionTask.successfulActions],
+        encounteredErrors: [...sessionTask.encounteredErrors],
+        keyFiles: Array.from(sessionTask.modifiedFiles),
+      });
+
+      await expManager.saveExperience(synthesized);
+    } catch (expErr) {
+      console.warn('[Engine] Failed to auto-synthesize and save experience:', expErr);
+    }
+  }
+
   private setStatus(sessionTask: SessionTask, status: AgentStatus): void {
     sessionTask.taskState.status = status;
     sessionTask.taskState.updatedAt = Date.now();
@@ -1310,12 +1646,21 @@ export class AgentCoreEngine extends EventEmitter {
       taskId: sessionTask.taskState.id,
       sessionId: sessionTask.sessionId,
     });
+
+    if (status === 'completed' && !sessionTask.experienceSaved) {
+      sessionTask.experienceSaved = true;
+      sessionTask.pendingExperiencePromise = this.autoSynthesizeAndSaveExperience(sessionTask);
+    }
   }
 
   private syncTaskState(sessionTask: SessionTask): void {
-    sessionTask.taskState.messages = sessionTask.contextManager.getMessages();
+    sessionTask.taskState.messages = sessionTask.contextManager?.getMessages() || [];
     sessionTask.taskState.subagents = this.subagentManager.getInstancesBySession(sessionTask.sessionId);
-    const ctxUsage = sessionTask.contextManager.getTokenUsage();
+    const ctxUsage = sessionTask.contextManager?.getTokenUsage() || {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+    };
     const subUsage = sessionTask.subagentTokenUsage || {
       promptTokens: 0,
       completionTokens: 0,
@@ -1536,6 +1881,8 @@ export class AgentCoreEngine extends EventEmitter {
 
     if (res.success && targetSession) {
       targetSession.codeModified = false;
+      targetSession.hasModifiedCodeInTask = false;
+      targetSession.modifiedFiles.clear();
       if (targetSession.isWorktree) {
         targetSession.isWorktree = false;
         targetSession.workspaceRoot = targetRoot;
@@ -1583,6 +1930,9 @@ export class AgentCoreEngine extends EventEmitter {
     const res = await this.gitCheckpointService.discardWorktree(targetRoot, sessionId);
 
     if (res.success && targetSession) {
+      targetSession.codeModified = false;
+      targetSession.hasModifiedCodeInTask = false;
+      targetSession.modifiedFiles.clear();
       targetSession.isWorktree = false;
       targetSession.workspaceRoot = targetRoot;
     }

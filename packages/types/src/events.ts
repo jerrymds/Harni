@@ -60,6 +60,11 @@ export interface ServerToClientEvents {
   'checkpoint:restored': { checkpointId: string; sessionId?: string; success: boolean; message: string };
   'checkpoint:pruned': { deletedCheckpoints: number; deletedBranches: number; sessionId?: string };
   'worktree:status': WorktreeStatusInfo;
+  'probe:result': {
+    sessionId?: string;
+    taskId?: string;
+    result: import('./probe.js').ContrastiveProbeResult;
+  };
   'error': { code: string; message: string; sessionId?: string; taskId?: string; details?: unknown };
 }
 

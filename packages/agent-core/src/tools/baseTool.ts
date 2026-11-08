@@ -30,6 +30,9 @@ export interface ToolExecutionContext {
     isMultiSelect?: boolean;
     allowCustomInput?: boolean;
   }) => Promise<{ answers: string[]; customInput?: string }>;
+  runContrastiveProbe?: (
+    params: import('@harni/types').ContrastiveProbeParams,
+  ) => Promise<import('@harni/types').ContrastiveProbeResult>;
 }
 
 export abstract class BaseTool<TParams = Record<string, unknown>> {

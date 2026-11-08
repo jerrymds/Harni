@@ -423,6 +423,21 @@ export function normalizeToolArguments(
       if (skillName !== undefined) args.skill_name = String(skillName);
       break;
     }
+
+    case 'contrastive_probe': {
+      const taskDescription = firstDefined<string>(args, [
+        'taskDescription',
+        'task_description',
+        'TaskDescription',
+      ]);
+      if (taskDescription !== undefined) args.taskDescription = String(taskDescription);
+
+      const candidates = firstDefined<unknown[]>(args, ['candidates', 'Candidates']);
+      if (Array.isArray(candidates)) {
+        args.candidates = candidates;
+      }
+      break;
+    }
   }
 
   return args;

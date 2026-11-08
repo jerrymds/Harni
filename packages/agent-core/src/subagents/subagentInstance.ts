@@ -137,6 +137,7 @@ export class SubagentInstance extends EventEmitter {
   private abortController: AbortController | null = null;
   private currentToolSummary?: string;
   private codeModified = false;
+  private modifiedFiles = new Set<string>();
   private reportedUsage: TokenUsage = {
     promptTokens: 0,
     completionTokens: 0,
@@ -295,6 +296,20 @@ export class SubagentInstance extends EventEmitter {
     };
   }
 
+  private buildFinalStructuredReport(text?: string): SubagentStructuredReport | undefined {
+    const parsed = SubagentInstance.parseStructuredReport(text);
+    if (this.modifiedFiles.size === 0) {
+      return parsed;
+    }
+    const mergedFiles = Array.from(
+      new Set([...(parsed?.modifiedFiles ?? []), ...this.modifiedFiles]),
+    );
+    return {
+      ...parsed,
+      modifiedFiles: mergedFiles,
+    };
+  }
+
   private async streamCompletionWithRetry(
     messages: ChatMessage[],
     systemPrompt: string,
@@ -395,6 +410,10 @@ export class SubagentInstance extends EventEmitter {
 
   public getMessages(): ChatMessage[] {
     return this.contextManager.getMessages();
+  }
+
+  public getToolRegistry(): ToolRegistry {
+    return this.toolRegistry;
   }
 
   public abort(reason?: string): void {
@@ -633,7 +652,7 @@ export class SubagentInstance extends EventEmitter {
           // Finished execution
           this.currentToolSummary = undefined;
           this.result = result.text || 'Task completed successfully.';
-          this.structuredReport = SubagentInstance.parseStructuredReport(this.result);
+          this.structuredReport = this.buildFinalStructuredReport(this.result);
           this.setStatus('completed');
           break;
         }
@@ -800,7 +819,10 @@ export class SubagentInstance extends EventEmitter {
                   (toolCall.arguments as Record<string, unknown>)?.TargetFile ??
                   (toolCall.arguments as Record<string, unknown>)?.AbsolutePath ??
                   '',
-              );
+              ).trim();
+              if (targetPath) {
+                this.modifiedFiles.add(targetPath);
+              }
               if (AutoTestRunner.isCodeFile(targetPath)) {
                 this.codeModified = true;
                 this.onCodeModified?.();
@@ -928,13 +950,13 @@ export class SubagentInstance extends EventEmitter {
 
           if (this.status === 'running') {
             this.result = summaryResult.text?.trim() || fallback;
-            this.structuredReport = SubagentInstance.parseStructuredReport(this.result);
+            this.structuredReport = this.buildFinalStructuredReport(this.result);
             this.setStatus('completed');
           }
         } catch {
           if (this.status === 'running') {
             this.result = fallback;
-            this.structuredReport = SubagentInstance.parseStructuredReport(this.result);
+            this.structuredReport = this.buildFinalStructuredReport(this.result);
             this.setStatus('completed');
           }
         }

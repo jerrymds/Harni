@@ -16,12 +16,13 @@ describe('ToolRegistry & Built-in File Operations', () => {
 
   it('registers all default tools', () => {
     const registry = new ToolRegistry(true);
-    expect(registry.getAllTools().length).toBe(11);
+    expect(registry.getAllTools().length).toBe(12);
     expect(registry.getTool('invoke_subagent')).toBeDefined();
     expect(registry.getTool('send_message')).toBeDefined();
     expect(registry.getTool('manage_subagents')).toBeDefined();
     expect(registry.getTool('define_subagent')).toBeDefined();
     expect(registry.getTool('ask_question')).toBeDefined();
+    expect(registry.getTool('contrastive_probe')).toBeDefined();
   });
 
   it('executes write_to_file and read_file', async () => {

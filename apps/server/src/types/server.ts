@@ -18,6 +18,8 @@ export interface ServerConfig {
   baseURL?: string;
   dbPath?: string;
   maxBodySize?: number;
+  experienceLearningEnabled?: boolean;
+  experienceStorageDir?: string;
 }
 
 export interface ReadBodyOptions {
