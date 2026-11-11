@@ -205,6 +205,71 @@ describe('useAgentStore and Slices', () => {
     }
   });
 
+  it('falls back to selectedModel when session model is undefined on rate limit error', () => {
+    const mockSession = {
+      id: 'sess_fallback_1',
+      title: 'Fallback Session',
+      status: 'thinking' as const,
+      messages: [],
+      messageCount: 0,
+      mode: 'code' as const,
+      provider: 'anthropic' as const,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      folderId: 'folder_default',
+    };
+
+    useAgentStore.setState({
+      currentSessionId: 'sess_fallback_1',
+      selectedModel: 'claude-3-5-sonnet',
+      sessions: [mockSession],
+      messages: [],
+    });
+
+    let messageHandler: any = null;
+    const fakeWs = {
+      readyState: 1,
+      send: () => {},
+      set onmessage(fn: any) {
+        messageHandler = fn;
+      },
+      get onmessage() {
+        return messageHandler;
+      },
+    };
+
+    const originalWS = globalThis.WebSocket;
+    try {
+      globalThis.WebSocket = function () {
+        return fakeWs as any;
+      } as any;
+      useAgentStore.getState().connect();
+
+      if (typeof messageHandler === 'function') {
+        messageHandler({
+          data: JSON.stringify({
+            type: 'error',
+            payload: {
+              code: 'RATE_LIMIT_ERROR',
+              message: 'Rate limit 429: Too many requests. Please wait 10s.',
+              sessionId: 'sess_fallback_1',
+            },
+          }),
+        });
+      }
+
+      const state = useAgentStore.getState();
+      expect(state.status).toBe('error');
+      const errMessage = state.messages[0];
+      expect(errMessage.rateLimitInfo?.isRateLimit).toBe(true);
+      expect(errMessage.rateLimitInfo?.model).toBe('claude-3-5-sonnet');
+      expect(errMessage.content).toContain('claude-3-5-sonnet');
+      expect(errMessage.content).not.toContain('Gemini');
+    } finally {
+      globalThis.WebSocket = originalWS;
+    }
+  });
+
   it('batches chat:thinking and chat:token stream chunks to prevent memory thrashing', async () => {
     const mockSession = {
       id: 'sess_stream_test',

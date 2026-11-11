@@ -27,4 +27,25 @@ describe('Web RateLimit Utility', () => {
     expect(parsed.retryAfter).toBe('12s');
     expect(parsed.formattedContent).toContain('RPM 超標');
   });
+
+  it('dynamically formats custom model and provider without hardcoded Gemini mentions', () => {
+    const errorText = 'API Rate limit exceeded: 429 Too Many Requests';
+    const parsed = parseClientRateLimit(errorText, 'gpt-4o', 'OpenAI');
+    expect(parsed.isRateLimit).toBe(true);
+    expect(parsed.model).toBe('gpt-4o');
+    expect(parsed.provider).toBe('OpenAI');
+    expect(parsed.formattedContent).toContain('串接模型 **gpt-4o** (OpenAI)');
+    expect(parsed.formattedContent).not.toContain('Gemini');
+    expect(parsed.formattedContent).not.toContain('Google AI Studio');
+  });
+
+  it('falls back to neutral model and provider names when not provided', () => {
+    const errorText = '429 Too Many Requests';
+    const parsed = parseClientRateLimit(errorText);
+    expect(parsed.isRateLimit).toBe(true);
+    expect(parsed.model).toBe('呼叫模型');
+    expect(parsed.provider).toBe('AI 服務');
+    expect(parsed.formattedContent).toContain('串接模型 **呼叫模型** (AI 服務)');
+    expect(parsed.formattedContent).not.toContain('Gemini');
+  });
 });

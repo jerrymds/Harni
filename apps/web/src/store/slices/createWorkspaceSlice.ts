@@ -664,10 +664,11 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
             const currentSession = sessions.find((s) => s.id === targetSessionId);
             const isLimit = isRateLimitError(msg.payload.message, msg.payload.code);
             const payloadDetails = (msg.payload as any).details;
+            const callingModel = currentSession?.model || get().selectedModel;
             const parsedRateLimit = isLimit
               ? (payloadDetails && payloadDetails.isRateLimit
                   ? { ...payloadDetails, formattedContent: msg.payload.message }
-                  : parseClientRateLimit(msg.payload.message, currentSession?.model))
+                  : parseClientRateLimit(msg.payload.message, callingModel, currentSession?.provider))
               : null;
 
             const errMessage: ChatMessage = isLimit && parsedRateLimit
@@ -681,8 +682,8 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
                   rateLimitInfo: {
                     isRateLimit: true,
                     limitType: parsedRateLimit.limitType,
-                    model: parsedRateLimit.model || currentSession?.model,
-                    provider: parsedRateLimit.provider,
+                    model: parsedRateLimit.model || callingModel,
+                    provider: parsedRateLimit.provider || currentSession?.provider,
                     retryAfter: parsedRateLimit.retryAfter,
                     details: parsedRateLimit.details,
                   },

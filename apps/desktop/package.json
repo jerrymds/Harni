@@ -5,6 +5,11 @@
   "description": "Harni",
   "type": "module",
   "main": "dist/main.js",
+  "files": [
+    "dist",
+    "resources",
+    "package.json"
+  ],
   "scripts": {
     "build": "tsc -b",
     "start": "pnpm run build && electron .",

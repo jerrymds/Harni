@@ -241,7 +241,9 @@ export const RateLimitCard: React.FC<{ msg: ChatMessage }> = memo(({ msg }) => {
             ? 'QUOTA'
             : 'RATE_LIMIT');
 
-  const retryAfter = info?.retryAfter || (content.match(/重試.*?([0-9a-zA-Z一-龥]+)/)?.[1]);
+  const retryAfter =
+    info?.retryAfter ||
+    content.match(/(?:建議等待時間[：:\s]+|請等待約\s*\*\*?)([0-9a-zA-Z一-龥]+)/i)?.[1];
 
   const limitBadgeLabel =
     limitType === 'TPM'
@@ -270,7 +272,7 @@ export const RateLimitCard: React.FC<{ msg: ChatMessage }> = memo(({ msg }) => {
               API 頻率配額限制 (Rate Limit)
             </div>
             <div className="text-[11px] text-ag-textMuted">
-              {info?.model ? `模型：${info.model}` : 'Google Gemini 模型服務'}
+              {info?.model ? `模型：${info.model}` : '模型服務'}
             </div>
           </div>
         </div>
@@ -310,14 +312,11 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = memo(({ msg }) =>
 
   const isRateLimit = Boolean(
     msg.rateLimitInfo?.isRateLimit ||
-      msg.content?.includes('觸發 API 頻率限制') ||
-      msg.content?.includes('Rate Limit / HTTP 429') ||
-      (msg.content?.includes('429') &&
-        (msg.content?.includes('TPM') ||
-          msg.content?.includes('RPM') ||
-          msg.content?.includes('quota') ||
-          msg.content?.includes('Quota') ||
-          msg.content?.includes('RESOURCE_EXHAUSTED'))),
+      (!msg.content?.startsWith('Calling tool') &&
+        !msg.toolCalls?.length &&
+        (msg.content?.includes('觸發 API 頻率限制') ||
+          msg.content?.includes('Rate Limit / HTTP 429') ||
+          msg.content?.includes('Rate Limit 429]'))),
   );
 
   return (

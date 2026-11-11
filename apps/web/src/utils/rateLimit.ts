@@ -37,8 +37,8 @@ export function parseClientRateLimit(
   model?: string,
   provider?: string,
 ): RateLimitInfo & { formattedContent: string } {
-  const targetModel = model || 'Gemini';
-  const targetProvider = provider || 'Google Gemini';
+  const targetModel = (model && model.trim()) || '呼叫模型';
+  const targetProvider = (provider && provider.trim()) || 'AI 服務';
   const lower = (errorMsg || '').toLowerCase();
 
   let limitType: RateLimitInfo['limitType'] = 'RATE_LIMIT';
@@ -112,7 +112,7 @@ export function parseClientRateLimit(
   const formattedContent = [
     `### ⚠️ 觸發 API 頻率限制 (Rate Limit / HTTP 429)`,
     ``,
-    `串接模型 **${targetModel}** 遇到頻率限制或配額暫時用罄：`,
+    `串接模型 **${targetModel}** (${targetProvider}) 遇到頻率限制或配額暫時用罄：`,
     `- **限制類型**：\`${limitTypeLabel}\``,
     `- **建議等待時間**：${retryAfter ? `\`${retryAfter}\`` : '稍候 15~30 秒'}`,
     `- **錯誤詳情**：${cleanDetails}`,
@@ -120,9 +120,9 @@ export function parseClientRateLimit(
     `---`,
     `#### 💡 建議因應措施：`,
     `1. **稍候重試**：${retryText}，待 API 配額窗口重置後即可繼續作業。`,
-    `2. **切換輕量模型**：可至模型選單切換至 \`gemini-3.8-flash\` 或 \`gemini-2.5-flash\`，具備更高的 TPM/RPM 限額。`,
+    `2. **切換輕量模型**：可至模型選單切換至其他輕量或具備更高限額的模型，擁有更高的 TPM/RPM 限額。`,
     `3. **關閉子代理人**：若目前開啟了多代理人 (Subagents)，可在「⚙️ 設定」中暫時停用，避免多任務並發請求瞬間超標。`,
-    `4. **檢查配額方案**：請至 [Google AI Studio](https://aistudio.google.com/) 或 Google Cloud Console 檢視當前專案配額與帳單狀態。`,
+    `4. **檢查配額方案**：請至對應 API 服務商控制台檢視當前專案配額與帳單狀態。`,
   ].join('\n');
 
   return {

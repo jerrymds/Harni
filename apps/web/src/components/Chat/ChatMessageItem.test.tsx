@@ -85,6 +85,77 @@ describe('ChatMessageItem Component', () => {
     expect(screen.getByTestId('rate-limit-card')).toBeInTheDocument();
     expect(screen.getByText('HTTP 429')).toBeInTheDocument();
     expect(screen.getByText('RPM 超標 (Requests/min)')).toBeInTheDocument();
+    expect(screen.getByText('模型服務')).toBeInTheDocument();
+    expect(screen.queryByText(/Google Gemini 模型服務/)).not.toBeInTheDocument();
+  });
+
+  it('renders RateLimitCard with dynamic custom model and without Gemini mentions', () => {
+    const customModelMsg: ChatMessage = {
+      id: 'msg_asst_ratelimit_claude',
+      role: 'assistant',
+      content: '### ⚠️ 觸發 API 頻率限制 (Rate Limit / HTTP 429)\n\n串接模型 **claude-3-5-sonnet** 遇到頻率限制',
+      rateLimitInfo: {
+        isRateLimit: true,
+        limitType: 'RPM',
+        model: 'claude-3-5-sonnet',
+        provider: 'Anthropic',
+        retryAfter: '10s',
+      },
+      timestamp: Date.now(),
+    };
+
+    render(<ChatMessageItem msg={customModelMsg} />);
+    expect(screen.getByTestId('rate-limit-card')).toBeInTheDocument();
+    expect(screen.getByText('模型：claude-3-5-sonnet')).toBeInTheDocument();
+    expect(screen.queryByText(/Google Gemini/)).not.toBeInTheDocument();
+  });
+
+  it('does NOT render RateLimitCard when assistant message discusses 429, quota, or tool calls', () => {
+    const normalDiscussionMsg: ChatMessage = {
+      id: 'msg_asst_normal_tool',
+      role: 'assistant',
+      content:
+        'Calling tool: replace_file_content\n\n- **並發控制與 429 指數退避重試 (P1-1 & P1-2)**\n- 檢查 API quota 與 TPM 限制',
+      timestamp: Date.now(),
+    };
+
+    render(<ChatMessageItem msg={normalDiscussionMsg} />);
+    expect(screen.queryByTestId('rate-limit-card')).not.toBeInTheDocument();
+    expect(screen.getByText(/429 指數退避重試/)).toBeInTheDocument();
+  });
+
+  it('correctly extracts retryAfter without false matching (e.g. P1 from retry tags)', () => {
+    const validRetryMsg: ChatMessage = {
+      id: 'msg_asst_ratelimit_retry_valid',
+      role: 'assistant',
+      content:
+        '### ⚠️ 觸發 API 頻率限制 (Rate Limit / HTTP 429)\n\n建議等待時間：45s\n請於重試 (P1-1) 流程結束後再次確認。',
+      rateLimitInfo: {
+        isRateLimit: true,
+      },
+      timestamp: Date.now(),
+    };
+
+    const { unmount } = render(<ChatMessageItem msg={validRetryMsg} />);
+    expect(screen.getByTestId('rate-limit-card')).toBeInTheDocument();
+    expect(screen.getByText('建議等待: 45s')).toBeInTheDocument();
+    expect(screen.queryByText('建議等待: P1')).not.toBeInTheDocument();
+    unmount();
+
+    const noRetryTimeMsg: ChatMessage = {
+      id: 'msg_asst_ratelimit_retry_none',
+      role: 'assistant',
+      content:
+        '### ⚠️ 觸發 API 頻率限制 (Rate Limit / HTTP 429)\n\n執行重試 (P1-1 & P1-2) 策略中。',
+      rateLimitInfo: {
+        isRateLimit: true,
+      },
+      timestamp: Date.now(),
+    };
+
+    render(<ChatMessageItem msg={noRetryTimeMsg} />);
+    expect(screen.getByTestId('rate-limit-card')).toBeInTheDocument();
+    expect(screen.queryByText(/建議等待:/)).not.toBeInTheDocument();
   });
 
   it('renders user message with image attachments and opens lightbox preview on click', () => {
