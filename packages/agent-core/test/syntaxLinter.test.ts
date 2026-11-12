@@ -84,7 +84,7 @@ export const Button: React.FC<{ label: string }> = ({ label }) => (
     expect(formatted).toContain('src/broken.ts');
     expect(formatted).toContain('第 12 行，第 5 欄');
     expect(formatted).toContain('TS1005');
-    expect(formatted).toContain('replace_file_content');
+    expect(formatted).toContain('edit_file');
   });
 });
 
@@ -128,7 +128,7 @@ describe('Tool Integration with Syntax & Linter Instant Feedback', () => {
     // But output contains instant syntax diagnostic warning!
     expect(result.output).toContain('語法與 Linter 即時回饋');
     expect(result.output).toContain('calculator.ts');
-    expect(result.output).toContain('replace_file_content');
+    expect(result.output).toContain('edit_file');
 
     // Context listener received diagnostics
     expect(receivedDiagnostics).not.toBeNull();

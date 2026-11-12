@@ -8,7 +8,7 @@ import type {
 } from '@harni/types';
 
 export class ReplaceFileContentTool extends BaseTool<ReplaceFileContentParams> {
-  public readonly name = 'replace_file_content';
+  public readonly name = 'edit_file';
   public readonly description =
     'Replace a specific target block or line of text within an existing file with replacement text.';
   public readonly requiresApproval = false;

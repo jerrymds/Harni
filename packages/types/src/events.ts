@@ -1,6 +1,7 @@
 import type {
   AgentMode,
   AgentStatus,
+  AntigravityExecutionMode,
   LLMProviderType,
   QuestionPrompt,
   SubagentInstanceInfo,
@@ -89,6 +90,7 @@ export interface ClientToServerEvents {
     enableWorktree?: boolean;
     enableCheckpoint?: boolean;
     subagentsEnabled?: boolean;
+    antigravityMode?: AntigravityExecutionMode;
     thinkingDepth?: ThinkingDepth;
     contextFiles?: string[];
     workspaceRoot?: string;

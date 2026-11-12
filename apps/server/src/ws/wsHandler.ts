@@ -317,6 +317,11 @@ export class WebSocketHandler {
           }
         }
 
+        const dbAgyMode = this.dbService ? this.dbService.getSetting('antigravity_bridge_mode') : undefined;
+        const envAgyMode = process.env.ANTIGRAVITY_AGY_MODE || process.env.ANTIGRAVITY_EXECUTION_MODE;
+        const rawAgyMode = String(msg.payload.antigravityMode || dbAgyMode || envAgyMode || 'acp').toLowerCase();
+        const antigravityMode: 'acp' | 'direct' = rawAgyMode === 'direct' ? 'direct' : 'acp';
+
         this.engine
           .startTask(prompt, {
             sessionId,
@@ -328,6 +333,7 @@ export class WebSocketHandler {
             baseURL: effectiveBaseURL,
             autoApprove,
             thinkingDepth,
+            antigravityMode,
             contextFiles,
             workspaceRoot: effectiveWorkspaceRoot,
             history,

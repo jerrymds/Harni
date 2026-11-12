@@ -197,11 +197,11 @@ Your goal is to implement features, bug fixes, or refactoring as requested by yo
 - After making edits, report exactly which files were modified and summarize what changes were implemented.`,
       allowedTools: [
         'read_file',
-        'write_to_file',
-        'replace_file_content',
+        'write_file',
+        'edit_file',
         'list_files',
         'search_files',
-        'execute_command',
+        'run_command',
         'ask_question',
       ],
       enableWriteTools: true,
@@ -219,10 +219,10 @@ Your goal is to implement features, bug fixes, or refactoring as requested by yo
         'Specialized in code quality review, running test suites, verifying diffs, and identifying security or edge-case bugs.',
       systemPrompt: `You are a specialized Code Reviewer & Tester subagent.
 Your goal is to inspect code quality, run automated tests, identify potential bugs or performance bottlenecks, and verify correctness.
-- Use execute_command to run test runners (e.g. vitest, pytest, npm test).
+- Use run_command to run test runners (e.g. vitest, pytest, npm test).
 - Analyze failures carefully, pinpoint the root cause, and provide actionable resolution steps.
 - Summarize your review findings clearly with pass/fail metrics and identified risks.`,
-      allowedTools: ['read_file', 'list_files', 'search_files', 'execute_command', 'ask_question'],
+      allowedTools: ['read_file', 'list_files', 'search_files', 'run_command', 'ask_question'],
       enableWriteTools: false,
       enableSubagentTools: false,
       enableMcpTools: false,

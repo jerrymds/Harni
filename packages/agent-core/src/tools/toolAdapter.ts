@@ -19,18 +19,21 @@ export const AGY_TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   read: 'read_file',
 
   // File writing
-  write_file: 'write_to_file',
-  create_file: 'write_to_file',
+  write_file: 'write_file',
+  write_to_file: 'write_file',
+  create_file: 'write_file',
 
   // File editing / replacement
-  multi_replace_file_content: 'replace_file_content',
-  edit_file: 'replace_file_content',
-  str_replace_editor: 'replace_file_content',
+  edit_file: 'edit_file',
+  replace_file_content: 'edit_file',
+  multi_replace_file_content: 'edit_file',
+  str_replace_editor: 'edit_file',
 
   // Command execution
-  run_command: 'execute_command',
-  bash: 'execute_command',
-  shell: 'execute_command',
+  run_command: 'run_command',
+  execute_command: 'run_command',
+  bash: 'run_command',
+  shell: 'run_command',
 
   // Directory listing & file finding
   list_dir: 'list_files',
@@ -122,6 +125,7 @@ export function normalizeToolArguments(
       break;
     }
 
+    case 'write_file':
     case 'write_to_file': {
       const filePath = firstDefined<string>(args, [
         'path',
@@ -146,6 +150,7 @@ export function normalizeToolArguments(
       break;
     }
 
+    case 'edit_file':
     case 'replace_file_content': {
       const filePath = firstDefined<string>(args, [
         'path',
@@ -229,6 +234,7 @@ export function normalizeToolArguments(
       break;
     }
 
+    case 'run_command':
     case 'execute_command': {
       const command = firstDefined<string>(args, [
         'command',

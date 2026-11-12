@@ -5,7 +5,7 @@ import { SyntaxLinterService } from '../diagnostics/syntaxLinterService.js';
 import type { ToolParametersSchema, ToolResult, WriteFileParams } from '@harni/types';
 
 export class WriteFileTool extends BaseTool<WriteFileParams> {
-  public readonly name = 'write_to_file';
+  public readonly name = 'write_file';
   public readonly description =
     'Create a new file or overwrite an existing file with the provided content.';
   public readonly requiresApproval = false;

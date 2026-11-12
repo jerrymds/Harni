@@ -23,8 +23,15 @@ describe('toolAdapter & ToolRegistry agy compatibility', () => {
     expect(resolveCanonicalToolName('view_file')).toBe('read_file');
     expect(resolveCanonicalToolName('view_file_outline')).toBe('read_file');
     expect(resolveCanonicalToolName('view_code_item')).toBe('read_file');
-    expect(resolveCanonicalToolName('multi_replace_file_content')).toBe('replace_file_content');
-    expect(resolveCanonicalToolName('run_command')).toBe('execute_command');
+    expect(resolveCanonicalToolName('write_file')).toBe('write_file');
+    expect(resolveCanonicalToolName('write_to_file')).toBe('write_file');
+    expect(resolveCanonicalToolName('create_file')).toBe('write_file');
+    expect(resolveCanonicalToolName('edit_file')).toBe('edit_file');
+    expect(resolveCanonicalToolName('replace_file_content')).toBe('edit_file');
+    expect(resolveCanonicalToolName('multi_replace_file_content')).toBe('edit_file');
+    expect(resolveCanonicalToolName('run_command')).toBe('run_command');
+    expect(resolveCanonicalToolName('execute_command')).toBe('run_command');
+    expect(resolveCanonicalToolName('bash')).toBe('run_command');
     expect(resolveCanonicalToolName('list_dir')).toBe('list_files');
     expect(resolveCanonicalToolName('find_by_name')).toBe('list_files');
     expect(resolveCanonicalToolName('grep_search')).toBe('search_files');
@@ -32,9 +39,15 @@ describe('toolAdapter & ToolRegistry agy compatibility', () => {
 
   it('resolves getTool and requiresApproval for agy tool aliases', () => {
     expect(registry.getTool('view_file')?.name).toBe('read_file');
-    expect(registry.getTool('run_command')?.name).toBe('execute_command');
+    expect(registry.getTool('run_command')?.name).toBe('run_command');
+    expect(registry.getTool('execute_command')?.name).toBe('run_command');
     expect(registry.getTool('run_command')?.requiresApproval).toBe(true);
-    expect(registry.getTool('multi_replace_file_content')?.name).toBe('replace_file_content');
+    expect(registry.getTool('execute_command')?.requiresApproval).toBe(true);
+    expect(registry.getTool('edit_file')?.name).toBe('edit_file');
+    expect(registry.getTool('replace_file_content')?.name).toBe('edit_file');
+    expect(registry.getTool('multi_replace_file_content')?.name).toBe('edit_file');
+    expect(registry.getTool('write_file')?.name).toBe('write_file');
+    expect(registry.getTool('write_to_file')?.name).toBe('write_file');
   });
 
   it('executes view_file with AbsolutePath, StartLine, and EndLine via ReadFileTool', async () => {
@@ -145,7 +158,7 @@ describe('toolAdapter & ToolRegistry agy compatibility', () => {
       startLine: 10,
       endLine: 30,
     });
-    expect(calls[1]!.name).toBe('execute_command');
+    expect(calls[1]!.name).toBe('run_command');
     expect(calls[1]!.arguments).toMatchObject({
       command: 'npm test',
       cwd: 'packages/agent-core',

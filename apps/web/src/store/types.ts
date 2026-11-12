@@ -157,11 +157,13 @@ export interface SettingsSliceState {
   modelContextWindows: Record<string, number>;
   quotaInfo: ModelQuotaResponse | null;
   isLoadingQuota: boolean;
+  antigravityMode: 'acp' | 'direct';
 }
 
 export interface SettingsSliceActions {
   setThinkingDepth: (depth: ThinkingDepth) => void;
   setAutoApprove: (enabled: boolean) => void;
+  setAntigravityMode: (mode: 'acp' | 'direct') => void;
   setCustomApiKey: (key: string) => void;
   setCustomBaseUrl: (url: string) => void;
   setProviderBaseUrl: (provider: string, url: string) => void;

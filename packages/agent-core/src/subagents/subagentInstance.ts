@@ -813,7 +813,12 @@ export class SubagentInstance extends EventEmitter {
           // Check code modification
           if (!toolResult.isError) {
             const resolvedName = this.toolRegistry.resolveToolName(toolCall.name);
-            if (resolvedName === 'write_to_file' || resolvedName === 'replace_file_content') {
+            if (
+              resolvedName === 'write_file' ||
+              resolvedName === 'edit_file' ||
+              resolvedName === 'write_to_file' ||
+              resolvedName === 'replace_file_content'
+            ) {
               const targetPath = String(
                 (toolCall.arguments as Record<string, unknown>)?.path ??
                   (toolCall.arguments as Record<string, unknown>)?.TargetFile ??

@@ -247,7 +247,7 @@ export class AutoTestRunner {
       ``,
       `【修復指示】:`,
       `請仔細分析上述錯誤堆疊（Error Stacktrace）、AssertionError 與出錯行數。`,
-      `請調用相應代碼修改工具（如 \`replace_file_content\` 或 \`write_to_file\`）修正錯誤。`,
+      `請調用相應代碼修改工具（如 \`edit_file\` 或 \`write_file\`）修正錯誤。`,
       `修正完成後，系統將再次自動觸發背景測試驗證，直到測試全數通過才會完成任務並通知使用者。`,
     ].join('\n');
   }

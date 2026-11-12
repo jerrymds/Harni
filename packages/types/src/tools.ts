@@ -3,16 +3,20 @@
  */
 export type BuiltInToolName =
   | 'read_file'
-  | 'write_to_file'
-  | 'replace_file_content'
+  | 'write_file'
+  | 'edit_file'
+  | 'run_command'
   | 'list_files'
   | 'search_files'
-  | 'execute_command'
   | 'browser_action'
   | 'mcp_call'
   | 'use_skill'
   | 'ask_question'
-  | 'contrastive_probe';
+  | 'contrastive_probe'
+  // Backward compatibility aliases
+  | 'write_to_file'
+  | 'replace_file_content'
+  | 'execute_command';
 
 /**
  * JSON Schema parameter definition for Tool calling
@@ -93,6 +97,8 @@ export interface ReplaceFileContentParams {
   replacementChunks?: ReplaceFileChunk[];
 }
 
+export type EditFileParams = ReplaceFileContentParams;
+
 export interface ListFilesParams {
   path?: string;
   recursive?: boolean;
@@ -109,6 +115,8 @@ export interface ExecuteCommandParams {
   command: string;
   cwd?: string;
 }
+
+export type RunCommandParams = ExecuteCommandParams;
 
 export interface AskQuestionParams {
   question: string;

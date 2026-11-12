@@ -140,6 +140,7 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
         enableWorktree: get().worktreeIsolationEnabled,
         enableCheckpoint: get().gitCheckpointEnabled,
         subagentsEnabled: get().subagentsEnabled,
+        antigravityMode: get().antigravityMode,
         thinkingDepth: get().thinkingDepth,
         contextWindow:
           (selectedModel && get().modelContextWindows[selectedModel]) ||

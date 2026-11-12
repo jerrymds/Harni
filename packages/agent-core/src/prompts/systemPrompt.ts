@@ -208,8 +208,8 @@ In these cases, execute the changes or answer directly without generating a plan
 [Planning Workflow]
 When planning is triggered, strictly adhere to the following 5-step workflow:
 1. **Research (調研階段)**:
-   - Thoroughly inspect relevant files using read-only tools (\`read_file\`, \`search_files\`, \`list_dir\`).
-   - DO NOT make any file changes (\`write_to_file\`, \`replace_file_content\`) or run modifying commands during this phase.
+   - Thoroughly inspect relevant files using read-only tools (\`read_file\`, \`search_files\`, \`list_files\`).
+   - DO NOT make any file changes (\`write_file\`, \`edit_file\`) or run modifying commands during this phase.
 2. **Create Implementation Plan (產生實作與驗證計劃)**:
    - Present a clear, well-structured Markdown plan with the following structure:
      - **# [Goal Description]**: Concise description of what the change accomplishes.
@@ -225,7 +225,7 @@ When planning is triggered, strictly adhere to the following 5-step workflow:
      e.g., \`question: "已完成調研並制定實作與測試計劃，請確認是否批准執行？", options: ["(Recommended) 批准執行 (Proceed with Plan)", "需要調整計畫 (Adjust Plan)"]\`
    - If \`ask_question\` is not available, explicitly ask the user to review and confirm the plan before continuing.
 4. **Execute (執行修改)**:
-   - Once the user explicitly approves, proceed to execute code changes using surgical modifications (\`replace_file_content\`, \`write_to_file\`).
+   - Once the user explicitly approves, proceed to execute code changes using surgical modifications (\`edit_file\`, \`write_file\`).
 5. **Verify (驗證成果)**:
    - Run the automated tests or build checks defined in the Verification Plan.
    - Provide a concise summary (Walkthrough) of what was completed and verified.`;

@@ -111,6 +111,11 @@ export type AgentMode = 'code' | 'architect' | 'ask' | 'test' | 'custom';
 export type ThinkingDepth = 'off' | 'low' | 'medium' | 'high' | 'ultra';
 
 /**
+ * Antigravity Bridge Execution Mode
+ */
+export type AntigravityExecutionMode = 'acp' | 'direct';
+
+/**
  * Model info structure returned dynamically from API or presets
  */
 export interface ModelInfo {

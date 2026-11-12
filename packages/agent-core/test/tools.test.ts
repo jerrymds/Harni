@@ -18,6 +18,12 @@ describe('ToolRegistry & Built-in File Operations', () => {
     const registry = new ToolRegistry(true);
     expect(registry.getAllTools().length).toBe(12);
     expect(registry.getTool('invoke_subagent')).toBeDefined();
+    expect(registry.getTool('write_file')).toBeDefined();
+    expect(registry.getTool('edit_file')).toBeDefined();
+    expect(registry.getTool('run_command')).toBeDefined();
+    expect(registry.getTool('write_to_file')).toBeDefined();
+    expect(registry.getTool('replace_file_content')).toBeDefined();
+    expect(registry.getTool('execute_command')).toBeDefined();
     expect(registry.getTool('send_message')).toBeDefined();
     expect(registry.getTool('manage_subagents')).toBeDefined();
     expect(registry.getTool('define_subagent')).toBeDefined();
@@ -25,10 +31,23 @@ describe('ToolRegistry & Built-in File Operations', () => {
     expect(registry.getTool('contrastive_probe')).toBeDefined();
   });
 
-  it('executes write_to_file and read_file', async () => {
+  it('resolves run_command and execute_command aliases with approval required', () => {
+    const registry = new ToolRegistry(true);
+    const runTool = registry.getTool('run_command');
+    expect(runTool).toBeDefined();
+    expect(runTool?.name).toBe('run_command');
+    expect(runTool?.requiresApproval).toBe(true);
+
+    const legacyExecTool = registry.getTool('execute_command');
+    expect(legacyExecTool).toBeDefined();
+    expect(legacyExecTool?.name).toBe('run_command');
+    expect(legacyExecTool?.requiresApproval).toBe(true);
+  });
+
+  it('executes write_file and write_to_file (backward compatibility) and read_file', async () => {
     const registry = new ToolRegistry(true);
     const writeRes = await registry.executeTool(
-      'write_to_file',
+      'write_file',
       { path: 'test.ts', content: 'export const value = 100;\nexport const name = "test";\n' },
       { workspaceRoot: tempTestDir },
     );
@@ -41,13 +60,34 @@ describe('ToolRegistry & Built-in File Operations', () => {
     );
     expect(readRes.isError).toBeFalsy();
     expect(String(readRes.output)).toContain('export const value = 100;');
+
+    const writeLegacyRes = await registry.executeTool(
+      'write_to_file',
+      { path: 'test.ts', content: 'export const value = 200;\nexport const name = "test";\n' },
+      { workspaceRoot: tempTestDir },
+    );
+    expect(writeLegacyRes.isError).toBeFalsy();
+
+    const readLegacyRes = await registry.executeTool(
+      'read_file',
+      { path: 'test.ts' },
+      { workspaceRoot: tempTestDir },
+    );
+    expect(String(readLegacyRes.output)).toContain('export const value = 200;');
   });
 
-  it('executes replace_file_content and search_files', async () => {
+  it('executes edit_file and replace_file_content (backward compatibility) and search_files', async () => {
     const registry = new ToolRegistry(true);
+    const editRes = await registry.executeTool(
+      'edit_file',
+      { path: 'test.ts', targetContent: 'value = 200;', replacementContent: 'value = 500;' },
+      { workspaceRoot: tempTestDir },
+    );
+    expect(editRes.isError).toBeFalsy();
+
     const replaceRes = await registry.executeTool(
       'replace_file_content',
-      { path: 'test.ts', targetContent: 'value = 100;', replacementContent: 'value = 999;' },
+      { path: 'test.ts', targetContent: 'value = 500;', replacementContent: 'value = 999;' },
       { workspaceRoot: tempTestDir },
     );
     expect(replaceRes.isError).toBeFalsy();

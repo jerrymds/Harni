@@ -151,11 +151,11 @@ export class SkillRegistry {
       description: '執行專案單元/整合測試套件，自動解析錯誤堆疊並提供精準修復建議',
       instructions: `### 測試執行與驗證流程 (Testing SOP):
 1. **檢查測試配置**：讀取 \`package.json\`、\`jest.config.*\`、\`vitest.config.*\`、\`pytest.ini\` 等確定測試指令。
-2. **執行測試**：調用 \`execute_command\` 執行測試指令（如 \`npm test\`、\`pytest\`）。
+2. **執行測試**：調用 \`run_command\` 執行測試指令（如 \`npm test\`、\`pytest\`）。
 3. **分析測試輸出**：精確識別失敗的測試檔案、行數與 AssertionError 訊息。
-4. **定位與修復**：讀取相關原始碼與測試代碼，使用 \`replace_file_content\` 修復問題。
+4. **定位與修復**：讀取相關原始碼與測試代碼，使用 \`edit_file\` 修復問題。
 5. **再次回歸測試**：重新執行測試確認全部 Pass。`,
-      requiredTools: ['execute_command', 'read_file', 'replace_file_content'],
+      requiredTools: ['run_command', 'read_file', 'edit_file'],
     });
 
     // 2. Git Smart Commit & Workflow
@@ -172,7 +172,7 @@ export class SkillRegistry {
    - PowerShell: \`$refs = git for-each-ref --format="%(refname)" "refs/cline/checkpoints/"; foreach ($r in $refs) { git update-ref -d $r }; git gc\`
    - Bash / Zsh: \`git for-each-ref --format="%(refname)" "refs/cline/checkpoints/" | xargs -r -n1 git update-ref -d && git gc\`
    回報清理結果（刪除參考數量與 \`git gc\` 執行狀態）作為提交驗證總結。`,
-      requiredTools: ['execute_command'],
+      requiredTools: ['run_command'],
     });
 
     // 3. Code Review & Security Audit
@@ -212,7 +212,7 @@ export class SkillRegistry {
 3. **更新 activeContext.md**：記錄當前工作焦點、最新改動、下一步驟及未決決策。
 4. **更新 progress.md**：更新已完成功能、待辦項目與專案進度狀態。
 5. **更新 systemPatterns / techContext**：若有新架構模式、關鍵技術決策或相依套件調整，同步更新對應章節。`,
-      requiredTools: ['read_file', 'write_to_file', 'replace_file_content', 'list_files'],
+      requiredTools: ['read_file', 'write_file', 'edit_file', 'list_files'],
     });
 
     // 6. Git Commit from Memory Bank
@@ -226,7 +226,7 @@ export class SkillRegistry {
 3. **比對與合併**：核對 activeContext 中的描述與實際 Git 異動，排除已提交項並補充遺漏變更。
 4. **格式化 Commit Message**：使用簡潔明瞭的繁體中文描述，動詞開頭（新增/修正/調整/優化/重構），多項改動以編號呈現。
 5. **產出提交訊息**：提供使用者標準 Commit Message 或協助執行提交。`,
-      requiredTools: ['read_file', 'execute_command'],
+      requiredTools: ['read_file', 'run_command'],
     });
 
     // 7. Grill Me Decision Interview

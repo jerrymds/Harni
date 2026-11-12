@@ -63,6 +63,7 @@ export const createSettingsSlice: StateCreator<AgentStoreState, [], [], Settings
   modelContextWindows: loadSavedModelContextWindows(),
   quotaInfo: null,
   isLoadingQuota: false,
+  antigravityMode: ((localStorage.getItem('cline_web_antigravity_mode') as 'acp' | 'direct') || 'acp'),
 
   setThinkingDepth: (depth) => {
     localStorage.setItem('cline_web_thinking_depth', depth);
@@ -74,6 +75,12 @@ export const createSettingsSlice: StateCreator<AgentStoreState, [], [], Settings
     localStorage.setItem('cline_web_auto_approve', String(enabled));
     set({ autoApprove: enabled });
     syncSettingsToDB({ auto_approve: String(enabled) });
+  },
+
+  setAntigravityMode: (mode) => {
+    localStorage.setItem('cline_web_antigravity_mode', mode);
+    set({ antigravityMode: mode });
+    syncSettingsToDB({ antigravity_bridge_mode: mode });
   },
 
   setCustomApiKey: (key) => {

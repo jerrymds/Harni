@@ -3,7 +3,7 @@ import { BaseTool, type ToolExecutionContext } from './baseTool.js';
 import type { ExecuteCommandParams, ToolParametersSchema, ToolResult } from '@harni/types';
 
 export class ExecuteCommandTool extends BaseTool<ExecuteCommandParams> {
-  public readonly name = 'execute_command';
+  public readonly name = 'run_command';
   public readonly description =
     'Execute a terminal command within the workspace environment. Requires user confirmation before execution.';
   public readonly requiresApproval = true;

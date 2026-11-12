@@ -40,8 +40,10 @@ export class ToolRegistry {
   }
 
   public resolveToolName(name: string): string {
+    const canonical = resolveCanonicalToolName(name);
+    if (this.tools.has(canonical)) return canonical;
     if (this.tools.has(name)) return name;
-    return resolveCanonicalToolName(name);
+    return canonical;
   }
 
   public getTool(name: string): BaseTool<any> | undefined {

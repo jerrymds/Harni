@@ -1,4 +1,5 @@
 import type {
+  AntigravityExecutionMode,
   ChatMessage,
   LLMProviderType,
   ThinkingDepth,
@@ -31,6 +32,7 @@ export interface ProviderOptions {
   /** OpenAI access token issued by the Codex ChatGPT subscription OAuth flow. */
   openaiOAuth?: boolean;
   openaiAccountId?: string;
+  antigravityMode?: AntigravityExecutionMode;
   requestApproval?: (request: {
     toolCallId: string;
     name: string;
@@ -63,6 +65,7 @@ export abstract class BaseLLMProvider {
   protected maxTokens: number;
   protected thinkingDepth: ThinkingDepth;
   protected workspaceRoot?: string;
+  protected antigravityMode?: AntigravityExecutionMode;
   protected requestApproval?: (request: {
     toolCallId: string;
     name: string;
@@ -79,6 +82,7 @@ export abstract class BaseLLMProvider {
     this.thinkingDepth = options.thinkingDepth ?? 'medium';
     this.workspaceRoot = options.workspaceRoot;
     this.sessionId = options.sessionId;
+    this.antigravityMode = options.antigravityMode;
     this.requestApproval = options.requestApproval;
   }
 

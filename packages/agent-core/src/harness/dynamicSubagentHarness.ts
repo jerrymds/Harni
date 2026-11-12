@@ -192,6 +192,8 @@ const INTENT_ALLOWED_TOOLS: Record<SubagentTaskIntent, string[]> = {
   ],
   surgical_edit: [
     'read_file',
+    'edit_file',
+    'write_file',
     'replace_file_content',
     'write_to_file',
     'list_files',
@@ -199,30 +201,39 @@ const INTENT_ALLOWED_TOOLS: Record<SubagentTaskIntent, string[]> = {
   ],
   review_testing: [
     'read_file',
+    'write_file',
+    'edit_file',
     'write_to_file',
     'replace_file_content',
     'list_files',
     'search_files',
+    'run_command',
     'execute_command',
     'ask_question',
     'contrastive_probe',
   ],
   implementation: [
     'read_file',
+    'write_file',
+    'edit_file',
     'write_to_file',
     'replace_file_content',
     'list_files',
     'search_files',
+    'run_command',
     'execute_command',
     'use_skill',
     'ask_question',
   ],
   general: [
     'read_file',
+    'write_file',
+    'edit_file',
     'write_to_file',
     'replace_file_content',
     'list_files',
     'search_files',
+    'run_command',
     'execute_command',
     'use_skill',
     'ask_question',
@@ -249,7 +260,7 @@ const INTENT_DEFAULT_CONSTRAINTS: Record<SubagentTaskIntent, string[]> = {
   ],
   review_testing: [
     'Focus on code quality inspection, automated test suite verification, and edge-case discovery.',
-    'Run tests via execute_command and analyze full diagnostic output and stack traces.',
+    'Run tests via run_command and analyze full diagnostic output and stack traces.',
     'Do not modify production code beyond what is required; test files may be created or edited.',
     'Provide clear pass/fail status, coverage summary, and risk assessments.',
   ],
@@ -266,11 +277,14 @@ const INTENT_DEFAULT_CONSTRAINTS: Record<SubagentTaskIntent, string[]> = {
 
 const KNOWN_BUILTIN_TOOLS = new Set([
   'read_file',
+  'write_file',
+  'edit_file',
+  'run_command',
   'write_to_file',
   'replace_file_content',
+  'execute_command',
   'list_files',
   'search_files',
-  'execute_command',
   'use_skill',
   'ask_question',
   'invoke_subagent',
@@ -280,8 +294,16 @@ const KNOWN_BUILTIN_TOOLS = new Set([
   'contrastive_probe',
 ]);
 
-const WRITE_TOOLS = new Set(['write_to_file', 'replace_file_content']);
+const WRITE_TOOLS = new Set([
+  'write_file',
+  'edit_file',
+  'write_to_file',
+  'replace_file_content',
+]);
 const WRITE_AND_EXEC_TOOLS = new Set([
+  'write_file',
+  'edit_file',
+  'run_command',
   'write_to_file',
   'replace_file_content',
   'execute_command',
@@ -296,11 +318,11 @@ const WRITE_AND_EXEC_TOOLS = new Set([
 export class DynamicSubagentHarness {
   public static readonly DEFAULT_AVAILABLE_TOOLS = [
     'read_file',
-    'replace_file_content',
-    'write_to_file',
+    'edit_file',
+    'write_file',
     'list_files',
     'search_files',
-    'execute_command',
+    'run_command',
     'use_skill',
     'ask_question',
   ];
@@ -569,6 +591,7 @@ export class DynamicSubagentHarness {
     // OR (role matches /researcher|explorer|investigator|analyzer/i AND intent === 'investigation')
     const isExplicitWriteDisabled = options.baseDefinition?.enableWriteTools === false;
     const explicitlyAllowsExec = Boolean(
+      options.baseDefinition?.allowedTools?.includes('run_command') ||
       options.baseDefinition?.allowedTools?.includes('execute_command'),
     );
     const isReadOnlyRoleInvestigation =

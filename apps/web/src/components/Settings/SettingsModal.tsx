@@ -117,6 +117,8 @@ export const SettingsModal: React.FC = () => {
     rollbackCheckpoint,
     isRevertingCheckpoint,
     currentSessionId,
+    antigravityMode,
+    setAntigravityMode,
   } = useAgentStore(
     useShallow((s) => ({
       isSettingsOpen: s.isSettingsOpen,
@@ -159,6 +161,8 @@ export const SettingsModal: React.FC = () => {
       rollbackCheckpoint: s.rollbackCheckpoint,
       isRevertingCheckpoint: s.isRevertingCheckpoint,
       currentSessionId: s.currentSessionId,
+      antigravityMode: s.antigravityMode,
+      setAntigravityMode: s.setAntigravityMode,
       theme: s.theme,
       setTheme: s.setTheme,
       fontSize: s.fontSize,
@@ -474,7 +478,7 @@ export const SettingsModal: React.FC = () => {
 name: my_custom_skill
 description: 自訂專業工作流程說明
 category: workflow
-tools: execute_command, read_file, replace_file_content
+tools: run_command, read_file, edit_file
 ---
 
 ### 標準作業程序 (SOP):
@@ -740,6 +744,61 @@ tools: execute_command, read_file, replace_file_content
                         placeholder="例如: http://localhost:8000"
                         className="w-full rounded-xl border border-ag-border bg-white px-3.5 py-2 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft"
                       />
+                    </div>
+
+                    {/* Antigravity 執行模式 (Execution Mode) */}
+                    <div className="rounded-2xl border border-ag-border bg-ag-panel p-4 space-y-3 shadow-soft">
+                      <div className="flex items-center space-x-2">
+                        <Cpu className="h-4 w-4 text-ag-blue" />
+                        <span className="text-xs font-semibold text-slate-800">Antigravity 執行模式 (Execution Mode)</span>
+                      </div>
+                      <p className="text-[11px] text-slate-500 leading-relaxed">
+                        選擇 Bridge 與 Antigravity CLI 溝通的底層執行機制。
+                      </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => setAntigravityMode('acp')}
+                          className={`flex flex-col text-left p-3 rounded-xl border transition-all ${
+                            antigravityMode === 'acp'
+                              ? 'border-ag-blue bg-blue-50/50 shadow-sm'
+                              : 'border-ag-border bg-white hover:border-slate-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between w-full mb-1">
+                            <span className="font-semibold text-xs text-slate-800">ACP 模式 (agy acp)</span>
+                            {antigravityMode === 'acp' && (
+                              <span className="rounded-full bg-ag-blue text-white text-[10px] px-2 py-0.5 font-medium">
+                                預設推薦
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[11px] text-slate-500 leading-snug">
+                            啟用原生 ACP 工具與雙向通訊協定，支援即時工具執行與完整互動性。
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setAntigravityMode('direct')}
+                          className={`flex flex-col text-left p-3 rounded-xl border transition-all ${
+                            antigravityMode === 'direct'
+                              ? 'border-ag-blue bg-blue-50/50 shadow-sm'
+                              : 'border-ag-border bg-white hover:border-slate-300'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between w-full mb-1">
+                            <span className="font-semibold text-xs text-slate-800">Direct 模式 (agy -p)</span>
+                            {antigravityMode === 'direct' && (
+                              <span className="rounded-full bg-slate-700 text-white text-[10px] px-2 py-0.5 font-medium">
+                                已選取
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[11px] text-slate-500 leading-snug">
+                            單次提示詞串流模式（注意：尾綴帶 :acp 的模型仍會自動使用 ACP 模式）。
+                          </span>
+                        </button>
+                      </div>
                     </div>
 
                     {/* Google Antigravity Model Quota Pool Display */}
@@ -1437,13 +1496,13 @@ tools: execute_command, read_file, replace_file_content
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {[
                     {
-                      name: 'write_to_file',
+                      name: 'write_file',
                       desc: '建立新檔案或覆寫現有檔案，支援自動建立父目錄。',
                       tag: '寫入權限',
                       color: 'text-blue-800 border-blue-200 bg-blue-50',
                     },
                     {
-                      name: 'replace_file_content',
+                      name: 'edit_file',
                       desc: '行層級精確取代修改，保留現有排版與註解。',
                       tag: '寫入權限',
                       color: 'text-amber-800 border-amber-200 bg-amber-50',
@@ -1455,7 +1514,7 @@ tools: execute_command, read_file, replace_file_content
                       color: 'text-emerald-800 border-emerald-200 bg-emerald-50',
                     },
                     {
-                      name: 'execute_command',
+                      name: 'run_command',
                       desc: '在工作區環境中執行 Shell 終端機指令（如 npm test, git）。',
                       tag: '終端審批',
                       color: 'text-rose-800 border-rose-200 bg-rose-50',

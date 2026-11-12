@@ -367,6 +367,9 @@ export const createAuthSlice: StateCreator<AgentStoreState, [], [], AuthSlice> =
               if (Number.isFinite(parsed) && parsed > 0) {
                 loadedContextWindows[modelKey] = parsed;
               }
+            } else if (k === 'antigravity_bridge_mode' && (v === 'acp' || v === 'direct')) {
+              set({ antigravityMode: v });
+              localStorage.setItem('cline_web_antigravity_mode', v);
             }
           }
         }

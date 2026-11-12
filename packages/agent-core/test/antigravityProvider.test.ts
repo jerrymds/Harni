@@ -97,7 +97,7 @@ describe('AntigravityProvider idle timeout', () => {
 
     const single = AntigravityProvider.extractTextToolCalls(textWithTrailingBraces);
     expect(single.length).toBe(1);
-    expect(single[0].name).toBe('replace_file_content');
+    expect(single[0].name).toBe('edit_file');
     expect(single[0].arguments).toEqual({
       path: 'src/index.ts',
       content: 'export function main() { return { ok: true }; }',
@@ -215,10 +215,11 @@ describe('AntigravityProvider ACP and tool settings', () => {
     delete process.env.ANTIGRAVITY_IDLE_TIMEOUT_MS;
   });
 
-  it('非 ACP 模型預設傳遞 disable_builtin_tools: true, allow_tools: false', async () => {
+  it('Direct 模式傳遞 disable_builtin_tools: true, allow_tools: false, agy_mode: direct', async () => {
     const provider = new AntigravityProvider({
       baseURL: 'http://127.0.0.1:8123',
       model: 'gemini-3.8-flash',
+      antigravityMode: 'direct',
     });
 
     let capturedOptions: any = null;
@@ -237,6 +238,7 @@ describe('AntigravityProvider ACP and tool settings', () => {
 
     expect(capturedOptions).toBeDefined();
     const body = JSON.parse(capturedOptions.body);
+    expect(body.authData.agy_mode).toBe('direct');
     expect(body.authData.disable_builtin_tools).toBe(true);
     expect(body.authData.allow_tools).toBe(false);
   });
@@ -263,10 +265,11 @@ describe('AntigravityProvider ACP and tool settings', () => {
 
     expect(capturedOptions).toBeDefined();
     const body = JSON.parse(capturedOptions.body);
+    expect(body.authData.agy_mode).toBe('acp');
     expect(body.authData.disable_builtin_tools).toBe(false);
     expect(body.authData.allow_tools).toBe(true);
-    expect(body.authData.dangerously_skip_permissions).toBe(false);
-    expect(body.authData.interactive_permissions).toBe(true);
+    expect(body.authData.dangerously_skip_permissions).toBe(true);
+    expect(body.authData.interactive_permissions).toBe(false);
   });
 
   it('authData 中包含 agy_mode: "acp" 時亦判斷為 ACP 模式', async () => {
@@ -292,10 +295,11 @@ describe('AntigravityProvider ACP and tool settings', () => {
 
     expect(capturedOptions).toBeDefined();
     const body = JSON.parse(capturedOptions.body);
+    expect(body.authData.agy_mode).toBe('acp');
     expect(body.authData.disable_builtin_tools).toBe(false);
     expect(body.authData.allow_tools).toBe(true);
-    expect(body.authData.dangerously_skip_permissions).toBe(false);
-    expect(body.authData.interactive_permissions).toBe(true);
+    expect(body.authData.dangerously_skip_permissions).toBe(true);
+    expect(body.authData.interactive_permissions).toBe(false);
   });
 
   it('外部明確指定的 authData 設定能優先覆蓋預設值', async () => {
@@ -502,6 +506,149 @@ describe('AntigravityProvider Mode B: Interactive Permission Approval', () => {
       permissionId: 'perm_no_handler',
       approved: false,
       optionId: 'deny',
+    });
+  });
+
+  describe('Antigravity execution mode and tool settings resolution', () => {
+    it('gemini-3.8-flash 預設使用 ACP 模式並配置 dangerously_skip_permissions', async () => {
+      const provider = new AntigravityProvider({
+        baseURL: 'http://127.0.0.1:8123',
+        model: 'gemini-3.8-flash',
+      });
+
+      let capturedPayload: any = null;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation(async (_url: string, options: any) => {
+          capturedPayload = JSON.parse(options.body);
+          return {
+            ok: true,
+            body: createNormalStream(),
+          } as unknown as Response;
+        }),
+      );
+
+      await provider.streamCompletion([], 'sys', [], () => {});
+
+      expect(capturedPayload).toBeDefined();
+      expect(capturedPayload.authData.agy_mode).toBe('acp');
+      expect(capturedPayload.authData.disable_builtin_tools).toBe(false);
+      expect(capturedPayload.authData.allow_tools).toBe(true);
+      expect(capturedPayload.authData.dangerously_skip_permissions).toBe(true);
+      expect(capturedPayload.authData.interactive_permissions).toBe(false);
+    });
+
+    it('gemini-3.8-flash 在 antigravityMode: direct 時切換為 Direct 模式', async () => {
+      const provider = new AntigravityProvider({
+        baseURL: 'http://127.0.0.1:8123',
+        model: 'gemini-3.8-flash',
+        antigravityMode: 'direct',
+      });
+
+      let capturedPayload: any = null;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation(async (_url: string, options: any) => {
+          capturedPayload = JSON.parse(options.body);
+          return {
+            ok: true,
+            body: createNormalStream(),
+          } as unknown as Response;
+        }),
+      );
+
+      await provider.streamCompletion([], 'sys', [], () => {});
+
+      expect(capturedPayload).toBeDefined();
+      expect(capturedPayload.authData.agy_mode).toBe('direct');
+      expect(capturedPayload.authData.disable_builtin_tools).toBe(true);
+      expect(capturedPayload.authData.allow_tools).toBe(false);
+    });
+
+    it('帶有 :acp 後綴的模型（如 claude-sonnet-4-6:acp）強制使用 ACP 模式，即使 antigravityMode 為 direct', async () => {
+      const provider = new AntigravityProvider({
+        baseURL: 'http://127.0.0.1:8123',
+        model: 'claude-sonnet-4-6:acp',
+        antigravityMode: 'direct',
+      });
+
+      let capturedPayload: any = null;
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockImplementation(async (_url: string, options: any) => {
+          capturedPayload = JSON.parse(options.body);
+          return {
+            ok: true,
+            body: createNormalStream(),
+          } as unknown as Response;
+        }),
+      );
+
+      await provider.streamCompletion([], 'sys', [], () => {});
+
+      expect(capturedPayload).toBeDefined();
+      expect(capturedPayload.authData.agy_mode).toBe('acp');
+      expect(capturedPayload.authData.disable_builtin_tools).toBe(false);
+      expect(capturedPayload.authData.allow_tools).toBe(true);
+      expect(capturedPayload.authData.dangerously_skip_permissions).toBe(true);
+    });
+  });
+
+  describe('AntigravityProvider.sanitizeMalformedJson', () => {
+    it('正確轉義字串字面量內的未轉義控制字元（如原始換行）', () => {
+      const raw = '{"content": "line1\nline2\rline3\tline4"}';
+      const sanitized = AntigravityProvider.sanitizeMalformedJson(raw);
+      expect(() => JSON.parse(raw)).toThrow();
+      expect(() => JSON.parse(sanitized)).not.toThrow();
+      const parsed = JSON.parse(sanitized);
+      expect(parsed.content).toBe('line1\nline2\rline3\tline4');
+    });
+
+    it('正確修正無效的 JSON 反斜線跳脫字元（\\`、\\s、\\S、\\\'、\\d）', () => {
+      const raw = '{"regex": "\\s+\\S*\\d+", "quote": "\\\'", "template": "\\`hello\\`"}';
+      const sanitized = AntigravityProvider.sanitizeMalformedJson(raw);
+      expect(() => JSON.parse(raw)).toThrow();
+      const parsed = JSON.parse(sanitized);
+      expect(parsed.regex).toBe('\\s+\\S*\\d+');
+      expect(parsed.quote).toBe("\\'");
+      expect(parsed.template).toBe('\\`hello\\`');
+    });
+
+    it('保留標準有效的 JSON 跳脫字元（\\"、\\\\、\\/、\\b、\\f、\\n、\\r、\\t、\\u1234）', () => {
+      const raw = '{"valid": "\\"\\\\\\/\\b\\f\\n\\r\\t\\u0041"}';
+      const sanitized = AntigravityProvider.sanitizeMalformedJson(raw);
+      const parsed = JSON.parse(sanitized);
+      expect(parsed.valid).toBe('"\\/\b\f\n\r\tA');
+    });
+  });
+
+  describe('extractTextToolCalls with malformed JSON and code blocks', () => {
+    it('正確解析包含原始換行與 \\`、\\s 的多行 TypeScript 程式碼工具呼叫', () => {
+      const text =
+        'Calling tool `write_to_file` with arguments: {\n' +
+        '  "path": "src/utils.ts",\n' +
+        '  "content": "export function parse(str: string): string {\n' +
+        '    const pattern = /\\s+/g;\n' +
+        '    return \\`result: ${str}\\`;\n' +
+        '  }"\n' +
+        '}\n' +
+        '檔案寫入已準備完成。';
+
+      const calls = AntigravityProvider.extractTextToolCalls(text);
+      expect(calls.length).toBe(1);
+      expect(calls[0].name).toBe('write_file');
+      expect(calls[0].arguments.path).toBe('src/utils.ts');
+      expect(typeof calls[0].arguments.content).toBe('string');
+      expect((calls[0].arguments.content as string)).toContain('export function parse');
+    });
+
+    it('正確處理在尾端截斷的未閉合工具呼叫', () => {
+      const text =
+        'Calling tool `execute_command` with arguments: {"command": "npm run build';
+      const calls = AntigravityProvider.extractTextToolCalls(text);
+      expect(calls.length).toBe(1);
+      expect(calls[0].name).toBe('run_command');
+      expect(calls[0].arguments.command).toBe('npm run build');
     });
   });
 });

@@ -70,11 +70,12 @@ describe('Hierarchical Multi-Agent Orchestration', () => {
     const researcher = registry.get('researcher')!;
     expect(researcher.enableWriteTools).toBe(false);
     expect(researcher.allowedTools).toContain('read_file');
+    expect(researcher.allowedTools).not.toContain('write_file');
     expect(researcher.allowedTools).not.toContain('write_to_file');
 
     const coder = registry.get('coder')!;
     expect(coder.enableWriteTools).toBe(true);
-    expect(coder.allowedTools).toContain('write_to_file');
+    expect(coder.allowedTools).toContain('write_file');
 
     // Dynamic registration
     registry.register({

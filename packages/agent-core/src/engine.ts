@@ -20,6 +20,7 @@ import type { ToolExecutionContext } from './tools/baseTool.js';
 import type {
   AgentMode,
   AgentStatus,
+  AntigravityExecutionMode,
   AutoTestConfig,
   ChatMessage,
   FileAttachment,
@@ -68,6 +69,7 @@ export interface AgentEngineConfig {
   experienceLearningEnabled?: boolean;
   experienceStorageDir?: string;
   dynamicHarnessEnabled?: boolean;
+  antigravityMode?: AntigravityExecutionMode;
 }
 
 interface SessionTask {
@@ -192,6 +194,7 @@ export class AgentCoreEngine extends EventEmitter {
       maxConcurrent: config.maxSubagentConcurrent,
       modelTierMap: config.modelTierMap,
       dynamicHarnessEnabled: this.dynamicHarnessEnabled,
+      antigravityMode: config.antigravityMode,
       executeTerminalCommand: this.executeTerminalCommand,
       mcpManager: this.mcpManager,
       skillRegistry: this.skillRegistry,
@@ -517,11 +520,16 @@ export class AgentCoreEngine extends EventEmitter {
       worktreeTimeoutMs?: number;
       enableCheckpoint?: boolean;
       subagentsEnabled?: boolean;
+      antigravityMode?: AntigravityExecutionMode;
       contextWindow?: number;
     } = {},
   ): Promise<void> {
     const sessionId = options.sessionId || 'default';
     this.lastActiveSessionId = sessionId;
+
+    if (options.antigravityMode) {
+      this.subagentManager.setAntigravityMode(options.antigravityMode);
+    }
 
     let sessionTask = this.tasksBySession.get(sessionId);
     const sessionWorkspaceRoot = options.workspaceRoot
@@ -814,6 +822,7 @@ export class AgentCoreEngine extends EventEmitter {
         baseURL: effectiveBaseUrl,
         model: model || undefined,
         thinkingDepth: options.thinkingDepth,
+        antigravityMode: options.antigravityMode,
         anthropicOAuth: options.anthropicOAuth,
         openaiOAuth: options.openaiOAuth,
         openaiAccountId: options.openaiAccountId,
@@ -1395,6 +1404,8 @@ export class AgentCoreEngine extends EventEmitter {
             }
 
             if (
+              canonicalToolName === 'write_file' ||
+              canonicalToolName === 'edit_file' ||
               canonicalToolName === 'write_to_file' ||
               canonicalToolName === 'replace_file_content'
             ) {

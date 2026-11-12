@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type {
+  AntigravityExecutionMode,
   HarnessExperience,
   LLMProviderType,
   SubagentDefinition,
@@ -47,6 +48,7 @@ export interface SubagentManagerConfig {
   mcpManager?: McpServerManager;
   skillRegistry?: SkillRegistry;
   dynamicHarnessEnabled?: boolean;
+  antigravityMode?: AntigravityExecutionMode;
   getExperiencesForPrompt?: (
     query: string,
     workspaceRoot: string,
@@ -95,6 +97,7 @@ export class SubagentManager extends EventEmitter {
   private mcpManager?: McpServerManager;
   private skillRegistry?: SkillRegistry;
   private dynamicHarnessEnabled: boolean;
+  private antigravityMode?: AntigravityExecutionMode;
   private getExperiencesForPrompt?: (
     query: string,
     workspaceRoot: string,
@@ -135,6 +138,7 @@ export class SubagentManager extends EventEmitter {
     this.maxRateLimitRetries = config.maxRateLimitRetries ?? 2;
     this.rateLimitBaseDelayMs = config.rateLimitBaseDelayMs ?? 1000;
     this.dynamicHarnessEnabled = config.dynamicHarnessEnabled ?? true;
+    this.antigravityMode = config.antigravityMode;
     this.getExperiencesForPrompt = config.getExperiencesForPrompt;
     this.gitCheckpointService = config.gitCheckpointService;
     this.mcpManager = config.mcpManager;
@@ -170,6 +174,14 @@ export class SubagentManager extends EventEmitter {
 
   public getDynamicHarnessEnabled(): boolean {
     return this.dynamicHarnessEnabled;
+  }
+
+  public setAntigravityMode(mode?: AntigravityExecutionMode): void {
+    this.antigravityMode = mode;
+  }
+
+  public getAntigravityMode(): AntigravityExecutionMode | undefined {
+    return this.antigravityMode;
   }
 
   public setMaxConcurrent(max: number): void {
@@ -351,6 +363,8 @@ export class SubagentManager extends EventEmitter {
           parentModel: params.parentModel || this.defaultModel,
         });
 
+        const roleLabel = params.role || effectiveDefinition.role || effectiveDefinition.name;
+
         // Create provider for subagent
         const provider =
           params.customProvider ||
@@ -364,6 +378,22 @@ export class SubagentManager extends EventEmitter {
             openaiOAuth: params.openaiOAuth,
             openaiAccountId: params.openaiAccountId,
             sessionId: params.sessionId,
+            antigravityMode: this.antigravityMode,
+            requestApproval: this.requestToolApproval
+              ? async (req) => {
+                  return await this.requestToolApproval!(
+                    params.sessionId || 'default',
+                    {
+                      id: req.toolCallId,
+                      name: req.name,
+                      arguments: req.arguments,
+                      requiresApproval: true,
+                      subagentId,
+                      subagentRole: roleLabel,
+                    },
+                  );
+                }
+              : undefined,
           });
 
         const instance = new SubagentInstance({
@@ -778,18 +808,20 @@ export class SubagentManager extends EventEmitter {
     }
 
     // Write tools
-    const allowWrite = definition.enableWriteTools ?? (allowed ? allowed.has('write_to_file') : true);
+    const allowWrite =
+      definition.enableWriteTools ??
+      (allowed ? (allowed.has('write_file') || allowed.has('write_to_file')) : true);
     if (allowWrite) {
-      if (!allowed || allowed.has('write_to_file')) {
+      if (!allowed || allowed.has('write_file') || allowed.has('write_to_file')) {
         scopedRegistry.register(new WriteFileTool());
       }
-      if (!allowed || allowed.has('replace_file_content')) {
+      if (!allowed || allowed.has('edit_file') || allowed.has('replace_file_content')) {
         scopedRegistry.register(new ReplaceFileContentTool());
       }
     }
 
     // Command execution
-    if (!allowed || allowed.has('execute_command')) {
+    if (!allowed || allowed.has('run_command') || allowed.has('execute_command')) {
       scopedRegistry.register(new ExecuteCommandTool());
     }
 

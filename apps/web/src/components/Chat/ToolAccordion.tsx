@@ -47,17 +47,17 @@ export const ToolAccordion: React.FC<ToolAccordionProps> = memo(({
     if (summaryLower.includes('ask_question') || summaryLower.includes('使用者已回答') || summaryLower.includes('提問')) {
       return { label: 'ask_question (提問回覆)', icon: <HelpCircle className="h-3.5 w-3.5 text-ag-primary" /> };
     }
-    if (summaryLower.includes('write_to_file') || summaryLower.includes('created') || summaryLower.includes('write')) {
-      return { label: 'write_to_file', icon: <FileCode className="h-3.5 w-3.5 text-ag-blue" /> };
+    if (summaryLower.includes('write_file') || summaryLower.includes('write_to_file') || summaryLower.includes('created') || summaryLower.includes('write')) {
+      return { label: 'write_file', icon: <FileCode className="h-3.5 w-3.5 text-ag-blue" /> };
     }
-    if (summaryLower.includes('replace_file_content') || summaryLower.includes('modified') || summaryLower.includes('replace')) {
-      return { label: 'replace_file_content', icon: <FileCode className="h-3.5 w-3.5 text-amber-600" /> };
+    if (summaryLower.includes('edit_file') || summaryLower.includes('replace_file_content') || summaryLower.includes('modified') || summaryLower.includes('replace') || summaryLower.includes('edit')) {
+      return { label: 'edit_file', icon: <FileCode className="h-3.5 w-3.5 text-amber-600" /> };
     }
     if (summaryLower.includes('use_skill') || summaryLower.includes('skill')) {
       return { label: 'use_skill', icon: <Sparkles className="h-3.5 w-3.5 text-ag-purple" /> };
     }
-    if (summaryLower.includes('execute_command') || summaryLower.includes('executed') || summaryLower.includes('command')) {
-      return { label: 'execute_command', icon: <Terminal className="h-3.5 w-3.5 text-emerald-600" /> };
+    if (summaryLower.includes('run_command') || summaryLower.includes('execute_command') || summaryLower.includes('executed') || summaryLower.includes('command')) {
+      return { label: 'run_command', icon: <Terminal className="h-3.5 w-3.5 text-emerald-600" /> };
     }
     if (summaryLower.includes('search_files') || summaryLower.includes('found')) {
       return { label: 'search_files', icon: <Search className="h-3.5 w-3.5 text-ag-purple" /> };

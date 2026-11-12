@@ -391,8 +391,8 @@ describe('DynamicSubagentHarness', () => {
       expect(config.intent).toBe('surgical_edit');
       expect(config.prunedTools).toEqual([
         'read_file',
-        'replace_file_content',
-        'write_to_file',
+        'edit_file',
+        'write_file',
         'list_files',
         'search_files',
       ]);
@@ -437,10 +437,10 @@ describe('DynamicSubagentHarness', () => {
       'Fix the login bug where session expires early',
       '找出登入失敗的原因並修好它',
     ])(
-      'retains write_to_file when no role and no baseDefinition are provided: "%s"',
+      'retains write_file when no role and no baseDefinition are provided: "%s"',
       (prompt) => {
         const tailored = DynamicSubagentHarness.tailor({ taskPrompt: prompt });
-        expect(tailored.prunedTools).toContain('write_to_file');
+        expect(tailored.prunedTools).toContain('write_file');
       },
     );
 
@@ -451,6 +451,9 @@ describe('DynamicSubagentHarness', () => {
       });
 
       expect(tailored.intent).toBe('investigation');
+      expect(tailored.prunedTools).not.toContain('write_file');
+      expect(tailored.prunedTools).not.toContain('edit_file');
+      expect(tailored.prunedTools).not.toContain('run_command');
       expect(tailored.prunedTools).not.toContain('write_to_file');
       expect(tailored.prunedTools).not.toContain('replace_file_content');
       expect(tailored.prunedTools).not.toContain('execute_command');
@@ -479,6 +482,9 @@ describe('DynamicSubagentHarness', () => {
         },
       });
 
+      expect(tailored.prunedTools).not.toContain('write_file');
+      expect(tailored.prunedTools).not.toContain('edit_file');
+      expect(tailored.prunedTools).not.toContain('run_command');
       expect(tailored.prunedTools).not.toContain('write_to_file');
       expect(tailored.prunedTools).not.toContain('replace_file_content');
       expect(tailored.prunedTools).not.toContain('execute_command');

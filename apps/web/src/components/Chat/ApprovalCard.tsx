@@ -16,7 +16,7 @@ export const ApprovalCard: React.FC<ApprovalCardProps> = memo(({
   const [showFeedbackInput, setShowFeedbackInput] = useState(false);
   const setAutoApprove = useAgentStore((s) => s.setAutoApprove);
 
-  const isCommand = toolCall.name === 'execute_command';
+  const isCommand = toolCall.name === 'run_command' || toolCall.name === 'execute_command';
 
   const handleAllApprove = () => {
     setAutoApprove(true);

@@ -286,7 +286,7 @@ export class SyntaxLinterService {
     }
 
     lines.push('');
-    lines.push('💡 **建議修復方式**: 請調用 `replace_file_content` 修正上述語法或 Linter 錯誤，避免程式碼無法編譯或執行。');
+    lines.push('💡 **建議修復方式**: 請調用 `edit_file` 修正上述語法或 Linter 錯誤，避免程式碼無法編譯或執行。');
 
     return lines.join('\n');
   }

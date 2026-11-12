@@ -999,19 +999,20 @@ describe('Step B: AgentCoreEngine Harness² Integration Tests', () => {
     expect(results).toHaveLength(1);
     expect(results[0].status).toBe('completed');
     const toolNames = capturedTools.map((t) => t.name);
-    expect(toolNames).toContain('execute_command');
+    expect(toolNames).toContain('run_command');
     expect(toolNames).toContain('ask_question');
     expect(toolNames).toContain('read_file');
-    expect(toolNames).toContain('write_to_file');
-    expect(toolNames).toContain('replace_file_content');
+    expect(toolNames).toContain('write_file');
+    expect(toolNames).toContain('edit_file');
 
     // Also verify directly on the instance's tool registry
     const instance = engine.getSubagentManager().getInstance(results[0].id);
     expect(instance).toBeDefined();
+    expect(instance!.getToolRegistry().getTool('run_command')).toBeDefined();
     expect(instance!.getToolRegistry().getTool('execute_command')).toBeDefined();
     expect(instance!.getToolRegistry().getTool('ask_question')).toBeDefined();
 
-    // Also test reviewer retains execute_command but has no write tools
+    // Also test reviewer retains run_command but has no write tools
     let reviewerTools: import('@harni/types').ToolDefinition[] = [];
     const revMockProvider = new MockProvider({
       script: [{ text: 'Review complete.' }],
@@ -1031,8 +1032,10 @@ describe('Step B: AgentCoreEngine Harness² Integration Tests', () => {
     ]);
     expect(revResults[0].status).toBe('completed');
     const revToolNames = reviewerTools.map((t) => t.name);
-    expect(revToolNames).toContain('execute_command');
+    expect(revToolNames).toContain('run_command');
     expect(revToolNames).toContain('ask_question');
+    expect(revToolNames).not.toContain('write_file');
+    expect(revToolNames).not.toContain('edit_file');
     expect(revToolNames).not.toContain('write_to_file');
     expect(revToolNames).not.toContain('replace_file_content');
   });

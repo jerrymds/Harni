@@ -97,19 +97,35 @@ export class AntigravityProvider extends BaseLLMProvider {
       }
     }
 
-    const isAcp =
-      (this.model || '').toLowerCase().includes(':acp') ||
-      (authData as any)?.agy_mode === 'acp' ||
-      (authData as any)?.mode === 'acp';
+    const modelForcesAcp = (this.model || '').toLowerCase().includes(':acp');
+    const rawAuthMode = String(
+      (authData as any)?.agy_mode || (authData as any)?.mode || '',
+    ).toLowerCase();
+    const rawEnvMode = String(
+      process.env.ANTIGRAVITY_AGY_MODE ||
+        process.env.ANTIGRAVITY_EXECUTION_MODE ||
+        '',
+    ).toLowerCase();
+    const configuredMode: 'acp' | 'direct' =
+      this.antigravityMode === 'direct' || this.antigravityMode === 'acp'
+        ? this.antigravityMode
+        : rawAuthMode === 'direct' || rawAuthMode === 'acp'
+          ? (rawAuthMode as 'acp' | 'direct')
+          : rawEnvMode === 'direct'
+            ? 'direct'
+            : 'acp';
+    const isAcp = modelForcesAcp || configuredMode === 'acp';
 
     const defaultToolSettings = isAcp
       ? {
+          agy_mode: 'acp',
           disable_builtin_tools: false,
           allow_tools: true,
-          dangerously_skip_permissions: false,
-          interactive_permissions: true,
+          dangerously_skip_permissions: true,
+          interactive_permissions: false,
         }
       : {
+          agy_mode: 'direct',
           disable_builtin_tools: true,
           allow_tools: false,
         };
@@ -328,6 +344,82 @@ export class AntigravityProvider extends BaseLLMProvider {
   }
 
   /**
+   * Sanitizes malformed JSON strings emitted by LLMs in text-formatted tool calls.
+   * Scans char-by-char tracking string literals and escapes unescaped raw newlines/control characters
+   * and non-standard backslash escapes (e.g. \`, \s, \S, \', \d, etc.).
+   */
+  public static sanitizeMalformedJson(raw: string): string {
+    let result = '';
+    let inString = false;
+    const len = raw.length;
+
+    for (let i = 0; i < len; i++) {
+      const ch = raw[i];
+
+      if (!inString) {
+        if (ch === '"') {
+          inString = true;
+        }
+        result += ch;
+        continue;
+      }
+
+      // Inside string literal
+      if (ch === '"') {
+        inString = false;
+        result += ch;
+        continue;
+      }
+
+      if (ch === '\\') {
+        const next = i + 1 < len ? raw[i + 1] : '';
+        if (
+          next === '"' ||
+          next === '\\' ||
+          next === '/' ||
+          next === 'b' ||
+          next === 'f' ||
+          next === 'n' ||
+          next === 'r' ||
+          next === 't'
+        ) {
+          result += '\\' + next;
+          i++;
+          continue;
+        }
+        if (
+          next === 'u' &&
+          i + 5 < len &&
+          /^[0-9a-fA-F]{4}$/.test(raw.slice(i + 2, i + 6))
+        ) {
+          result += raw.slice(i, i + 6);
+          i += 5;
+          continue;
+        }
+        // Invalid JSON escape sequence -> escape the backslash itself so next char is processed normally
+        result += '\\\\';
+        continue;
+      }
+
+      // Unescaped control characters in JSON string (< 0x20)
+      const code = ch.charCodeAt(0);
+      if (ch === '\n') {
+        result += '\\n';
+      } else if (ch === '\r') {
+        result += '\\r';
+      } else if (ch === '\t') {
+        result += '\\t';
+      } else if (code < 0x20) {
+        result += '\\u' + code.toString(16).padStart(4, '0');
+      } else {
+        result += ch;
+      }
+    }
+
+    return result;
+  }
+
+  /**
    * Extracts one or more text-formatted tool calls (`Calling tool <name> with arguments: {...}`)
    * using balanced brace counting so trailing prose/code with `}` or multiple tool calls do not corrupt JSON.parse.
    */
@@ -381,24 +473,61 @@ export class AntigravityProvider extends BaseLLMProvider {
         }
       }
 
-      if (jsonEnd !== -1) {
-        const rawJson = text.slice(jsonStart, jsonEnd);
+      const tryParseCandidate = (str: string): Record<string, unknown> | null => {
         try {
-          const parsedArgs = JSON.parse(rawJson);
-          if (parsedArgs && typeof parsedArgs === 'object' && !Array.isArray(parsedArgs)) {
-            const normalized = normalizeToolCall(
-              toolName,
-              parsedArgs as Record<string, unknown>,
-            );
-            results.push({
-              id: `ag_call_text_${Date.now()}_${results.length}`,
-              name: normalized.name,
-              arguments: normalized.arguments,
-            });
-            pattern.lastIndex = jsonEnd;
+          const parsed = JSON.parse(str);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            return parsed as Record<string, unknown>;
           }
         } catch {
-          // Ignore malformed JSON candidate
+          try {
+            const sanitized = AntigravityProvider.sanitizeMalformedJson(str);
+            const parsed = JSON.parse(sanitized);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+              return parsed as Record<string, unknown>;
+            }
+          } catch {
+            return null;
+          }
+        }
+        return null;
+      };
+
+      let parsedArgs: Record<string, unknown> | null = null;
+      let usedEnd = jsonEnd;
+
+      if (jsonEnd !== -1) {
+        const rawJson = text.slice(jsonStart, jsonEnd);
+        parsedArgs = tryParseCandidate(rawJson);
+      } else if (depth > 0) {
+        const rawJson = text.slice(jsonStart);
+        parsedArgs = tryParseCandidate(rawJson);
+        if (!parsedArgs) {
+          const suffixes = ['"}', '"\n}', '}', '"}}', '}}'];
+          for (const suffix of suffixes) {
+            parsedArgs = tryParseCandidate(rawJson + suffix);
+            if (parsedArgs) {
+              usedEnd = text.length;
+              break;
+            }
+          }
+        } else {
+          usedEnd = text.length;
+        }
+      }
+
+      if (parsedArgs && typeof parsedArgs === 'object') {
+        const normalized = normalizeToolCall(
+          toolName,
+          parsedArgs,
+        );
+        results.push({
+          id: `ag_call_text_${Date.now()}_${results.length}`,
+          name: normalized.name,
+          arguments: normalized.arguments,
+        });
+        if (usedEnd !== -1) {
+          pattern.lastIndex = usedEnd;
         }
       }
     }
