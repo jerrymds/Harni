@@ -2,7 +2,13 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import type { CheckpointInfo, WorktreeStatusInfo } from '@harni/types';
+import type {
+  CheckpointInfo,
+  WorktreeStatusInfo,
+  GitBranchInfo,
+  GitBranchesResponse,
+  GitBranchSwitchResult,
+} from '@harni/types';
 
 const execFileAsync = promisify(execFile);
 
@@ -111,14 +117,136 @@ export class GitCheckpointService {
    * Get the current branch name (or HEAD if detached)
    */
   public async getCurrentBranch(workspaceRoot: string): Promise<string> {
-    const { stdout, exitCode } = await this.runGit(
+    const revRes = await this.runGit(
       ['rev-parse', '--abbrev-ref', 'HEAD'],
       workspaceRoot,
     );
-    if (exitCode === 0 && stdout) {
-      return stdout;
+    if (revRes.exitCode === 0 && revRes.stdout) {
+      return revRes.stdout;
+    }
+    const symRes = await this.runGit(
+      ['symbolic-ref', '--short', 'HEAD'],
+      workspaceRoot,
+    );
+    if (symRes.exitCode === 0 && symRes.stdout) {
+      return symRes.stdout;
     }
     return 'HEAD';
+  }
+
+  /**
+   * List local Git branches with current branch status
+   */
+  public async listBranches(workspaceRoot: string): Promise<GitBranchesResponse> {
+    const isGit = await this.isGitRepo(workspaceRoot);
+    if (!isGit) {
+      return { isGitRepo: false, currentBranch: '', branches: [] };
+    }
+
+    const currentBranch = await this.getCurrentBranch(workspaceRoot);
+    const { stdout, exitCode } = await this.runGit(
+      ['branch', '--format=%(HEAD)|%(refname:short)|%(objectname:short)'],
+      workspaceRoot,
+    );
+
+    const branches: GitBranchInfo[] = [];
+    if (exitCode === 0 && stdout) {
+      const lines = stdout.split('\n');
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const [headMarker, rawName, rawCommit] = line.split('|');
+        const name = (rawName || '').trim();
+        if (!name) continue;
+        if (name.startsWith('cline/task-') && name !== currentBranch) {
+          continue;
+        }
+        const commit = (rawCommit || '').trim() || undefined;
+        const current = headMarker?.trim() === '*' || name === currentBranch;
+        branches.push({
+          name,
+          current,
+          ...(commit ? { commit } : {}),
+        });
+      }
+    }
+
+    if (currentBranch && !branches.some((b) => b.name === currentBranch)) {
+      branches.unshift({ name: currentBranch, current: true });
+    }
+
+    branches.sort((a, b) => {
+      if (a.current !== b.current) {
+        return a.current ? -1 : 1;
+      }
+      const getRank = (name: string) => {
+        if (name === 'main') return 1;
+        if (name === 'master') return 2;
+        return 3;
+      };
+      const rankA = getRank(a.name);
+      const rankB = getRank(b.name);
+      if (rankA !== rankB) {
+        return rankA - rankB;
+      }
+      return a.name.localeCompare(b.name);
+    });
+
+    return { isGitRepo: true, currentBranch, branches };
+  }
+
+  /**
+   * Switch to an existing branch or create and switch to a new branch
+   */
+  public async switchBranch(
+    workspaceRoot: string,
+    branchName: string,
+    options?: { create?: boolean },
+  ): Promise<GitBranchSwitchResult> {
+    const isGit = await this.isGitRepo(workspaceRoot);
+    if (!isGit) {
+      return { success: false, currentBranch: '', message: '當前工作目錄不是 Git 儲存庫' };
+    }
+
+    const target = (branchName || '').trim();
+    if (!target || target.startsWith('-') || /[\s~^:?*\[\\]|\.\./.test(target)) {
+      return {
+        success: false,
+        currentBranch: await this.getCurrentBranch(workspaceRoot),
+        message: '無效的分支名稱',
+      };
+    }
+
+    if (!options?.create) {
+      const current = await this.getCurrentBranch(workspaceRoot);
+      if (current === target) {
+        const list = await this.listBranches(workspaceRoot);
+        return {
+          success: true,
+          currentBranch: current,
+          message: `已在分支 ${current}`,
+          branches: list.branches,
+        };
+      }
+    }
+
+    const args = options?.create ? ['checkout', '-b', target] : ['checkout', target];
+    const res = await this.runGit(args, workspaceRoot);
+
+    if (res.exitCode !== 0) {
+      return {
+        success: false,
+        currentBranch: await this.getCurrentBranch(workspaceRoot),
+        message: res.stderr || res.stdout || `切換分支至 ${target} 失敗`,
+      };
+    }
+
+    const updated = await this.listBranches(workspaceRoot);
+    return {
+      success: true,
+      currentBranch: updated.currentBranch,
+      message: `已切換至分支 ${updated.currentBranch}`,
+      branches: updated.branches,
+    };
   }
 
   /**

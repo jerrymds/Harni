@@ -28,6 +28,8 @@ import type {
   ContrastiveProbeParams,
   ContrastiveProbeResult,
   FileDiff,
+  GitBranchesResponse,
+  GitBranchSwitchResult,
   HarnessExperience,
   LLMProviderType,
   ProbeCandidate,
@@ -1955,6 +1957,26 @@ export class AgentCoreEngine extends EventEmitter {
     });
 
     return res;
+  }
+
+  /**
+   * List Git branches for the current workspace or custom root
+   */
+  public async listBranches(workspaceRoot?: string): Promise<GitBranchesResponse> {
+    return this.gitCheckpointService.listBranches(workspaceRoot || this.workspaceRoot);
+  }
+
+  /**
+   * Switch Git branch for current workspace or custom root
+   */
+  public async switchBranch(
+    branchName: string,
+    options?: { workspaceRoot?: string; create?: boolean },
+  ): Promise<GitBranchSwitchResult> {
+    const root = options?.workspaceRoot || this.workspaceRoot;
+    return this.gitCheckpointService.switchBranch(root, branchName, {
+      create: options?.create,
+    });
   }
 
   /**

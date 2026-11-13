@@ -92,4 +92,57 @@ export function registerCheckpointRoutes(router: Router): void {
       sendJsonResponse(res, 500, { error: errorMsg });
     }
   });
+
+  // GET /api/git/branches - List local Git branches
+  router.get('/api/git/branches', async ({ res, url, ctx }) => {
+    try {
+      const workspaceRoot = url.searchParams.get('workspaceRoot') || ctx.workspaceRoot;
+      const result = await ctx.engine.listBranches(workspaceRoot);
+      sendJsonResponse(res, 200, result);
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      sendJsonResponse(res, 500, {
+        isGitRepo: false,
+        currentBranch: '',
+        branches: [],
+        error: errorMsg,
+      });
+    }
+  });
+
+  // POST /api/git/branches/switch - Switch or create Git branch
+  router.post('/api/git/branches/switch', async ({ req, res, ctx }) => {
+    try {
+      const body = await readJsonBody<{
+        workspaceRoot?: string;
+        branch?: string;
+        create?: boolean;
+      }>(req, ctx.readBodyOpts);
+      if (!body?.branch?.trim()) {
+        sendJsonResponse(res, 400, {
+          success: false,
+          currentBranch: '',
+          message: 'Missing branch name',
+        });
+        return;
+      }
+      const targetRoot = body.workspaceRoot || ctx.workspaceRoot;
+      const result = await ctx.engine.switchBranch(body.branch, {
+        workspaceRoot: targetRoot,
+        create: body.create,
+      });
+      if (result.success) {
+        ctx.fsService.invalidateCache(targetRoot);
+        ctx.fsService.notifyTreeChange(targetRoot);
+      }
+      sendJsonResponse(res, result.success ? 200 : 400, result);
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      sendJsonResponse(res, 500, {
+        success: false,
+        currentBranch: '',
+        message: errorMsg,
+      });
+    }
+  });
 }

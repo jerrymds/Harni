@@ -5,3 +5,15 @@ packages:
 patchedDependencies:
   node-pty@1.1.0: patches/node-pty@1.1.0.patch
 
+onlyBuiltDependencies:
+  - electron
+  - esbuild
+  - node-pty
+
+allowBuilds:
+  electron: true
+  esbuild: true
+  node-pty: true
+
+
+

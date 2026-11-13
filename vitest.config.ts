@@ -1,4 +1,5 @@
 import { defineConfig } from 'vitest/config';
+import { fileURLToPath } from 'node:url';
 
 export default defineConfig({
   test: {
@@ -20,7 +21,7 @@ export default defineConfig({
       {
         test: {
           name: 'agent-core',
-          root: './packages/agent-core',
+          root: fileURLToPath(new URL('./packages/agent-core', import.meta.url)),
           environment: 'node',
           include: ['test/**/*.test.ts'],
           testTimeout: 20000,
@@ -30,7 +31,7 @@ export default defineConfig({
       {
         test: {
           name: 'server',
-          root: './apps/server',
+          root: fileURLToPath(new URL('./apps/server', import.meta.url)),
           environment: 'node',
           include: ['test/**/*.test.ts'],
           fileParallelism: false,
@@ -41,7 +42,7 @@ export default defineConfig({
       {
         test: {
           name: 'web',
-          root: './apps/web',
+          root: fileURLToPath(new URL('./apps/web', import.meta.url)),
           environment: 'jsdom',
           globals: true,
           setupFiles: ['./src/test/setup.ts'],

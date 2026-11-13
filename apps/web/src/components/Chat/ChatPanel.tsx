@@ -29,6 +29,7 @@ import { ApprovalCard } from './ApprovalCard.js';
 import { QuestionCard } from './QuestionCard.js';
 import { ChatMessageItem } from './ChatMessageItem.js';
 import { SkillDropdown } from './SkillDropdown.js';
+import { BranchDropdown } from './BranchDropdown.js';
 import { SubagentPanel } from './SubagentPanel.js';
 import { ThinkingAccordion } from './ThinkingAccordion.js';
 import { CommandExecutionAccordion } from './CommandExecutionAccordion.js';
@@ -801,6 +802,8 @@ export const ChatPanel: React.FC = () => {
                     <span>停止 (Stop)</span>
                   </button>
                 )}
+
+                <BranchDropdown disabled={isBusy} />
 
                 <button
                   type="submit"

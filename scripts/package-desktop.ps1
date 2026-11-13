@@ -74,6 +74,83 @@ function Write-Info {
     Write-Host "     $Message" -ForegroundColor Gray
 }
 
+function Remove-BrokenPnpmLinks {
+    param([string]$TargetDir)
+
+    if (-not (Test-Path $TargetDir)) {
+        return
+    }
+
+    $NodeScript = @'
+const fs = require('fs');
+const path = require('path');
+
+function removeBrokenLinks(dir) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let count = 0;
+  for (const entry of entries) {
+    const full = path.join(dir, entry.name);
+    let isBroken = false;
+    try {
+      fs.statSync(full);
+    } catch (err) {
+      if (err && (err.code === 'ENOENT' || err.code === 'UNKNOWN')) {
+        isBroken = true;
+      }
+    }
+    if (isBroken) {
+      try {
+        fs.unlinkSync(full);
+        count++;
+        continue;
+      } catch {
+        try {
+          fs.rmSync(full, { recursive: false, force: true });
+          count++;
+          continue;
+        } catch {
+          try {
+            fs.rmdirSync(full);
+            count++;
+            continue;
+          } catch {}
+        }
+      }
+    } else {
+      try {
+        const lstat = fs.lstatSync(full);
+        if (lstat.isDirectory() && !lstat.isSymbolicLink()) {
+          count += removeBrokenLinks(full);
+        }
+      } catch {}
+    }
+  }
+  return count;
+}
+
+const target = process.argv[1];
+const removed = removeBrokenLinks(target);
+process.stdout.write(String(removed));
+'@
+
+    try {
+        $removedRaw = (& node -e $NodeScript $TargetDir 2>$null)
+        if ($removedRaw) {
+            $removedCount = [int]($removedRaw.Trim())
+            if ($removedCount -gt 0) {
+                Write-Info "已清理 $removedCount 個失效的 pnpm junction 連結。"
+            }
+        }
+    } catch {
+        Write-Warn "清理失效 pnpm junction 時發生非致命例外: $_"
+    }
+}
+
 # -----------------------------------------------------------------------------
 # 1. 決定根目錄與路徑定義
 # -----------------------------------------------------------------------------
@@ -161,6 +238,10 @@ if ($SkipInstall) {
         Pop-Location
     }
 }
+
+# 清理 pnpm 為跨平台套件建立的失效 NTFS junction 連結，防止 electron-builder / @electron/rebuild stat 失敗
+$PnpmStoreNodeModules = Join-Path $MonorepoRoot "node_modules\.pnpm\node_modules"
+Remove-BrokenPnpmLinks -TargetDir $PnpmStoreNodeModules
 
 # -----------------------------------------------------------------------------
 # 5. 建置 Monorepo 套件與 Web 前端 (pnpm build)

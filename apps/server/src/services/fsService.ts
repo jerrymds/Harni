@@ -461,12 +461,27 @@ export class FSService {
       isGitRepo = false;
     }
 
+    let branch: string | undefined;
+    if (isGitRepo) {
+      try {
+        const headContent = (await fs.readFile(path.join(root, '.git', 'HEAD'), 'utf-8')).trim();
+        if (headContent.startsWith('ref:')) {
+          branch = headContent.replace(/^ref:\s*refs\/heads\//, '');
+        } else if (headContent.length > 0) {
+          branch = headContent.slice(0, 7);
+        }
+      } catch {
+        // missing/unreadable HEAD or worktree gitfile, leave branch undefined
+      }
+    }
+
     const totalFiles = await this.countFilesBounded(root);
 
     return {
       rootPath: root,
       totalFiles,
       isGitRepo,
+      ...(branch ? { branch } : {}),
     };
   }
 

@@ -267,6 +267,10 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
       active_folder_id: folderId,
     });
 
+    if (targetFolder?.path) {
+      get().fetchBranches(targetFolder.path);
+    }
+
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(
         JSON.stringify({
@@ -329,6 +333,10 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
         active_session_id: sessionId,
         active_folder_id: folderId,
       });
+
+      if (targetFolder?.path) {
+        get().fetchBranches(targetFolder.path);
+      }
 
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(

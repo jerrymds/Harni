@@ -17,6 +17,11 @@ describe('ChatPanel Component - Image Paste and File Upload', () => {
       tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       autoApprove: false,
       checkpoints: [],
+      branches: [],
+      currentBranch: 'main',
+      isLoadingBranches: false,
+      isSwitchingBranch: false,
+      workspaceInfo: { rootPath: '/test', totalFiles: 5, isGitRepo: true, branch: 'main' },
       activeWorktrees: {},
       isRevertingCheckpoint: false,
       worktreeIsolationEnabled: false,
@@ -118,5 +123,21 @@ describe('ChatPanel Component - Image Paste and File Upload', () => {
 
     // After submit, attachment preview should be cleared
     expect(screen.queryByText('test.ts')).not.toBeInTheDocument();
+  });
+
+  it('renders branch dropdown trigger to the left of the send button', () => {
+    useAgentStore.setState({
+      currentBranch: 'main',
+      branches: [{ name: 'main', current: true }],
+    });
+
+    render(<ChatPanel />);
+    const branchTrigger = screen.getByTestId('branch-dropdown-trigger');
+    const sendBtn = screen.getByRole('button', { name: '發送' });
+
+    expect(branchTrigger).toBeInTheDocument();
+    expect(sendBtn).toBeInTheDocument();
+    expect(Boolean(branchTrigger.compareDocumentPosition(sendBtn) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+    expect(branchTrigger).toHaveTextContent('main');
   });
 });

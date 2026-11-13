@@ -153,6 +153,17 @@ export function flushAllStreamBuffers(
   flushTokenBuffer(get, set);
 }
 
+export function resolveTargetWorkspaceRoot(
+  get: () => AgentStoreState,
+  explicitRoot?: string,
+): string | undefined {
+  const { folders, activeFolderId, workspaceInfo, sessions, currentSessionId } = get();
+  const currentSession = sessions.find((s) => s.id === currentSessionId);
+  const targetFolderId = currentSession?.folderId || activeFolderId;
+  const currentFolder = folders.find((f) => f.id === targetFolderId);
+  return explicitRoot || currentFolder?.path || workspaceInfo?.rootPath;
+}
+
 export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], WorkspaceSlice> = (set, get) => ({
   connected: false,
   folders: initialFolders,
@@ -167,6 +178,10 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
   isLoadingSkills: false,
   fileDiagnostics: {},
   checkpoints: [],
+  branches: [],
+  currentBranch: '',
+  isLoadingBranches: false,
+  isSwitchingBranch: false,
   activeWorktrees: {},
   isRevertingCheckpoint: false,
   ws: null,
@@ -179,6 +194,7 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
     get().fetchModels();
     get().fetchSkills();
     get().fetchCheckpoints();
+    get().fetchBranches();
 
     const existingWs = get().ws;
     if (existingWs && existingWs.readyState === WebSocket.OPEN) return;
@@ -644,10 +660,18 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
             if (changed) {
               saveFoldersToStorage(updatedFolders);
               syncFoldersToDB(updatedFolders);
-              set({ workspaceInfo: info, folders: updatedFolders });
+              set({
+                workspaceInfo: info,
+                folders: updatedFolders,
+                ...(info.branch ? { currentBranch: info.branch } : {}),
+              });
             } else {
-              set({ workspaceInfo: info });
+              set({
+                workspaceInfo: info,
+                ...(info.branch ? { currentBranch: info.branch } : {}),
+              });
             }
+            get().fetchBranches(info.rootPath);
             break;
           }
 
@@ -753,13 +777,16 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
     syncFoldersToDB(updatedFolders);
     get().newSession(newId);
 
-    if (newFolder.path && ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(
-        JSON.stringify({
-          type: 'workspace:set',
-          payload: { path: newFolder.path, sessionId: get().currentSessionId },
-        }),
-      );
+    if (newFolder.path) {
+      get().fetchBranches(newFolder.path);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(
+          JSON.stringify({
+            type: 'workspace:set',
+            payload: { path: newFolder.path, sessionId: get().currentSessionId },
+          }),
+        );
+      }
     }
     return newId;
   },
@@ -774,13 +801,16 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
     saveFoldersToStorage(updated);
     syncFoldersToDB(updated);
 
-    if (folderId === activeFolderId && trimmed && ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(
-        JSON.stringify({
-          type: 'workspace:set',
-          payload: { path: trimmed },
-        }),
-      );
+    if (folderId === activeFolderId && trimmed) {
+      get().fetchBranches(trimmed);
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(
+          JSON.stringify({
+            type: 'workspace:set',
+            payload: { path: trimmed },
+          }),
+        );
+      }
     }
   },
 
@@ -1066,6 +1096,94 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
       }
     } catch (err) {
       console.warn('[createWorkspaceSlice] Failed to prune checkpoints:', err);
+    }
+  },
+
+  fetchBranches: async (workspaceRoot) => {
+    const root = resolveTargetWorkspaceRoot(get, workspaceRoot);
+
+    set({ isLoadingBranches: true });
+    try {
+      const query = root ? `?workspaceRoot=${encodeURIComponent(root)}` : '';
+      const res = await apiFetch(`/api/git/branches${query}`);
+      if (res.ok) {
+        const data = await res.json();
+        if (data && Array.isArray(data.branches)) {
+          const nextBranch = typeof data.currentBranch === 'string' ? data.currentBranch : '';
+          const currentWsInfo = get().workspaceInfo;
+          const resolvedIsGitRepo =
+            typeof data.isGitRepo === 'boolean'
+              ? data.isGitRepo
+              : (currentWsInfo?.isGitRepo ?? true);
+          set({
+            branches: data.branches,
+            currentBranch: nextBranch,
+            ...(currentWsInfo
+              ? {
+                  workspaceInfo: {
+                    ...currentWsInfo,
+                    isGitRepo: resolvedIsGitRepo,
+                    branch: resolvedIsGitRepo
+                      ? (nextBranch || currentWsInfo.branch)
+                      : undefined,
+                  },
+                }
+              : {}),
+          });
+        }
+      }
+    } catch (err) {
+      console.warn('[createWorkspaceSlice] Failed to fetch branches:', err);
+    } finally {
+      set({ isLoadingBranches: false });
+    }
+  },
+
+  switchBranch: async (branchName, options) => {
+    const root = resolveTargetWorkspaceRoot(get, options?.workspaceRoot);
+
+    set({ isSwitchingBranch: true });
+    try {
+      const res = await apiFetch('/api/git/branches/switch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspaceRoot: root,
+          branch: branchName,
+          create: options?.create,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok && data?.success) {
+        const nextBranch = data.currentBranch || branchName;
+        const currentWsInfo = get().workspaceInfo;
+        const updates: Partial<AgentStoreState> = {
+          currentBranch: nextBranch,
+          ...(currentWsInfo
+            ? {
+                workspaceInfo: {
+                  ...currentWsInfo,
+                  branch: nextBranch,
+                },
+              }
+            : {}),
+        };
+        if (Array.isArray(data.branches)) {
+          updates.branches = data.branches;
+        }
+        set(updates as any);
+        if (!Array.isArray(data.branches)) {
+          await get().fetchBranches(root);
+        }
+        get().loadDirectory('');
+        return { success: true, message: data.message };
+      }
+      return { success: false, message: data?.message || '切換分支失敗' };
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : '切換分支失敗';
+      return { success: false, message };
+    } finally {
+      set({ isSwitchingBranch: false });
     }
   },
 

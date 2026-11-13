@@ -8,6 +8,7 @@ import type {
   FileAttachment,
   FileDiff,
   FileNode,
+  GitBranchInfo,
   GoogleAuthInfo,
   LLMProviderType,
   ModelInfo,
@@ -34,6 +35,7 @@ export type {
   FileAttachment,
   FileDiff,
   FileNode,
+  GitBranchInfo,
   GoogleAuthInfo,
   LLMProviderType,
   ModelInfo,
@@ -97,6 +99,10 @@ export interface WorkspaceSliceState {
   isLoadingSkills: boolean;
   fileDiagnostics: Record<string, import('@harni/types').FileDiagnostic[]>;
   checkpoints: import('@harni/types').CheckpointInfo[];
+  branches: GitBranchInfo[];
+  currentBranch: string;
+  isLoadingBranches: boolean;
+  isSwitchingBranch: boolean;
   activeWorktrees: Record<string, { isWorktree: boolean; branch?: string; path?: string }>;
   isRevertingCheckpoint: boolean;
   ws: WebSocket | null;
@@ -125,6 +131,11 @@ export interface WorkspaceSliceActions {
   discardWorktree: (sessionId: string) => Promise<boolean>;
   fetchCheckpoints: (workspaceRoot?: string) => Promise<void>;
   pruneCheckpoints: (maxRetained?: number) => Promise<void>;
+  fetchBranches: (workspaceRoot?: string) => Promise<void>;
+  switchBranch: (
+    branchName: string,
+    options?: { create?: boolean; workspaceRoot?: string },
+  ) => Promise<{ success: boolean; message?: string }>;
   sendTerminalInput: (data: string) => void;
   resizeTerminal: (cols: number, rows: number) => void;
   registerTerminalDataCallback: (cb: (data: string) => void) => void;

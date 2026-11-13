@@ -286,4 +286,71 @@ describe('GitCheckpointService & Worktree Unit Tests', () => {
 
     expect(service.getCheckpoints(gitRepoDir).some((c) => c.sessionId === targetSession)).toBe(false);
   });
+
+  it('lists branches correctly and filters internal task branches', async () => {
+    // Non-git directory check
+    const nonGitRes = await service.listBranches(nonGitDir);
+    expect(nonGitRes.isGitRepo).toBe(false);
+    expect(nonGitRes.branches).toEqual([]);
+
+    // Create a regular branch and an internal cline/task-* branch
+    await execFileAsync('git', ['branch', 'feature/test-branch'], { cwd: gitRepoDir });
+    await execFileAsync('git', ['branch', 'cline/task-temp-work'], { cwd: gitRepoDir });
+
+    const res = await service.listBranches(gitRepoDir);
+    expect(res.isGitRepo).toBe(true);
+    expect(res.currentBranch).toBeTruthy();
+
+    const branchNames = res.branches.map((b) => b.name);
+    expect(branchNames).toContain('feature/test-branch');
+    // cline/task-temp-work must be filtered out because it is not current
+    expect(branchNames).not.toContain('cline/task-temp-work');
+
+    const currentBranchObj = res.branches.find((b) => b.current);
+    expect(currentBranchObj).toBeDefined();
+    expect(currentBranchObj?.name).toBe(res.currentBranch);
+    expect(res.branches[0].current).toBe(true); // current is sorted first
+
+    // Clean up created branch
+    await execFileAsync('git', ['branch', '-D', 'feature/test-branch'], { cwd: gitRepoDir });
+    await execFileAsync('git', ['branch', '-D', 'cline/task-temp-work'], { cwd: gitRepoDir });
+  });
+
+  it('switches and creates branches with validation', async () => {
+    const originalBranch = await service.getCurrentBranch(gitRepoDir);
+
+    // Non-git directory check
+    const nonGitRes = await service.switchBranch(nonGitDir, 'main');
+    expect(nonGitRes.success).toBe(false);
+    expect(nonGitRes.message).toContain('不是 Git 儲存庫');
+
+    // Invalid branch names
+    const invalidNames = ['-invalid', 'invalid..name', 'invalid name', 'invalid:name', 'invalid?name'];
+    for (const badName of invalidNames) {
+      const badRes = await service.switchBranch(gitRepoDir, badName);
+      expect(badRes.success).toBe(false);
+      expect(badRes.message).toBe('無效的分支名稱');
+    }
+
+    // Create and switch to new branch
+    const newBranch = 'feature/new-switch-test';
+    const createRes = await service.switchBranch(gitRepoDir, newBranch, { create: true });
+    expect(createRes.success).toBe(true);
+    expect(createRes.currentBranch).toBe(newBranch);
+    expect(await service.getCurrentBranch(gitRepoDir)).toBe(newBranch);
+
+    // Switch back to original branch
+    const switchBackRes = await service.switchBranch(gitRepoDir, originalBranch);
+    expect(switchBackRes.success).toBe(true);
+    expect(switchBackRes.currentBranch).toBe(originalBranch);
+    expect(await service.getCurrentBranch(gitRepoDir)).toBe(originalBranch);
+
+    // Switching to already current branch succeeds as a no-op
+    const noopRes = await service.switchBranch(gitRepoDir, originalBranch);
+    expect(noopRes.success).toBe(true);
+    expect(noopRes.message).toContain('已在分支');
+
+    // Clean up created branch
+    await execFileAsync('git', ['branch', '-D', newBranch], { cwd: gitRepoDir });
+  });
 });

@@ -100,3 +100,32 @@ export interface WorktreeStatusInfo {
   discarded?: boolean;
   baseCommit?: string;
 }
+
+/**
+ * Single Git branch metadata
+ */
+export interface GitBranchInfo {
+  name: string;
+  current: boolean;
+  commit?: string;
+}
+
+/**
+ * Response payload for listing Git branches
+ */
+export interface GitBranchesResponse {
+  isGitRepo: boolean;
+  currentBranch: string;
+  branches: GitBranchInfo[];
+}
+
+/**
+ * Result payload for switching or creating a Git branch
+ */
+export interface GitBranchSwitchResult {
+  success: boolean;
+  currentBranch: string;
+  message: string;
+  branches?: GitBranchInfo[];
+}
+

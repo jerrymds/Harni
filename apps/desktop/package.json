@@ -44,7 +44,7 @@
     "asarUnpack": [
       "**/node_modules/node-pty/**"
     ],
-    "npmRebuild": true,
+    "npmRebuild": false,
     "win": {
       "target": [
         "nsis"

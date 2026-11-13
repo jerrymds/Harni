@@ -739,5 +739,97 @@ describe('useAgentStore and Slices', () => {
       globalThis.WebSocket = originalWS;
     }
   });
+
+  it('handles fetchBranches and switchBranch actions correctly', async () => {
+    const mockBranches = [
+      { name: 'main', current: true },
+      { name: 'feature/auth', current: false },
+    ];
+
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: any) => {
+      const url = String(input);
+      if (url.includes('/api/git/branches/switch')) {
+        return new Response(
+          JSON.stringify({
+            success: true,
+            currentBranch: 'feature/auth',
+            message: '已切換至分支 feature/auth',
+            branches: [
+              { name: 'feature/auth', current: true },
+              { name: 'main', current: false },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      if (url.includes('/api/git/branches')) {
+        return new Response(
+          JSON.stringify({
+            isGitRepo: true,
+            currentBranch: 'main',
+            branches: mockBranches,
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+
+    useAgentStore.setState({
+      workspaceInfo: { rootPath: '/test/workspace', totalFiles: 10, isGitRepo: true, branch: 'main' },
+      branches: [],
+      currentBranch: '',
+    });
+
+    // 1. Fetch branches
+    await useAgentStore.getState().fetchBranches('/test/workspace');
+    expect(useAgentStore.getState().branches).toEqual(mockBranches);
+    expect(useAgentStore.getState().currentBranch).toBe('main');
+
+    // 2. Switch branch
+    const switchRes = await useAgentStore.getState().switchBranch('feature/auth');
+    expect(switchRes.success).toBe(true);
+    expect(useAgentStore.getState().currentBranch).toBe('feature/auth');
+    expect(useAgentStore.getState().workspaceInfo?.branch).toBe('feature/auth');
+
+    fetchSpy.mockRestore();
+  });
+
+  it('clears workspaceInfo.branch and sets isGitRepo to false when backend reports non-git repo', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: any) => {
+      const url = String(input);
+      if (url.includes('/api/git/branches')) {
+        return new Response(
+          JSON.stringify({
+            isGitRepo: false,
+            currentBranch: '',
+            branches: [],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
+      return new Response(JSON.stringify({}), { status: 200 });
+    });
+
+    useAgentStore.setState({
+      workspaceInfo: {
+        rootPath: '/test/non-git-dir',
+        totalFiles: 5,
+        isGitRepo: true,
+        branch: 'main',
+      },
+      branches: [{ name: 'main', current: true }],
+      currentBranch: 'main',
+    });
+
+    await useAgentStore.getState().fetchBranches('/test/non-git-dir');
+
+    expect(useAgentStore.getState().branches).toEqual([]);
+    expect(useAgentStore.getState().currentBranch).toBe('');
+    expect(useAgentStore.getState().workspaceInfo?.isGitRepo).toBe(false);
+    expect(useAgentStore.getState().workspaceInfo?.branch).toBeUndefined();
+
+    fetchSpy.mockRestore();
+  });
 });
 
