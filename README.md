@@ -25,10 +25,10 @@
   - 當架構方向分歧或需求模糊時，Agent 主動調用 `ask_question` 工具發起結構化選項提問卡片。
   - 前端以 `QuestionCard` 渲染題目背景、單選/多選選項切換與自訂補充文字框，使用者確認後無縫恢復 Agent 自主編程。
 - **版本控制：Git Checkpoint 快照、一鍵復原與 Worktree 隔離沙盒**：
-  - **自動影子快照 (Shadow Commit / Stash)**：Agent 修改代碼前自動建立 `refs/cline/checkpoints/<id>` 快照，乾淨與未暫存骯髒工作區均受完整備份保護。
+  - **自動影子快照 (Shadow Commit / Stash)**：Agent 修改代碼前自動建立 `refs/harni/checkpoints/<id>` 快照，乾淨與未暫存骯髒工作區均受完整備份保護。
   - **一鍵無損還原 (One-Click Revert)**：頂部常駐「還原到本次任務前 (Rollback)」按鈕，一鍵還原 commit、物理清理任務期間新增的 untracked 檔案並恢復使用者的 stash。
-  - **Git Worktree 隔離沙盒**：在 `.cline-worktrees/<sessionId>` 建立獨立分支進行探索，Windows NTFS Junction / POSIX Symlink 零額外磁碟開銷，徹底不干擾主工作區。
-  - **生命週期修剪**：自動依 `maxRetained` 修剪過期快照，定期清理無效的 `cline/task-*` 孤兒分支。
+  - **Git Worktree 隔離沙盒**：在 `.harni-worktrees/<sessionId>` 建立獨立分支進行探索，Windows NTFS Junction / POSIX Symlink 零額外磁碟開銷，徹底不干擾主工作區。
+  - **生命週期修剪**：自動依 `maxRetained` 修剪過期快照，定期清理無效的 `harni/task-*` 孤兒分支。
 - **自動測試驅動修復 (Auto Test-Driven Repair / Self-Correction)**：
   - Agent 在修改代碼後，系統自動於背景觸發單元測試（智慧探測 `pnpm test`, `npm test`, `pytest`, `cargo test`, `go test` 或自訂指令）。
   - **自癒閉環**：若測試失敗，系統精準擷取錯誤堆疊 (Error Stacktrace) 並自動注入為下一輪 Observation，讓 Agent 自主修復直到測試全數通過才通知使用者（具備熔斷保護）。

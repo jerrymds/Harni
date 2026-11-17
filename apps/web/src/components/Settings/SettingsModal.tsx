@@ -72,8 +72,6 @@ export const SettingsModal: React.FC = () => {
     deleteCustomProvider,
     autoApprove,
     setAutoApprove,
-    autoTestEnabled,
-    setAutoTestEnabled,
     autoTestCommand,
     setAutoTestCommand,
     subagentsEnabled,
@@ -119,6 +117,10 @@ export const SettingsModal: React.FC = () => {
     currentSessionId,
     antigravityMode,
     setAntigravityMode,
+    workflowPlugins,
+    isLoadingPlugins,
+    fetchWorkflowPlugins,
+    toggleWorkflowPlugin,
   } = useAgentStore(
     useShallow((s) => ({
       isSettingsOpen: s.isSettingsOpen,
@@ -147,8 +149,6 @@ export const SettingsModal: React.FC = () => {
       deleteCustomProvider: s.deleteCustomProvider,
       autoApprove: s.autoApprove,
       setAutoApprove: s.setAutoApprove,
-      autoTestEnabled: s.autoTestEnabled,
-      setAutoTestEnabled: s.setAutoTestEnabled,
       autoTestCommand: s.autoTestCommand,
       setAutoTestCommand: s.setAutoTestCommand,
       gitCheckpointEnabled: s.gitCheckpointEnabled,
@@ -194,6 +194,10 @@ export const SettingsModal: React.FC = () => {
       fetchOpenAIAuthStatus: s.fetchOpenAIAuthStatus,
       loginWithOpenAI: s.loginWithOpenAI,
       logoutOpenAI: s.logoutOpenAI,
+      workflowPlugins: s.workflowPlugins,
+      isLoadingPlugins: s.isLoadingPlugins,
+      fetchWorkflowPlugins: s.fetchWorkflowPlugins,
+      toggleWorkflowPlugin: s.toggleWorkflowPlugin,
     }))
   );
 
@@ -224,7 +228,6 @@ export const SettingsModal: React.FC = () => {
   const [baseUrlInput, setBaseUrlInput] = useState(providerBaseUrls[selectedProvider] || '');
   const [providerNameInput, setProviderNameInput] = useState(customProviderName);
   const [autoApproveInput, setAutoApproveInput] = useState(autoApprove);
-  const [autoTestEnabledInput, setAutoTestEnabledInput] = useState(autoTestEnabled);
   const [autoTestCommandInput, setAutoTestCommandInput] = useState(autoTestCommand);
   const [gitCheckpointEnabledInput, setGitCheckpointEnabledInput] = useState(gitCheckpointEnabled);
   const [worktreeIsolationEnabledInput, setWorktreeIsolationEnabledInput] = useState(worktreeIsolationEnabled);
@@ -253,6 +256,7 @@ export const SettingsModal: React.FC = () => {
 
   useEffect(() => {
     if (isSettingsOpen) {
+      fetchWorkflowPlugins();
       setCustomModelInput(selectedModel);
       const initialCtx = (selectedModel && modelContextWindows[selectedModel]) || contextWindow;
       setContextInput(initialCtx ? String(initialCtx) : '');
@@ -262,7 +266,6 @@ export const SettingsModal: React.FC = () => {
       setApiKeyInput(credentials[selectedProvider]?.maskedKey || '');
       setProviderNameInput(customProviderName);
       setAutoApproveInput(autoApprove);
-      setAutoTestEnabledInput(autoTestEnabled);
       setAutoTestCommandInput(autoTestCommand);
       setGitCheckpointEnabledInput(gitCheckpointEnabled);
       setWorktreeIsolationEnabledInput(worktreeIsolationEnabled);
@@ -291,6 +294,13 @@ export const SettingsModal: React.FC = () => {
       fetchSkills();
     }
   }, [isSettingsOpen]);
+
+  useEffect(() => {
+    if (isSettingsOpen) {
+      setGitCheckpointEnabledInput(gitCheckpointEnabled);
+      setWorktreeIsolationEnabledInput(worktreeIsolationEnabled);
+    }
+  }, [isSettingsOpen, gitCheckpointEnabled, worktreeIsolationEnabled]);
 
 
 
@@ -447,7 +457,6 @@ export const SettingsModal: React.FC = () => {
     setProviderBaseUrl(selectedProvider, baseUrlInput.trim());
     setCustomProviderName(providerNameInput.trim());
     setAutoApprove(autoApproveInput);
-    setAutoTestEnabled(autoTestEnabledInput);
     setAutoTestCommand(autoTestCommandInput.trim());
     setGitCheckpointEnabled(gitCheckpointEnabledInput);
     setWorktreeIsolationEnabled(worktreeIsolationEnabledInput);
@@ -1243,153 +1252,6 @@ tools: run_command, read_file, edit_file
                 </div>
               </div>
 
-              {/* Auto Test-Driven Repair Banner */}
-              <div
-                className={`rounded-2xl border p-4 space-y-3 shadow-soft transition-all duration-200 ${
-                  autoTestEnabledInput
-                    ? 'border-indigo-400/40 bg-indigo-500/10 text-ag-textPrimary'
-                    : 'border-ag-border bg-ag-sidebar/40 text-ag-textSecondary'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="space-y-1 max-w-[80%]">
-                    <div className="flex items-center space-x-2 text-xs font-semibold text-ag-textPrimary">
-                      <FlaskConical
-                        className={`h-4 w-4 transition-colors ${
-                          autoTestEnabledInput ? 'text-indigo-500' : 'text-ag-textMuted'
-                        }`}
-                      />
-                      <span>自動測試驅動修復 (Auto Test-Driven Repair)</span>
-                      {autoTestEnabledInput && (
-                        <span className="rounded-full bg-indigo-500/15 border border-indigo-500/30 px-2 py-0.5 font-mono text-[9.5px] text-indigo-600 dark:text-indigo-400 font-semibold">
-                          自癒修復中
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-[11px] text-ag-textSecondary leading-relaxed">
-                      Agent 在修改完代碼後，系統自動在背景執行單元測試。若測試失敗，錯誤堆疊將自動轉為下一輪 Observation 由 Agent 自動重試修復，直到測試全數通過才通知您完成。
-                    </p>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => setAutoTestEnabledInput(!autoTestEnabledInput)}
-                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                      autoTestEnabledInput ? 'bg-indigo-600 shadow-glow-primary' : 'bg-ag-borderHover'
-                    }`}
-                  >
-                    <span
-                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
-                        autoTestEnabledInput ? 'translate-x-5' : 'translate-x-0'
-                      }`}
-                    />
-                  </button>
-                </div>
-
-                {autoTestEnabledInput && (
-                  <div className="pt-2 border-t border-ag-border/50">
-                    <label className="block text-[11px] font-medium text-ag-textSecondary mb-1">
-                      自訂測試指令 (選填，留空將自動偵測 pnpm / npm / yarn / bun / pytest / cargo / go test):
-                    </label>
-                    <input
-                      type="text"
-                      value={autoTestCommandInput}
-                      onChange={(e) => setAutoTestCommandInput(e.target.value)}
-                      placeholder="例如: pnpm test 或 vitest run --project core"
-                      className="w-full rounded-xl border border-ag-border bg-ag-panel px-3 py-1.5 font-mono text-xs text-ag-textPrimary placeholder:text-ag-textMuted focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                    />
-                  </div>
-                )}
-              </div>
-
-              {/* Git Checkpoint & Safe Rollback Banner */}
-              <div
-                className={`rounded-2xl border p-4 space-y-3 shadow-soft transition-all duration-200 ${
-                  gitCheckpointEnabledInput
-                    ? 'border-amber-400/40 bg-amber-500/10 text-ag-textPrimary'
-                    : 'border-ag-border bg-ag-sidebar/40 text-ag-textSecondary'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="space-y-1 max-w-[80%]">
-                    <div className="flex items-center space-x-2 text-xs font-semibold text-ag-textPrimary">
-                      <RotateCcw
-                        className={`h-4 w-4 transition-colors ${
-                          gitCheckpointEnabledInput ? 'text-amber-500' : 'text-ag-textMuted'
-                        }`}
-                      />
-                      <span>自動 Git Checkpoint 快照與一鍵復原 (Safe Rollback)</span>
-                      {gitCheckpointEnabledInput && (
-                        <span className="rounded-full bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 font-mono text-[9.5px] text-amber-800 dark:text-amber-300 font-semibold">
-                          安全守護中
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-[11px] text-ag-textSecondary leading-relaxed">
-                      在 Agent 開始執行任何檔案修改前，自動建立影子快照（Shadow Commit / Stash）。若 Agent 修改方向偏差或失敗，可隨時一鍵還原工作區，消除「AI 把專案改壞修不回去」的焦慮。
-                    </p>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => setGitCheckpointEnabledInput(!gitCheckpointEnabledInput)}
-                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                      gitCheckpointEnabledInput ? 'bg-amber-500 shadow-glow-primary' : 'bg-ag-borderHover'
-                    }`}
-                  >
-                    <span
-                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
-                        gitCheckpointEnabledInput ? 'translate-x-5' : 'translate-x-0'
-                      }`}
-                    />
-                  </button>
-                </div>
-              </div>
-
-              {/* Git Worktree Isolation Banner */}
-              <div
-                className={`rounded-2xl border p-4 space-y-3 shadow-soft transition-all duration-200 ${
-                  worktreeIsolationEnabledInput
-                    ? 'border-emerald-400/40 bg-emerald-500/10 text-ag-textPrimary'
-                    : 'border-ag-border bg-ag-sidebar/40 text-ag-textSecondary'
-                }`}
-              >
-                <div className="flex items-center justify-between">
-                  <div className="space-y-1 max-w-[80%]">
-                    <div className="flex items-center space-x-2 text-xs font-semibold text-ag-textPrimary">
-                      <GitBranch
-                        className={`h-4 w-4 transition-colors ${
-                          worktreeIsolationEnabledInput ? 'text-emerald-500' : 'text-ag-textMuted'
-                        }`}
-                      />
-                      <span>Git Worktree 隔離開發 (Worktree Isolation)</span>
-                      {worktreeIsolationEnabledInput && (
-                        <span className="rounded-full bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 font-mono text-[9.5px] text-emerald-800 dark:text-emerald-300 font-semibold">
-                          沙盒隔離中
-                        </span>
-                      )}
-                    </div>
-                    <p className="text-[11px] text-ag-textSecondary leading-relaxed">
-                      讓背景執行的 Agent 在獨立的 Git Worktree 隔離目錄中作業，共用依賴函式庫，完全不干擾使用者當前編輯中的檔案。待驗證測試通過後再 Merge 回主目錄。
-                    </p>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => setWorktreeIsolationEnabledInput(!worktreeIsolationEnabledInput)}
-                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                      worktreeIsolationEnabledInput ? 'bg-emerald-600 shadow-glow-primary' : 'bg-ag-borderHover'
-                    }`}
-                  >
-                    <span
-                      className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
-                        worktreeIsolationEnabledInput ? 'translate-x-5' : 'translate-x-0'
-                      }`}
-                    />
-                  </button>
-                </div>
-              </div>
-
               {/* Hierarchical Subagents Banner */}
               <div
                 className={`rounded-2xl border p-4 space-y-3 shadow-soft transition-all duration-200 ${
@@ -1485,6 +1347,190 @@ tools: run_command, read_file, edit_file
                   </div>
                 </div>
               )}
+
+              {/* Core Workflow Plugins Pipeline Section */}
+              <div className="space-y-3 rounded-2xl border border-ag-border bg-ag-sidebar/30 p-4 shadow-soft">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2 text-xs font-semibold text-ag-textPrimary">
+                    <Layers className="h-4 w-4 text-ag-primary" />
+                    <span>核心工作流插件管線 (Core Workflow Plugins)</span>
+                    <span className="rounded-full bg-ag-primary/10 border border-ag-primary/20 px-2 py-0.5 font-mono text-[9.5px] text-ag-primary font-semibold">
+                      共 {workflowPlugins.length} 個插件
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => fetchWorkflowPlugins()}
+                    disabled={isLoadingPlugins}
+                    title="重新整理插件列表"
+                    className="flex items-center space-x-1 rounded-lg border border-ag-border bg-ag-panel hover:bg-ag-sidebar text-ag-textSecondary px-2.5 py-1 text-[11px] font-medium transition-all shadow-soft cursor-pointer disabled:opacity-50"
+                  >
+                    <RefreshCw className={`h-3 w-3 ${isLoadingPlugins ? 'animate-spin' : ''}`} />
+                    <span>重新整理</span>
+                  </button>
+                </div>
+
+                <p className="text-[11px] text-ag-textSecondary leading-relaxed">
+                  基於 Microkernel 洋蔥模型架構的 7 大核心工作流插件，涵蓋環境隔離、規則發現、經驗學習、安全防護、語法診斷與自癒測試，可依需求動態開關。
+                </p>
+
+                {isLoadingPlugins && workflowPlugins.length === 0 ? (
+                  <div className="py-6 text-center text-xs text-ag-textMuted flex items-center justify-center space-x-2">
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin text-ag-primary" />
+                    <span>正在載入工作流插件列表...</span>
+                  </div>
+                ) : workflowPlugins.length === 0 ? (
+                  <div className="py-4 text-center text-xs text-ag-textMuted">
+                    尚未載入任何工作流插件
+                  </div>
+                ) : (
+                  <div className="space-y-2.5 max-h-[420px] overflow-y-auto custom-scrollbar pr-1">
+                    {[...workflowPlugins]
+                      .sort((a, b) => a.priority - b.priority)
+                      .map((plugin) => (
+                        <div
+                          key={plugin.id}
+                          className={`rounded-xl border p-3 space-y-2 transition-all duration-200 ${
+                            plugin.enabled
+                              ? 'border-ag-border bg-ag-panel shadow-soft'
+                              : 'border-ag-border/60 bg-ag-sidebar/40 opacity-70'
+                          }`}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="space-y-1">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="font-semibold text-xs text-ag-textPrimary">
+                                  {plugin.name}
+                                </span>
+                                <span className="rounded-full bg-ag-sidebar border border-ag-border px-1.5 py-0.5 font-mono text-[9px] text-ag-textSecondary">
+                                  Priority {plugin.priority}
+                                </span>
+                                {plugin.category && (
+                                  <span className="rounded-full bg-indigo-500/10 border border-indigo-500/20 px-1.5 py-0.5 font-mono text-[9px] text-indigo-600 dark:text-indigo-400">
+                                    {plugin.category}
+                                  </span>
+                                )}
+                                {plugin.applyToSubagents && (
+                                  <span className="rounded-full bg-purple-500/10 border border-purple-500/20 px-1.5 py-0.5 font-mono text-[9px] text-purple-700 dark:text-purple-300">
+                                    Subagent 共用
+                                  </span>
+                                )}
+                              </div>
+                              <div className="font-mono text-[10px] text-ag-textMuted">
+                                {plugin.id}
+                              </div>
+                            </div>
+
+                            <button
+                              type="button"
+                              aria-label={`切換 ${plugin.name} 狀態`}
+                              onClick={() => toggleWorkflowPlugin(plugin.id, !plugin.enabled)}
+                              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none mt-0.5 ${
+                                plugin.enabled ? 'bg-ag-primary shadow-glow-primary' : 'bg-ag-borderHover'
+                              }`}
+                            >
+                              <span
+                                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                                  plugin.enabled ? 'translate-x-4' : 'translate-x-0'
+                                }`}
+                              />
+                            </button>
+                          </div>
+
+                          <p className="text-[11px] text-ag-textSecondary leading-relaxed">
+                            {plugin.description}
+                          </p>
+
+                          {plugin.id === 'harni.git-workspace' && plugin.enabled && (
+                            <div className="mt-2 pt-2.5 border-t border-ag-border/60 space-y-2.5">
+                              {/* Safe Rollback Checkpoint Toggle */}
+                              <div className="flex items-center justify-between gap-2 rounded-lg border border-ag-border/60 bg-ag-sidebar/40 px-3 py-2">
+                                <div className="space-y-0.5 max-w-[82%]">
+                                  <div className="flex items-center space-x-1.5 text-[11px] font-medium text-ag-textPrimary">
+                                    <RotateCcw
+                                      className={`h-3.5 w-3.5 transition-colors ${
+                                        gitCheckpointEnabledInput ? 'text-amber-500' : 'text-ag-textMuted'
+                                      }`}
+                                    />
+                                    <span>自動 Git Checkpoint 快照 (Safe Rollback)</span>
+                                  </div>
+                                  <p className="text-[10.5px] text-ag-textMuted leading-relaxed">
+                                    修改檔案前自動建立影子快照，失敗時可一鍵還原工作區。
+                                  </p>
+                                </div>
+                                <button
+                                  type="button"
+                                  aria-label="切換 自動 Git Checkpoint 快照"
+                                  onClick={() => setGitCheckpointEnabledInput(!gitCheckpointEnabledInput)}
+                                  className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                                    gitCheckpointEnabledInput ? 'bg-amber-500 shadow-glow-primary' : 'bg-ag-borderHover'
+                                  }`}
+                                >
+                                  <span
+                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                                      gitCheckpointEnabledInput ? 'translate-x-4' : 'translate-x-0'
+                                    }`}
+                                  />
+                                </button>
+                              </div>
+
+                              {/* Worktree Isolation Toggle */}
+                              <div className="flex items-center justify-between gap-2 rounded-lg border border-ag-border/60 bg-ag-sidebar/40 px-3 py-2">
+                                <div className="space-y-0.5 max-w-[82%]">
+                                  <div className="flex items-center space-x-1.5 text-[11px] font-medium text-ag-textPrimary">
+                                    <GitBranch
+                                      className={`h-3.5 w-3.5 transition-colors ${
+                                        worktreeIsolationEnabledInput ? 'text-emerald-500' : 'text-ag-textMuted'
+                                      }`}
+                                    />
+                                    <span>Git Worktree 隔離開發 (Worktree Isolation)</span>
+                                  </div>
+                                  <p className="text-[10.5px] text-ag-textMuted leading-relaxed">
+                                    在獨立的 Git Worktree 隔離目錄中作業，測試通過後再合併回主目錄。
+                                  </p>
+                                </div>
+                                <button
+                                  type="button"
+                                  aria-label="切換 Git Worktree 隔離開發"
+                                  onClick={() => setWorktreeIsolationEnabledInput(!worktreeIsolationEnabledInput)}
+                                  className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                                    worktreeIsolationEnabledInput ? 'bg-emerald-600 shadow-glow-primary' : 'bg-ag-borderHover'
+                                  }`}
+                                >
+                                  <span
+                                    className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                                      worktreeIsolationEnabledInput ? 'translate-x-4' : 'translate-x-0'
+                                    }`}
+                                  />
+                                </button>
+                              </div>
+                            </div>
+                          )}
+
+                          {plugin.id === 'harni.auto-test-repair' && plugin.enabled && (
+                            <div className="mt-2 pt-2.5 border-t border-ag-border/60 space-y-1.5">
+                              <label
+                                htmlFor="auto-test-command-input"
+                                className="flex items-center space-x-1.5 text-[11px] font-medium text-ag-textSecondary"
+                              >
+                                <FlaskConical className="h-3.5 w-3.5 text-indigo-500" />
+                                <span>自訂測試指令 (選填，留空將自動偵測 pnpm / npm / yarn / bun / pytest / cargo / go test):</span>
+                              </label>
+                              <input
+                                id="auto-test-command-input"
+                                type="text"
+                                value={autoTestCommandInput}
+                                onChange={(e) => setAutoTestCommandInput(e.target.value)}
+                                placeholder="例如: pnpm test 或 vitest run --project core"
+                                className="w-full rounded-xl border border-ag-border bg-ag-sidebar/40 px-3 py-1.5 font-mono text-xs text-ag-textPrimary placeholder:text-ag-textMuted focus:border-indigo-500 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </div>
 
               {/* Built-in Tools List */}
               <div className="space-y-3">

@@ -67,23 +67,25 @@ export class WriteFileTool extends BaseTool<WriteFileParams> {
       let output = `Successfully wrote ${params.content.length} characters to ${params.path} (${isNewFile ? 'new file' : 'updated'})`;
 
       // Instant Syntax & Linter Diagnostics Feedback
-      try {
-        const diagResult = await SyntaxLinterService.diagnoseFile({
-          filePath: safePath,
-          workspaceRoot: context.workspaceRoot,
-          content: params.content,
-        });
+      if (!context.skipInlineDiagnostics) {
+        try {
+          const diagResult = await SyntaxLinterService.diagnoseFile({
+            filePath: safePath,
+            workspaceRoot: context.workspaceRoot,
+            content: params.content,
+          });
 
-        if (diagResult.diagnostics.length > 0) {
-          if (context.onDiagnostics) {
-            context.onDiagnostics(diagResult);
+          if (diagResult.diagnostics.length > 0) {
+            if (context.onDiagnostics) {
+              context.onDiagnostics(diagResult);
+            }
+            if (diagResult.formattedOutput) {
+              output += `\n${diagResult.formattedOutput}`;
+            }
           }
-          if (diagResult.formattedOutput) {
-            output += `\n${diagResult.formattedOutput}`;
-          }
+        } catch {
+          // Non-blocking for file writing
         }
-      } catch {
-        // Non-blocking for file writing
       }
 
       return {

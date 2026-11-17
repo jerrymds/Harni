@@ -37,7 +37,6 @@ export class DBService {
     const harniDir = path.join(os.homedir(), '.harni');
     const defaultPath =
       process.env.HARNI_DB_PATH ||
-      process.env.CLINE_DB_PATH ||
       path.join(harniDir, 'harni.db');
     this.dbPath = path.resolve(options.dbPath || defaultPath);
     this.security = options.securityService || SecurityService.getInstance();
@@ -45,24 +44,6 @@ export class DBService {
     const dir = path.dirname(this.dbPath);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
-    }
-
-    // Auto-migration: If default harni.db does not exist yet but legacy cline.db exists, migrate it
-    if (
-      !options.dbPath &&
-      !process.env.HARNI_DB_PATH &&
-      !process.env.CLINE_DB_PATH &&
-      !fs.existsSync(this.dbPath)
-    ) {
-      const legacyDbPath = path.join(os.homedir(), '.cline-web', 'cline.db');
-      if (fs.existsSync(legacyDbPath)) {
-        try {
-          fs.copyFileSync(legacyDbPath, this.dbPath);
-          console.log(`[DBService] Migrated legacy database from ${legacyDbPath} to ${this.dbPath}`);
-        } catch (err) {
-          console.warn(`[DBService] Failed to migrate legacy database:`, err);
-        }
-      }
     }
 
     this.db = new DatabaseSync(this.dbPath);
@@ -523,6 +504,13 @@ export class DBService {
     stmt.run(provider, encrypted, Date.now());
   }
 
+  private updateMigratedCredential(provider: string, migratedCipherText: string): void {
+    const stmt = this.db.prepare(
+      'UPDATE credentials SET encrypted_key = ?, updated_at = ? WHERE provider = ?',
+    );
+    stmt.run(migratedCipherText, Date.now(), provider);
+  }
+
   /**
    * Retrieves and decrypts the API Key for a provider.
    * Falls back to environment variable if not found in database.
@@ -534,9 +522,16 @@ export class DBService {
 
     if (row && row.encrypted_key) {
       try {
-        const decrypted = this.security.decrypt(row.encrypted_key);
-        if (decrypted && decrypted.trim()) {
-          return decrypted.trim();
+        const { plainText, migratedCipherText } = this.security.decryptAndMigrate(row.encrypted_key);
+        if (migratedCipherText) {
+          try {
+            this.updateMigratedCredential(provider, migratedCipherText);
+          } catch (migrateErr) {
+            console.warn(`[DBService] Failed to persist migrated API key for ${provider}:`, migrateErr);
+          }
+        }
+        if (plainText && plainText.trim()) {
+          return plainText.trim();
         }
       } catch (err) {
         console.warn(`[DBService] Failed to decrypt API key for provider ${provider}:`, err);
@@ -585,12 +580,20 @@ export class DBService {
    * credential slot (e.g. `anthropic-oauth`). Returns null if absent or unparseable.
    */
   public getOAuthPayload(provider: string): Record<string, any> | null {
+    const credentialKey = `${provider}-oauth`;
     const stmt = this.db.prepare('SELECT encrypted_key FROM credentials WHERE provider = ?');
-    const row = stmt.get(`${provider}-oauth`) as { encrypted_key: string } | undefined;
+    const row = stmt.get(credentialKey) as { encrypted_key: string } | undefined;
     if (!row || !row.encrypted_key) return null;
     try {
-      const decrypted = this.security.decrypt(row.encrypted_key);
-      const parsed = JSON.parse(decrypted);
+      const { plainText, migratedCipherText } = this.security.decryptAndMigrate(row.encrypted_key);
+      if (migratedCipherText) {
+        try {
+          this.updateMigratedCredential(credentialKey, migratedCipherText);
+        } catch (migrateErr) {
+          console.warn(`[DBService] Failed to persist migrated OAuth payload for ${provider}:`, migrateErr);
+        }
+      }
+      const parsed = JSON.parse(plainText);
       return parsed && typeof parsed === 'object' ? parsed : null;
     } catch (err) {
       console.warn(`[DBService] Failed to decode OAuth payload for ${provider}:`, err);

@@ -1,6 +1,5 @@
 import { EventEmitter } from 'node:events';
 import * as path from 'node:path';
-import * as fs from 'node:fs/promises';
 import * as crypto from 'node:crypto';
 import * as os from 'node:os';
 import { ContextManager } from './context/contextManager.js';
@@ -11,9 +10,10 @@ import { ToolRegistry } from './tools/toolRegistry.js';
 import { SkillRegistry } from './skills/skillRegistry.js';
 import { McpServerManager } from './mcp/mcpServerManager.js';
 import { SubagentManager } from './subagents/subagentManager.js';
+import { SchedulerService } from './scheduler/schedulerService.js';
+import { SwarmBoardService } from './swarm/swarmBoardService.js';
 import { AutoTestRunner } from './testing/autoTestRunner.js';
 import { GitCheckpointService } from './git/gitCheckpointService.js';
-import { parseRateLimitError } from './utils/rateLimit.js';
 import { ExperienceManager } from './harness/experienceManager.js';
 import { ContrastiveProbeRunner } from './harness/contrastiveProbeRunner.js';
 import type { ToolExecutionContext } from './tools/baseTool.js';
@@ -32,7 +32,6 @@ import type {
   GitBranchSwitchResult,
   HarnessExperience,
   LLMProviderType,
-  ProbeCandidate,
   ServerToClientEvents,
   SubagentModelTier,
   TaskState,
@@ -40,7 +39,16 @@ import type {
   ToolCallRequest,
   ToolResult,
   WorktreeStatusInfo,
+  WorkflowPlugin,
+  WorkflowPluginContext,
+  ToolCallMiddlewareContext,
 } from '@harni/types';
+import {
+  WorkflowPluginManager,
+  createDefaultWorkflowPlugins,
+  ExperienceLearningPlugin,
+  AutoTestRepairPlugin,
+} from './plugins/index.js';
 import type { McpServerConfig } from './mcp/mcpTypes.js';
 import type { McpManagerConnectResult } from './mcp/mcpServerManager.js';
 
@@ -72,6 +80,16 @@ export interface AgentEngineConfig {
   experienceStorageDir?: string;
   dynamicHarnessEnabled?: boolean;
   antigravityMode?: AntigravityExecutionMode;
+  pluginManager?: WorkflowPluginManager;
+}
+
+interface WakeupEvent {
+  id: string;
+  source: 'subagent' | 'schedule' | 'message';
+  sourceId?: string;
+  summary: string;
+  payloadText: string;
+  timestamp: number;
 }
 
 interface SessionTask {
@@ -108,6 +126,10 @@ interface SessionTask {
   testFailureDiffs: string[];
   experienceSaved?: boolean;
   pendingExperiencePromise?: Promise<void>;
+  pluginStates: Map<string, unknown>;
+  wakeupQueue: WakeupEvent[];
+  isLoopRunning: boolean;
+  lastProvider?: BaseLLMProvider;
 }
 
 export class AgentCoreEngine extends EventEmitter {
@@ -127,13 +149,53 @@ export class AgentCoreEngine extends EventEmitter {
   private skillRegistry: SkillRegistry;
   private mcpManager: McpServerManager;
   private subagentManager: SubagentManager;
+  private schedulerService: SchedulerService;
+  private swarmBoardService: SwarmBoardService;
   private gitCheckpointService: GitCheckpointService;
   private mcpEnabled: boolean = false;
   private mcpServers?: Record<string, McpServerConfig>;
+  private pluginManager: WorkflowPluginManager;
+
   public autoApprove: boolean = false;
-  public autoTestEnabled: boolean = true;
-  public gitCheckpointEnabled: boolean = true;
-  public worktreeIsolationEnabled: boolean = false;
+
+  private _autoTestEnabled: boolean = true;
+  public get autoTestEnabled(): boolean {
+    return (
+      this._autoTestEnabled &&
+      (this.pluginManager?.isPluginEnabled('harni.auto-test-repair') ?? true)
+    );
+  }
+  public set autoTestEnabled(enabled: boolean) {
+    this._autoTestEnabled = enabled;
+    this.pluginManager?.setPluginEnabled('harni.auto-test-repair', enabled);
+  }
+
+  private _gitCheckpointEnabled: boolean = true;
+  public get gitCheckpointEnabled(): boolean {
+    return this._gitCheckpointEnabled;
+  }
+  public set gitCheckpointEnabled(enabled: boolean) {
+    this._gitCheckpointEnabled = enabled;
+    if (!enabled && !this._worktreeIsolationEnabled) {
+      this.pluginManager?.setPluginEnabled('harni.git-workspace', false);
+    } else if (enabled) {
+      this.pluginManager?.setPluginEnabled('harni.git-workspace', true);
+    }
+  }
+
+  private _worktreeIsolationEnabled: boolean = false;
+  public get worktreeIsolationEnabled(): boolean {
+    return this._worktreeIsolationEnabled;
+  }
+  public set worktreeIsolationEnabled(enabled: boolean) {
+    this._worktreeIsolationEnabled = enabled;
+    if (!enabled && !this._gitCheckpointEnabled) {
+      this.pluginManager?.setPluginEnabled('harni.git-workspace', false);
+    } else if (enabled) {
+      this.pluginManager?.setPluginEnabled('harni.git-workspace', true);
+    }
+  }
+
   public worktreeTimeoutMs: number = 180000;
   public subagentsEnabled: boolean = true;
   private _dynamicHarnessEnabled: boolean = true;
@@ -144,7 +206,18 @@ export class AgentCoreEngine extends EventEmitter {
     this._dynamicHarnessEnabled = enabled;
     this.subagentManager?.setDynamicHarnessEnabled(enabled);
   }
-  public experienceLearningEnabled: boolean = false;
+
+  private _experienceLearningEnabled: boolean = false;
+  public get experienceLearningEnabled(): boolean {
+    return this._experienceLearningEnabled;
+  }
+  public set experienceLearningEnabled(enabled: boolean) {
+    this._experienceLearningEnabled = enabled;
+    this.pluginManager?.setPluginEnabled('harni.experience-learning', enabled);
+    if (enabled && !this.experienceManager) {
+      this.experienceManager = this.getExperienceManagerForRoot(this.workspaceRoot);
+    }
+  }
   private experienceStorageDir?: string;
   public experienceManager?: ExperienceManager;
   private experienceManagersByRoot = new Map<string, ExperienceManager>();
@@ -155,6 +228,30 @@ export class AgentCoreEngine extends EventEmitter {
   private subagentApprovalQueues = new Map<string, Promise<void>>();
   private subagentQuestionQueues = new Map<string, Promise<void>>();
   private lastActiveSessionId: string = 'default';
+
+  public getPluginManager(): WorkflowPluginManager {
+    return this.pluginManager;
+  }
+
+  public registerPlugin(plugin: WorkflowPlugin): void {
+    this.pluginManager.register(plugin);
+  }
+
+  public unregisterPlugin(pluginId: string): boolean {
+    return this.pluginManager.unregister(pluginId);
+  }
+
+  public setPluginEnabled(pluginId: string, enabled: boolean): void {
+    this.pluginManager.setPluginEnabled(pluginId, enabled);
+    if (pluginId === 'harni.experience-learning') {
+      this._experienceLearningEnabled = enabled;
+      if (enabled && !this.experienceManager) {
+        this.experienceManager = this.getExperienceManagerForRoot(this.workspaceRoot);
+      }
+    } else if (pluginId === 'harni.auto-test-repair') {
+      this._autoTestEnabled = enabled;
+    }
+  }
 
   constructor(config: AgentEngineConfig) {
     super();
@@ -167,25 +264,26 @@ export class AgentCoreEngine extends EventEmitter {
     this.executeTerminalCommand = config.executeTerminalCommand;
     this.mcpEnabled = config.mcpEnabled ?? false;
     this.mcpServers = config.mcpServers;
-    this.autoTestEnabled = config.autoTestEnabled ?? true;
+    this._autoTestEnabled = config.autoTestEnabled ?? true;
     this.defaultTestCommand = config.testCommand;
     this.maxTestRetries = config.maxTestRetries ?? 5;
-    this.gitCheckpointEnabled = config.gitCheckpointEnabled ?? true;
-    this.worktreeIsolationEnabled = config.worktreeIsolationEnabled ?? false;
+    this._gitCheckpointEnabled = config.gitCheckpointEnabled ?? true;
+    this._worktreeIsolationEnabled = config.worktreeIsolationEnabled ?? false;
     this.worktreeTimeoutMs = config.worktreeTimeoutMs ?? 180000;
     this.subagentsEnabled = config.subagentsEnabled ?? true;
     this.dynamicHarnessEnabled = config.dynamicHarnessEnabled ?? true;
-    this.experienceLearningEnabled = config.experienceLearningEnabled ?? false;
+    this._experienceLearningEnabled = config.experienceLearningEnabled ?? false;
     this.experienceStorageDir = config.experienceStorageDir;
-
-    if (this.experienceLearningEnabled) {
-      this.experienceManager = this.getExperienceManagerForRoot(this.workspaceRoot);
-    }
 
     this.gitCheckpointService = new GitCheckpointService();
     this.skillRegistry = new SkillRegistry(true);
     this.toolRegistry = new ToolRegistry(true, this.skillRegistry);
     this.mcpManager = new McpServerManager({ workspaceRoot: config.workspaceRoot });
+    this.schedulerService = new SchedulerService();
+    this.swarmBoardService = new SwarmBoardService();
+
+    this.pluginManager = config.pluginManager ?? new WorkflowPluginManager();
+
     this.subagentManager = new SubagentManager({
       workspaceRoot: config.workspaceRoot,
       defaultProvider: this.defaultProvider,
@@ -201,6 +299,7 @@ export class AgentCoreEngine extends EventEmitter {
       mcpManager: this.mcpManager,
       skillRegistry: this.skillRegistry,
       gitCheckpointService: this.gitCheckpointService,
+      pluginManager: this.pluginManager,
       requestToolApproval: (sessionId, request, signal) =>
         this.handleSubagentToolApproval(sessionId, request, signal),
       askUserQuestion: (sessionId, params, signal) =>
@@ -220,7 +319,40 @@ export class AgentCoreEngine extends EventEmitter {
       },
     });
 
+    if (!config.pluginManager) {
+      const defaultPlugins = createDefaultWorkflowPlugins({
+        gitCheckpointService: this.gitCheckpointService,
+        skillRegistry: this.skillRegistry,
+        subagentManager: this.subagentManager,
+        workspaceRoot: this.workspaceRoot,
+        storageDir: this.experienceStorageDir,
+        getDefaultWorktreeEnabled: () => this.worktreeIsolationEnabled,
+        getDefaultCheckpointEnabled: () => this.gitCheckpointEnabled,
+        getWorktreeTimeoutMs: () => this.worktreeTimeoutMs,
+        getExperienceLearningEnabled: () => this.experienceLearningEnabled,
+        getDefaultAutoTestEnabled: () => this.autoTestEnabled,
+        getDefaultTestCommand: () => this.defaultTestCommand,
+        getDefaultMaxTestRetries: () => this.maxTestRetries,
+        executeTerminalCommand: this.executeTerminalCommand,
+        getBaseCustomInstructions: () => this.customInstructions,
+        experienceManagersByRoot: this.experienceManagersByRoot,
+      });
+      for (const p of defaultPlugins) {
+        this.pluginManager.register(p);
+      }
+      this.pluginManager.setPluginEnabled(
+        'harni.experience-learning',
+        this.experienceLearningEnabled,
+      );
+    }
+
+    if (this.experienceLearningEnabled) {
+      this.experienceManager = this.getExperienceManagerForRoot(this.workspaceRoot);
+    }
+
     this.bindSubagentEvents();
+    this.bindSchedulerEvents();
+    this.bindSwarmEvents();
 
     if (this.gitCheckpointEnabled) {
       this.gitCheckpointService.pruneStaleBranches(this.workspaceRoot).catch((err) => {
@@ -253,6 +385,10 @@ export class AgentCoreEngine extends EventEmitter {
 
   private getExperienceManagerForRoot(rootPath: string): ExperienceManager | undefined {
     if (!this.experienceLearningEnabled) return undefined;
+    const expPlugin = this.pluginManager?.getPlugin<ExperienceLearningPlugin>('harni.experience-learning');
+    if (expPlugin) {
+      return expPlugin.getExperienceManagerForRoot(rootPath);
+    }
     const resolvedRoot = path.resolve(rootPath);
     let mgr = this.experienceManagersByRoot.get(resolvedRoot);
     if (mgr) {
@@ -291,6 +427,136 @@ export class AgentCoreEngine extends EventEmitter {
     return mgr;
   }
 
+  private createPluginContext(
+    sessionTask: SessionTask,
+    signal?: AbortSignal,
+    provider?: BaseLLMProvider,
+  ): WorkflowPluginContext {
+    return {
+      sessionId: sessionTask.sessionId,
+      taskId: sessionTask.taskState.id,
+      isSubagent: false,
+      taskState: sessionTask.taskState,
+      signal: signal ?? sessionTask.abortController?.signal,
+      getWorkspaceRoot: () => sessionTask.workspaceRoot,
+      setWorkspaceRoot: (
+        newRoot: string,
+        meta?: { isWorktree?: boolean; branch?: string },
+      ) => {
+        sessionTask.workspaceRoot = path.resolve(newRoot);
+        if (meta?.isWorktree !== undefined) {
+          sessionTask.isWorktree = meta.isWorktree;
+        }
+        if (meta?.branch !== undefined) {
+          sessionTask.worktreeBranch = meta.branch;
+        }
+        if (sessionTask.isWorktree) {
+          sessionTask.taskState.isWorktree = true;
+          sessionTask.taskState.worktreePath = sessionTask.workspaceRoot;
+          sessionTask.taskState.worktreeBranch = sessionTask.worktreeBranch;
+        }
+        this.syncTaskState(sessionTask);
+      },
+      getMainWorkspaceRoot: () => sessionTask.mainWorkspaceRoot || this.workspaceRoot,
+      getPluginState: <T>(pluginId: string, initializer?: () => T): T => {
+        let s = sessionTask.pluginStates.get(pluginId) as T;
+        if (s === undefined && initializer) {
+          s = initializer();
+          sessionTask.pluginStates.set(pluginId, s);
+        }
+        return s;
+      },
+      setPluginState: <T>(pluginId: string, state: T): void => {
+        sessionTask.pluginStates.set(pluginId, state);
+      },
+      addMessage: (message: ChatMessage) => {
+        sessionTask.contextManager.addMessage(message);
+        this.syncTaskState(sessionTask);
+      },
+      getMessages: () => sessionTask.contextManager.getMessages(),
+      setStatus: (status: AgentStatus) => {
+        this.setStatus(sessionTask, status);
+      },
+      syncTaskState: () => {
+        this.syncTaskState(sessionTask);
+      },
+      emitEvent: <K extends keyof ServerToClientEvents & string>(
+        event: K,
+        payload: ServerToClientEvents[K],
+      ) => {
+        this.emitEvent(event, payload);
+      },
+      invokeLLM: async (prompt: string, systemPrompt?: string): Promise<string> => {
+        if (!provider) {
+          throw new Error('LLM Provider not initialized in plugin context');
+        }
+        const comp = await provider.streamCompletion(
+          [
+            {
+              id: `msg_invoke_${Date.now()}`,
+              role: 'user',
+              content: prompt,
+              timestamp: Date.now(),
+            },
+          ],
+          systemPrompt ||
+            'You are an expert evaluator assessing and comparing code solution candidates.',
+          [],
+          () => {},
+          sessionTask.abortController?.signal,
+        );
+        return comp.text;
+      },
+      requestToolApproval: async (toolCall: import('@harni/types').ToolCall) => {
+        if (this.autoApprove) {
+          return { approved: true };
+        }
+        this.setStatus(sessionTask, 'waiting_approval');
+        return new Promise<{ approved: boolean; feedback?: string }>((resolve) => {
+          sessionTask.pendingApproval = {
+            toolCallId: toolCall.id,
+            resolve: (approved, feedback) => resolve({ approved, feedback }),
+          };
+        });
+      },
+      notifyCodeModified: (filePath?: string) => {
+        sessionTask.codeModified = true;
+        sessionTask.hasModifiedCodeInTask = true;
+        if (filePath) {
+          sessionTask.modifiedFiles.add(filePath);
+          const expPlugin =
+            this.pluginManager.getPlugin<ExperienceLearningPlugin>('harni.experience-learning');
+          if (expPlugin) {
+            expPlugin.recordModifiedFile(
+              this.createPluginContext(sessionTask, signal, provider),
+              filePath,
+            );
+          }
+        }
+        const autoTestPlugin =
+          this.pluginManager.getPlugin<AutoTestRepairPlugin>('harni.auto-test-repair');
+        if (autoTestPlugin) {
+          autoTestPlugin.markCodeModified(
+            this.createPluginContext(sessionTask, signal, provider),
+            filePath,
+          );
+        }
+      },
+      notifyDiagnostics: (diag) => {
+        this.emitEvent('file:diagnostics', {
+          ...diag,
+          sessionId: sessionTask.sessionId,
+          taskId: sessionTask.taskState.id,
+        });
+      },
+      notifyTerminalData: (data: string) => {
+        this.emitEvent('terminal:data', { data, sessionId: sessionTask.sessionId });
+      },
+      isSubagentsEnabled: () => sessionTask.subagentsEnabled !== false,
+      getAutoTestConfig: () => sessionTask.autoTestConfig,
+    };
+  }
+
   public getWorkspaceRoot(): string {
     return this.workspaceRoot;
   }
@@ -320,6 +586,96 @@ export class AgentCoreEngine extends EventEmitter {
     return this.gitCheckpointService;
   }
 
+  public getSchedulerService(): SchedulerService {
+    return this.schedulerService;
+  }
+
+  public getSwarmBoardService(): SwarmBoardService {
+    return this.swarmBoardService;
+  }
+
+  private bindSwarmEvents(): void {
+    this.swarmBoardService.on('swarm:updated', (board) => {
+      this.emitEvent('swarm:updated', board);
+    });
+    this.swarmBoardService.on('swarm:message', (msg: import('@harni/types').SwarmMessage) => {
+      this.emitEvent('swarm:message', msg);
+
+      const hasAll = msg.mentions.some((m) => m.toLowerCase() === 'all');
+      const notifiedSubagents = new Set<string>();
+      let notifyCoordinator = false;
+
+      if (hasAll) {
+        if (msg.sender !== 'coordinator') {
+          notifyCoordinator = true;
+        }
+        for (const member of this.swarmBoardService.listMembers(msg.sessionId)) {
+          if (
+            member.subagentId !== msg.senderSubagentId &&
+            member.status !== 'cancelled'
+          ) {
+            notifiedSubagents.add(member.subagentId);
+          }
+        }
+      } else {
+        for (const tag of msg.mentions) {
+          if (tag.toLowerCase() === 'coordinator') {
+            if (msg.sender !== 'coordinator') {
+              notifyCoordinator = true;
+            }
+            continue;
+          }
+          const member = this.swarmBoardService.resolveMember(msg.sessionId, tag);
+          if (
+            member &&
+            member.subagentId !== msg.senderSubagentId &&
+            member.status !== 'cancelled'
+          ) {
+            notifiedSubagents.add(member.subagentId);
+          }
+        }
+      }
+
+      for (const subId of notifiedSubagents) {
+        this.subagentManager.deliverSwarmMessage(
+          subId,
+          `[SWARM_BOARD @mention from ${msg.sender}]\n${msg.content}`,
+        );
+      }
+
+      if (notifyCoordinator) {
+        this.enqueueWakeupEvent(msg.sessionId, {
+          id: `wakeup_swarm_${msg.id}`,
+          source: 'message',
+          sourceId: msg.sender,
+          summary: `Swarm @coordinator mention from ${msg.sender}`,
+          payloadText: msg.content,
+          timestamp: msg.timestamp,
+        });
+      }
+    });
+  }
+
+  private bindSchedulerEvents(): void {
+    this.schedulerService.on('schedule:created', (payload) => {
+      this.emitEvent('schedule:created', payload);
+    });
+    this.schedulerService.on('schedule:cancelled', (payload) => {
+      this.emitEvent('schedule:cancelled', payload);
+    });
+    this.schedulerService.on('schedule:triggered', (payload) => {
+      this.emitEvent('schedule:triggered', payload);
+      this.enqueueWakeupEvent(payload.sessionId, {
+        id: `wakeup_sched_${payload.scheduleId}_${payload.iteration}_${Date.now()}`,
+        source: 'schedule',
+        sourceId: payload.scheduleId,
+        summary: `Scheduled trigger (${payload.scheduleId}, iteration #${payload.iteration})`,
+        payloadText: payload.prompt,
+        timestamp: Date.now(),
+      });
+    });
+  }
+
   private bindSubagentEvents(): void {
     this.subagentManager.on('subagent:spawned', (payload) => {
       this.emitEvent('subagent:spawned', payload);
@@ -333,6 +689,11 @@ export class AgentCoreEngine extends EventEmitter {
     this.subagentManager.on('subagent:status', (payload) => {
       this.emitEvent('subagent:status', payload);
       if (payload.sessionId) {
+        this.swarmBoardService.updateMemberStatus(
+          payload.sessionId,
+          payload.subagentId,
+          payload.status,
+        );
         const sessionTask = this.tasksBySession.get(payload.sessionId);
         if (sessionTask) {
           sessionTask.taskState.subagents = this.subagentManager.getInstancesBySession(payload.sessionId);
@@ -348,20 +709,44 @@ export class AgentCoreEngine extends EventEmitter {
     this.subagentManager.on('subagent:completed', (payload) => {
       this.emitEvent('subagent:completed', payload);
       if (payload.sessionId) {
+        this.swarmBoardService.updateMemberStatus(
+          payload.sessionId,
+          payload.subagentId,
+          payload.status,
+        );
         const sessionTask = this.tasksBySession.get(payload.sessionId);
         if (sessionTask) {
           sessionTask.taskState.subagents = this.subagentManager.getInstancesBySession(payload.sessionId);
           if (payload.codeModified) {
             sessionTask.codeModified = true;
             sessionTask.hasModifiedCodeInTask = true;
+            const autoTestPlugin =
+              this.pluginManager.getPlugin<AutoTestRepairPlugin>('harni.auto-test-repair');
+            if (autoTestPlugin) {
+              autoTestPlugin.markCodeModified(this.createPluginContext(sessionTask));
+            }
           }
           if (payload.structuredReport?.modifiedFiles && Array.isArray(payload.structuredReport.modifiedFiles)) {
+            const expPlugin =
+              this.pluginManager.getPlugin<ExperienceLearningPlugin>('harni.experience-learning');
             for (const f of payload.structuredReport.modifiedFiles) {
               if (typeof f === 'string' && f.trim()) {
-                sessionTask.modifiedFiles.add(f.trim());
-                if (AutoTestRunner.isCodeFile(f.trim())) {
+                const trimmed = f.trim();
+                sessionTask.modifiedFiles.add(trimmed);
+                if (expPlugin) {
+                  expPlugin.recordModifiedFile(this.createPluginContext(sessionTask), trimmed);
+                }
+                if (AutoTestRunner.isCodeFile(trimmed)) {
                   sessionTask.codeModified = true;
                   sessionTask.hasModifiedCodeInTask = true;
+                  const autoTestPlugin =
+                    this.pluginManager.getPlugin<AutoTestRepairPlugin>('harni.auto-test-repair');
+                  if (autoTestPlugin) {
+                    autoTestPlugin.markCodeModified(
+                      this.createPluginContext(sessionTask),
+                      trimmed,
+                    );
+                  }
                 }
               }
             }
@@ -384,6 +769,24 @@ export class AgentCoreEngine extends EventEmitter {
                 (sessionTask.subagentTokenUsage.cacheWriteTokens || 0) + payload.tokenUsage.cacheWriteTokens;
             }
             this.syncTaskState(sessionTask);
+          }
+
+          if (payload.background === true) {
+            this.schedulerService.notifyWakeupEvent(payload.sessionId, payload.subagentId);
+            const roleLabel = payload.role ? `${payload.role} (${payload.subagentId})` : payload.subagentId;
+            const statusText = payload.status === 'completed' ? 'completed' : payload.status;
+            const body =
+              payload.status === 'completed'
+                ? payload.result
+                : payload.error || payload.result || `Subagent ${statusText}`;
+            this.enqueueWakeupEvent(payload.sessionId, {
+              id: `wakeup_sub_${payload.subagentId}_${Date.now()}`,
+              source: 'subagent',
+              sourceId: payload.subagentId,
+              summary: `Background subagent ${roleLabel} ${statusText}`,
+              payloadText: body,
+              timestamp: Date.now(),
+            });
           }
         }
       }
@@ -461,6 +864,9 @@ export class AgentCoreEngine extends EventEmitter {
   /** Release engine resources: cancel tasks and shut down MCP child processes. */
   public async dispose(): Promise<void> {
     this.cancelTask();
+    this.schedulerService.dispose();
+    this.swarmBoardService.dispose();
+    await this.pluginManager.runDispose();
     await this.mcpManager.disconnectAll();
   }
 
@@ -468,22 +874,29 @@ export class AgentCoreEngine extends EventEmitter {
    * Reset conversation session and context
    */
   public resetSession(sessionId?: string): void {
+    void this.pluginManager.runSessionReset(sessionId);
     this.subagentManager.clearSessionSubagents(sessionId);
     if (sessionId) {
       this.cancelTask(sessionId);
+      this.schedulerService.cancelSessionSchedules(sessionId, true);
+      this.swarmBoardService.clearSession(sessionId);
       this.subagentApprovalQueues.delete(sessionId);
       const sessionTask = this.tasksBySession.get(sessionId);
       if (sessionTask) {
         sessionTask.subagentTokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+        sessionTask.wakeupQueue = [];
         sessionTask.contextManager.clear();
         sessionTask.taskState.subagents = [];
         this.tasksBySession.delete(sessionId);
       }
     } else {
       this.cancelTask();
+      this.swarmBoardService.clearSession();
       this.subagentApprovalQueues.clear();
       for (const sessionTask of this.tasksBySession.values()) {
+        this.schedulerService.cancelSessionSchedules(sessionTask.sessionId, true);
         sessionTask.subagentTokenUsage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+        sessionTask.wakeupQueue = [];
         sessionTask.contextManager.clear();
         sessionTask.taskState.subagents = [];
       }
@@ -571,72 +984,13 @@ export class AgentCoreEngine extends EventEmitter {
         ? options.subagentsEnabled
         : this.subagentsEnabled;
 
-    // 0. Setup Git Worktree Isolation if enabled
-    const shouldEnableWorktree =
-      options.enableWorktree !== undefined
-        ? options.enableWorktree
-        : this.worktreeIsolationEnabled;
-    let effectiveWorkspaceRoot = sessionWorkspaceRoot;
-    let isWorktree = false;
-    let worktreeBranch: string | undefined;
-
-    if (shouldEnableWorktree) {
-      const isGit = await this.gitCheckpointService.isGitRepo(sessionWorkspaceRoot);
-      if (isGit) {
-        try {
-          const timeoutMs = options.worktreeTimeoutMs ?? this.worktreeTimeoutMs;
-          const wt = await this.gitCheckpointService.createWorktree(
-            sessionWorkspaceRoot,
-            sessionId,
-            undefined,
-            { timeoutMs },
-          );
-          effectiveWorkspaceRoot = wt.worktreePath;
-          isWorktree = true;
-          worktreeBranch = wt.branch;
-          this.emitEvent('worktree:status', {
-            sessionId,
-            isWorktree: true,
-            worktreePath: wt.worktreePath,
-            branch: wt.branch,
-          });
-        } catch (wtErr) {
-          console.warn('[Engine] Failed to create worktree, falling back to main workspace:', wtErr);
-        }
-      }
-    }
-
     const abortController = new AbortController();
     const taskId = sessionTask ? sessionTask.taskState.id : `task_${Date.now()}`;
-
-    // 0.1 Setup Git Checkpoint Snapshot if enabled
-    const shouldEnableCheckpoint =
-      options.enableCheckpoint !== undefined
-        ? options.enableCheckpoint
-        : this.gitCheckpointEnabled;
-    let checkpointId: string | undefined;
-
-    if (shouldEnableCheckpoint) {
-      try {
-        const ckpt = await this.gitCheckpointService.createCheckpoint(sessionWorkspaceRoot, {
-          sessionId,
-          taskId,
-          description: prompt.slice(0, 60),
-          isWorktree,
-          worktreeBranch,
-          worktreePath: isWorktree ? effectiveWorkspaceRoot : undefined,
-        });
-        checkpointId = ckpt.id;
-        this.emitEvent('checkpoint:created', { checkpoint: ckpt, sessionId });
-      } catch (ckptErr) {
-        console.warn('[Engine] Failed to create checkpoint:', ckptErr);
-      }
-    }
 
     if (!sessionTask) {
       sessionTask = {
         sessionId,
-        workspaceRoot: effectiveWorkspaceRoot,
+        workspaceRoot: sessionWorkspaceRoot,
         mainWorkspaceRoot: sessionWorkspaceRoot,
         contextManager: new ContextManager(),
         abortController,
@@ -644,9 +998,9 @@ export class AgentCoreEngine extends EventEmitter {
         codeModified: false,
         hasModifiedCodeInTask: false,
         autoTestRetries: 0,
-        checkpointId,
-        isWorktree,
-        worktreeBranch,
+        checkpointId: undefined,
+        isWorktree: false,
+        worktreeBranch: undefined,
         subagentsEnabled: effectiveSubagents,
         anthropicOAuth: options.anthropicOAuth,
         openaiOAuth: options.openaiOAuth,
@@ -658,6 +1012,9 @@ export class AgentCoreEngine extends EventEmitter {
         modifiedFiles: new Set<string>(),
         testFailureDiffs: [],
         experienceSaved: false,
+        pluginStates: new Map<string, unknown>(),
+        wakeupQueue: [],
+        isLoopRunning: false,
         autoTestConfig: {
           enabled: effectiveAutoTest,
           testCommand: effectiveTestCommand,
@@ -673,10 +1030,10 @@ export class AgentCoreEngine extends EventEmitter {
           mode,
           provider: providerType,
           model,
-          checkpointId,
-          isWorktree,
-          worktreeBranch,
-          worktreePath: isWorktree ? effectiveWorkspaceRoot : undefined,
+          checkpointId: undefined,
+          isWorktree: false,
+          worktreeBranch: undefined,
+          worktreePath: undefined,
           messages: [],
           tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
           subagents: this.subagentManager.getInstancesBySession(sessionId),
@@ -686,7 +1043,7 @@ export class AgentCoreEngine extends EventEmitter {
       };
       this.tasksBySession.set(sessionId, sessionTask);
     } else {
-      sessionTask.workspaceRoot = effectiveWorkspaceRoot;
+      sessionTask.workspaceRoot = sessionWorkspaceRoot;
       sessionTask.mainWorkspaceRoot = sessionWorkspaceRoot;
       sessionTask.abortController = abortController;
       sessionTask.pendingApproval = null;
@@ -699,18 +1056,39 @@ export class AgentCoreEngine extends EventEmitter {
       sessionTask.testFailureDiffs = [];
       sessionTask.cachedExperiences = undefined;
       sessionTask.experienceSaved = false;
-      sessionTask.checkpointId = checkpointId || sessionTask.checkpointId;
-      sessionTask.isWorktree = isWorktree;
-      sessionTask.worktreeBranch = worktreeBranch;
       sessionTask.subagentsEnabled = effectiveSubagents;
       sessionTask.anthropicOAuth = options.anthropicOAuth;
       sessionTask.openaiOAuth = options.openaiOAuth;
       sessionTask.openaiAccountId = options.openaiAccountId;
+      sessionTask.pluginStates = new Map<string, unknown>();
       sessionTask.autoTestConfig = {
         enabled: effectiveAutoTest,
         testCommand: effectiveTestCommand,
         maxRetries: effectiveMaxTestRetries,
       };
+    }
+
+    if (options.resetContext) {
+      await this.pluginManager.runSessionReset(sessionId);
+    }
+
+    const pluginCtx = this.createPluginContext(sessionTask, abortController.signal);
+    await this.pluginManager.runTaskStart(pluginCtx, {
+      ...options,
+      prompt,
+      enableWorktree: options.enableWorktree,
+      enableCheckpoint: options.enableCheckpoint,
+      worktreeTimeoutMs: options.worktreeTimeoutMs,
+    });
+
+    if (sessionTask.taskState.checkpointId) {
+      sessionTask.checkpointId = sessionTask.taskState.checkpointId;
+    }
+    if (sessionTask.taskState.isWorktree !== undefined) {
+      sessionTask.isWorktree = sessionTask.taskState.isWorktree;
+    }
+    if (sessionTask.taskState.worktreeBranch) {
+      sessionTask.worktreeBranch = sessionTask.taskState.worktreeBranch;
     }
 
     if (options.contextWindow && options.contextWindow > 0) {
@@ -775,14 +1153,6 @@ export class AgentCoreEngine extends EventEmitter {
       sessionTask.taskState.isWorktree = sessionTask.isWorktree;
       sessionTask.taskState.worktreeBranch = sessionTask.worktreeBranch;
       sessionTask.taskState.worktreePath = sessionTask.isWorktree ? sessionTask.workspaceRoot : undefined;
-    }
-
-    // 0. Discover any custom workspace skills and parse .clinerules
-    try {
-      await this.skillRegistry.discoverWorkspaceSkills(sessionTask.workspaceRoot);
-      await this.subagentManager.loadWorkspaceClinerules(sessionTask.workspaceRoot);
-    } catch {
-      // Safe to ignore skill/rules discovery failure
     }
 
     // 1. Append User Message to Context
@@ -853,6 +1223,8 @@ export class AgentCoreEngine extends EventEmitter {
     }
 
     // 3. Main Agent Loop
+    sessionTask.lastProvider = provider;
+    sessionTask.isLoopRunning = true;
     try {
       await this.runLoop(sessionTask, provider);
     } catch (err: unknown) {
@@ -861,32 +1233,27 @@ export class AgentCoreEngine extends EventEmitter {
       } else {
         const errorMsg = err instanceof Error ? err.message : String(err);
         this.setStatus(sessionTask, 'error');
-        const parsedLimit = parseRateLimitError(errorMsg, model, provider.providerType);
-        const errChatMsg: ChatMessage = {
-          id: `msg_err_${Date.now()}`,
-          role: 'assistant',
-          content: parsedLimit.isRateLimit
-            ? parsedLimit.formattedMessage
-            : `❌ **執行發生錯誤**:\n\n${errorMsg}`,
-          timestamp: Date.now(),
-        };
-        sessionTask.contextManager.addMessage(errChatMsg);
 
-        if (parsedLimit.isRateLimit) {
-          this.emitEvent('error', {
-            code: 'RATE_LIMIT_ERROR',
-            message: parsedLimit.formattedMessage,
-            sessionId,
-            taskId,
-            details: parsedLimit,
-          });
+        const errorResult = await this.pluginManager.runTaskError(pluginCtx, err);
+        if (errorResult && errorResult.handled && errorResult.customMessage) {
+          sessionTask.contextManager.addMessage(errorResult.customMessage);
         } else {
+          const errChatMsg: ChatMessage = {
+            id: `msg_err_${Date.now()}`,
+            role: 'assistant',
+            content: `❌ **執行發生錯誤**:\n\n${errorMsg}`,
+            timestamp: Date.now(),
+          };
+          sessionTask.contextManager.addMessage(errChatMsg);
           this.emitEvent('error', { code: 'TASK_ERROR', message: errorMsg, sessionId, taskId });
         }
       }
     } finally {
-      sessionTask.abortController = null;
-      sessionTask.pendingApproval = null;
+      if (sessionTask.abortController === abortController) {
+        sessionTask.isLoopRunning = false;
+        sessionTask.abortController = null;
+        sessionTask.pendingApproval = null;
+      }
       this.syncTaskState(sessionTask);
     }
   }
@@ -896,94 +1263,39 @@ export class AgentCoreEngine extends EventEmitter {
    */
   private async runLoop(sessionTask: SessionTask, provider: BaseLLMProvider): Promise<void> {
     const { sessionId } = sessionTask;
+    const pluginCtx = this.createPluginContext(
+      sessionTask,
+      sessionTask.abortController?.signal,
+      provider,
+    );
 
     while (
       sessionTask.taskState.currentTurn < sessionTask.taskState.maxTurns &&
       !sessionTask.abortController?.signal.aborted
     ) {
+      this.drainWakeupQueue(sessionTask);
       sessionTask.taskState.currentTurn++;
       this.setStatus(sessionTask, 'thinking');
 
-      // Build System Prompt with Skills + MCP tools + .clinerules
+      // 1. Resolve tools through plugins
       const mcpDefinitions = this.mcpManager.getToolDefinitions();
       const defaultDefinitions = this.toolRegistry.getDefinitions();
-      const subagentToolNames = new Set([
-        'invoke_subagent',
-        'send_message',
-        'manage_subagents',
-        'define_subagent',
-      ]);
-      const availableTools = sessionTask.subagentsEnabled === false
-        ? defaultDefinitions.filter((t) => !subagentToolNames.has(t.name))
-        : defaultDefinitions;
-      const allDefinitions = [...availableTools, ...mcpDefinitions];
+      let allDefinitions = [...defaultDefinitions, ...mcpDefinitions];
+      allDefinitions = await this.pluginManager.runResolveTools(pluginCtx, allDefinitions);
 
-      let effectiveCustomInstructions = this.customInstructions;
-      try {
-        const rulesTarget = path.join(sessionTask.workspaceRoot, '.clinerules');
-        const stats = await fs.stat(rulesTarget);
-        if (stats.isDirectory()) {
-          const files = await fs.readdir(rulesTarget);
-          const mdFiles = files.filter((f) => f.endsWith('.md')).sort();
-          const contents: string[] = [];
-          for (const mdFile of mdFiles) {
-            try {
-              const fileContent = await fs.readFile(path.join(rulesTarget, mdFile), 'utf-8');
-              if (fileContent.trim()) {
-                contents.push(`=== .clinerules/${mdFile} ===\n${fileContent.trim()}`);
-              }
-            } catch {
-              // ignore unreadable file
-            }
-          }
-          if (contents.length > 0) {
-            const combined = contents.join('\n\n');
-            effectiveCustomInstructions = effectiveCustomInstructions
-              ? `${effectiveCustomInstructions}\n\n${combined}`
-              : combined;
-          }
-        } else {
-          const rulesText = await fs.readFile(rulesTarget, 'utf-8');
-          if (rulesText.trim()) {
-            effectiveCustomInstructions = effectiveCustomInstructions
-              ? `${effectiveCustomInstructions}\n\n${rulesText.trim()}`
-              : rulesText.trim();
-          }
-        }
-      } catch {
-        // Safe to ignore if .clinerules does not exist
-      }
+      // 2. Plugin prompt sections (driven by RulesAndSkillsPlugin, ExperienceLearningPlugin, etc.)
+      const pluginSections = await this.pluginManager.runBuildSystemPrompt(pluginCtx);
 
-      const expManager =
-        this.getExperienceManagerForRoot(sessionTask.mainWorkspaceRoot || sessionTask.workspaceRoot) ??
-        this.experienceManager;
-
-      if (this.experienceLearningEnabled && expManager && !sessionTask.cachedExperiences) {
-        try {
-          const userMessages = sessionTask.contextManager.getMessages().filter((m) => m.role === 'user');
-          const lastUserMsg = userMessages[userMessages.length - 1];
-          const currentPrompt =
-            sessionTask.taskState.prompt?.trim() || (lastUserMsg ? lastUserMsg.content : '');
-          sessionTask.cachedExperiences = await expManager.searchExperiences({
-            query: currentPrompt,
-            limit: 3,
-          });
-        } catch (expErr) {
-          console.warn('[Engine] Failed to retrieve experiences:', expErr);
-          sessionTask.cachedExperiences = [];
-        }
-      }
-
+      // 3. Build system prompt
       const systemPrompt = SystemPromptBuilder.build({
         workspaceRoot: sessionTask.workspaceRoot,
         mode: sessionTask.taskState.mode,
-        customInstructions: effectiveCustomInstructions,
+        customInstructions: this.customInstructions,
         tools: allDefinitions,
-        skillsFormatted: this.skillRegistry.formatSkillsForPrompt(),
-        experiences: sessionTask.cachedExperiences,
+        pluginSections,
       });
 
-      // Call LLM with streaming
+      // 6. Call LLM with streaming
       const result = await provider.streamCompletion(
         sessionTask.contextManager.getMessages(),
         systemPrompt,
@@ -1009,7 +1321,7 @@ export class AgentCoreEngine extends EventEmitter {
         sessionTask.abortController?.signal,
       );
 
-      // Record Assistant message
+      // 7. Record Assistant message
       const assistantMessage: ChatMessage = {
         id: `msg_asst_${Date.now()}`,
         role: 'assistant',
@@ -1021,442 +1333,258 @@ export class AgentCoreEngine extends EventEmitter {
       sessionTask.contextManager.addMessage(assistantMessage);
       this.syncTaskState(sessionTask);
 
-      // If no tools were called, check Auto Test-Driven Repair before completing
+      // 8. If no tools were called, drain any pending wakeup events before completion gate
       if (!result.toolCalls || result.toolCalls.length === 0) {
-        if (sessionTask.codeModified && sessionTask.autoTestConfig.enabled !== false) {
-          const testCmd = await AutoTestRunner.detectTestCommand(
-            sessionTask.workspaceRoot,
-            sessionTask.autoTestConfig.testCommand,
-          );
+        if (this.drainWakeupQueue(sessionTask)) {
+          continue;
+        }
+        const gateResult = await this.pluginManager.runBeforeComplete(pluginCtx);
 
-          if (testCmd) {
-            this.setStatus(sessionTask, 'testing');
-            sessionTask.taskState.autoTestStatus = {
-              running: true,
-              command: testCmd,
-              retries: sessionTask.autoTestRetries,
-            };
-            this.emitEvent('task:state', { ...sessionTask.taskState, sessionId });
-
-            const testResult = await AutoTestRunner.runTest({
-              command: testCmd,
-              workspaceRoot: sessionTask.workspaceRoot,
-              timeoutMs: sessionTask.autoTestConfig.timeoutMs,
-              executeTerminalCommand: this.executeTerminalCommand,
-              onData: (data) => {
-                this.emitEvent('terminal:data', { data, sessionId });
-              },
-            });
-
-            sessionTask.taskState.autoTestStatus = {
-              running: false,
-              command: testCmd,
-              passed: testResult.passed,
-              retries: sessionTask.autoTestRetries,
-              durationMs: testResult.durationMs,
-              lastError: testResult.passed ? undefined : testResult.output.slice(-1000),
-            };
-
-            this.emitEvent('test:result', {
-              passed: testResult.passed,
-              command: testCmd,
-              output: testResult.output,
-              exitCode: testResult.exitCode,
-              sessionId,
-              taskId: sessionTask.taskState.id,
-              retries: sessionTask.autoTestRetries,
-              durationMs: testResult.durationMs,
-            });
-
-            if (!testResult.passed) {
-              const testErrSummary = `Test failed (${testCmd}): ${AutoTestRunner.extractErrorStacktrace(testResult.output, 200).trim() || 'Exit code ' + testResult.exitCode}`;
-              sessionTask.encounteredErrors.push(testErrSummary);
-              if (sessionTask.encounteredErrors.length > 5) {
-                sessionTask.encounteredErrors.shift();
-              }
-
-              try {
-                const isGit = await this.gitCheckpointService.isGitRepo(sessionTask.workspaceRoot);
-                if (isGit) {
-                  const diffRes = await this.gitCheckpointService.runGit(
-                    ['diff', 'HEAD'],
-                    sessionTask.workspaceRoot,
-                  );
-                  const currentDiff = (diffRes.stdout || '').slice(0, 8000);
-                  if (currentDiff && !sessionTask.testFailureDiffs.includes(currentDiff)) {
-                    sessionTask.testFailureDiffs.push(currentDiff);
-                  }
-                }
-              } catch (diffErr) {
-                console.warn('[Engine] Failed to capture git diff on test failure:', diffErr);
-              }
-
-              const maxRetries = sessionTask.autoTestConfig.maxRetries ?? this.maxTestRetries;
-              if (sessionTask.autoTestRetries < maxRetries) {
-                sessionTask.autoTestRetries++;
-                const failureObservation = AutoTestRunner.formatFailureObservation({
-                  command: testCmd,
-                  exitCode: testResult.exitCode,
-                  rawOutput: testResult.output,
-                  retries: sessionTask.autoTestRetries,
-                  maxRetries,
-                });
-
-                const observationMsg: ChatMessage = {
-                  id: `msg_obs_${Date.now()}`,
-                  role: 'user',
-                  content: failureObservation,
-                  timestamp: Date.now(),
-                };
-                sessionTask.contextManager.addMessage(observationMsg);
-                this.syncTaskState(sessionTask);
-
-                // Re-enter loop to allow the agent to repair
-                continue;
-              } else {
-                let probeReport = '';
-                if (sessionTask.testFailureDiffs.length >= 2) {
-                  try {
-                    const diffSlice = sessionTask.testFailureDiffs.slice(-3);
-                    const candidates: ProbeCandidate[] = diffSlice.map((diff, idx) => ({
-                      id: `attempt_${idx + 1}`,
-                      name: `修復嘗試方案 ${idx + 1}`,
-                      description: `第 ${idx + 1} 次自動修復的代碼補丁`,
-                      patchDiff: diff,
-                    }));
-
-                    const llmCaller = async (promptText: string): Promise<string> => {
-                      const comp = await provider.streamCompletion(
-                        [
-                          {
-                            id: `msg_probe_${Date.now()}`,
-                            role: 'user',
-                            content: promptText,
-                            timestamp: Date.now(),
-                          },
-                        ],
-                        'You are an expert evaluator assessing and comparing code solution candidates.',
-                        [],
-                        () => {},
-                        sessionTask.abortController?.signal,
-                      );
-                      return comp.text;
-                    };
-
-                    const probeResult = await ContrastiveProbeRunner.evaluateCandidates({
-                      taskDescription:
-                        sessionTask.taskState.prompt || `Repair failing test: ${testCmd}`,
-                      candidates,
-                      llmCaller,
-                    });
-
-                    this.emitEvent('probe:result', {
-                      sessionId,
-                      taskId: sessionTask.taskState.id,
-                      result: probeResult,
-                    });
-
-                    if (probeResult.status === 'parse_failed') {
-                      probeReport =
-                        `\n\n### 🔬 對比探測評估建議\n` +
-                        `- **評估狀態**: 評估輸出解析失敗 (\`parse_failed\`)，無法自動選出最佳候選方案。\n` +
-                        `- **評估摘要**: ${probeResult.comparisonSummary}\n`;
-                    } else {
-                      probeReport =
-                        `\n\n### 🔬 對比探測評估建議（最接近成功的修改與建議）\n` +
-                        `- **推薦最佳方案**: ${probeResult.winnerName} (${probeResult.winnerId})\n` +
-                        `- **評估摘要**: ${probeResult.comparisonSummary}\n` +
-                        `- **建議理由**: ${probeResult.rationale}\n` +
-                        (probeResult.improvementSuggestions &&
-                        probeResult.improvementSuggestions.length > 0
-                          ? `- **改進建議**: ${probeResult.improvementSuggestions.join('; ')}\n`
-                          : '');
-                    }
-                  } catch (probeErr) {
-                    console.warn(
-                      '[Engine] Contrastive probe evaluation failed on retry limit:',
-                      probeErr,
-                    );
-                  }
-                }
-
-                // Exceeded max retries: stop and report to user
-                const limitMsg: ChatMessage = {
-                  id: `msg_test_max_${Date.now()}`,
-                  role: 'assistant',
-                  content: `⚠️ **自動測試驅動修復已達重試上限 (${maxRetries} 次)**：經過多次修復嘗試，背景測試仍未通過。\n\n**最後測試指令**: \`${testCmd}\` (結束碼: ${testResult.exitCode})\n\n**錯誤摘要**:\n\`\`\`\n${AutoTestRunner.extractErrorStacktrace(testResult.output, 2000)}\n\`\`\`\n\n已停止自動重試，請檢視上方錯誤堆疊。${probeReport}`,
-                  timestamp: Date.now(),
-                };
-                sessionTask.contextManager.addMessage(limitMsg);
-                sessionTask.experienceSaved = true;
-                this.setStatus(sessionTask, 'completed');
-                this.syncTaskState(sessionTask);
-                break;
-              }
-            } else {
-              // Test passed!
-              sessionTask.codeModified = false;
-              if (sessionTask.autoTestRetries > 0) {
-                const passMsg: ChatMessage = {
-                  id: `msg_test_passed_${Date.now()}`,
-                  role: 'assistant',
-                  content: `✅ **自動測試驅動修復成功**：背景測試全數通過！(\`${testCmd}\`)，共修復重試 ${sessionTask.autoTestRetries} 次。`,
-                  timestamp: Date.now(),
-                };
-                sessionTask.contextManager.addMessage(passMsg);
-              }
+        if (gateResult.action === 'continue_loop') {
+          if (gateResult.injectedMessages) {
+            for (const msg of gateResult.injectedMessages) {
+              sessionTask.contextManager.addMessage(msg);
             }
           }
-        }
+          this.syncTaskState(sessionTask);
+          continue;
+        } else if (gateResult.action === 'complete_with_messages') {
+          if (gateResult.appendedMessages) {
+            for (const msg of gateResult.appendedMessages) {
+              sessionTask.contextManager.addMessage(msg);
+            }
+          }
+          sessionTask.experienceSaved = true;
+          this.setStatus(sessionTask, 'completed');
+          this.syncTaskState(sessionTask);
+          break;
+        } else {
+          // action === 'allow'
+          if (gateResult.appendedMessages) {
+            for (const msg of gateResult.appendedMessages) {
+              sessionTask.contextManager.addMessage(msg);
+            }
+          }
 
-        if (sessionTask.isWorktree) {
-          this.emitEvent('worktree:status', {
-            sessionId,
-            isWorktree: true,
-            worktreePath: sessionTask.workspaceRoot,
-            branch: sessionTask.worktreeBranch,
-          });
+          await this.pluginManager.runTaskCompleted(pluginCtx);
+          this.setStatus(sessionTask, 'completed');
+          break;
         }
-
-        this.setStatus(sessionTask, 'completed');
-        if (this.gitCheckpointEnabled) {
-          const targetRoot = sessionTask.mainWorkspaceRoot || sessionTask.workspaceRoot;
-          this.gitCheckpointService.pruneCheckpoints(targetRoot).catch(() => {});
-        }
-        break;
       }
 
-      // Execute each tool call
+      // 9. Execute tool calls through plugin middleware pipeline
       for (const toolCall of result.toolCalls) {
         if (sessionTask.abortController?.signal.aborted) break;
 
         const tool = this.toolRegistry.getTool(toolCall.name);
         const mcpTool = this.mcpManager.getTool(toolCall.name);
+        const canonicalToolName = this.toolRegistry.resolveToolName(toolCall.name);
         const requiresApproval =
           (mcpTool?.requiresApproval ?? tool?.requiresApproval ?? false) && !this.autoApprove;
 
-        let isApproved = true;
-        let userFeedback: string | undefined;
+        const toolCtx: ToolCallMiddlewareContext = {
+          toolCall,
+          canonicalToolName,
+          requiresApproval,
+          isMcpTool: Boolean(mcpTool),
+          metadata: {},
+        };
 
-        if (requiresApproval) {
-          this.setStatus(sessionTask, 'waiting_approval');
+        const execContext: ToolExecutionContext = {
+          workspaceRoot: sessionTask.workspaceRoot,
+          sessionId: sessionTask.sessionId,
+          taskId: sessionTask.taskState.id,
+          depth: 0,
+          provider: sessionTask.taskState.provider,
+          model: sessionTask.taskState.model,
+          apiKey: provider.getApiKey() || this.apiKey,
+          baseURL: provider.getBaseURL() || this.baseURL,
+          anthropicOAuth: sessionTask.anthropicOAuth,
+          openaiOAuth: sessionTask.openaiOAuth,
+          openaiAccountId: sessionTask.openaiAccountId,
+          subagentManager: this.subagentManager,
+          schedulerService: this.schedulerService,
+          swarmBoardService: this.swarmBoardService,
+          getSessionMessages: () => sessionTask.contextManager.getMessages(),
+          resolveForkMessages: (source: string) =>
+            this.subagentManager.resolveForkMessages(
+              sessionTask.sessionId,
+              source,
+              () => sessionTask.contextManager.getMessages(),
+            ),
+          parentSignal: sessionTask.abortController?.signal,
+          skipInlineDiagnostics: this.pluginManager.hasPlugin('harni.syntax-diagnostics'),
+          onCodeModified: () => {
+            sessionTask.codeModified = true;
+            sessionTask.hasModifiedCodeInTask = true;
+          },
+          onFileDiff: (diff: FileDiff) => {
+            this.emitEvent('file:diff', { ...diff, sessionId, taskId: sessionTask.taskState.id });
+          },
+          onDiagnostics: (diag) => {
+            this.emitEvent('file:diagnostics', {
+              ...diag,
+              sessionId,
+              taskId: sessionTask.taskState.id,
+            });
+          },
+          onTerminalData: (data: string) => {
+            this.emitEvent('terminal:data', { data, sessionId });
+          },
+          executeTerminalCommand: this.executeTerminalCommand,
+          askQuestion: async (params) => {
+            this.setStatus(sessionTask, 'waiting_user_input');
+            this.emitEvent('question:ask', {
+              toolCallId: toolCall.id,
+              question: params.question,
+              options: params.options,
+              isMultiSelect: params.isMultiSelect,
+              allowCustomInput: params.allowCustomInput ?? true,
+              sessionId,
+              taskId: sessionTask.taskState.id,
+            });
 
-          // Wait for interactive user approval via handleApproval()
-          const approvalResult = await new Promise<{ approved: boolean; feedback?: string }>(
-            (resolve) => {
-              sessionTask.pendingApproval = {
-                toolCallId: toolCall.id,
-                resolve: (approved, feedback) => resolve({ approved, feedback }),
-              };
-            },
-          );
+            const answer = await new Promise<{ answers: string[]; customInput?: string }>(
+              (resolve) => {
+                sessionTask.pendingQuestion = {
+                  toolCallId: toolCall.id,
+                  resolve: (ans) => resolve(ans),
+                };
+              },
+            );
 
-          isApproved = approvalResult.approved;
-          userFeedback = approvalResult.feedback;
-          sessionTask.pendingApproval = null;
-        }
+            sessionTask.pendingQuestion = null;
+            this.setStatus(sessionTask, 'executing_tool');
+            return answer;
+          },
+          runContrastiveProbe: async (probeParams: ContrastiveProbeParams): Promise<ContrastiveProbeResult> => {
+            const llmCaller = async (promptText: string): Promise<string> => {
+              const comp = await provider.streamCompletion(
+                [
+                  {
+                    id: `msg_probe_${Date.now()}`,
+                    role: 'user',
+                    content: promptText,
+                    timestamp: Date.now(),
+                  },
+                ],
+                'You are an expert evaluator assessing and comparing code solution candidates.',
+                [],
+                () => {},
+                sessionTask.abortController?.signal,
+              );
+              return comp.text;
+            };
+
+            const probeResult = await ContrastiveProbeRunner.evaluateCandidates({
+              taskDescription: probeParams.taskDescription,
+              candidates: probeParams.candidates,
+              llmCaller,
+            });
+            this.emitEvent('probe:result', {
+              sessionId,
+              taskId: sessionTask.taskState.id,
+              result: probeResult,
+            });
+            return probeResult;
+          },
+        };
+
+        const coreExecutor = async (): Promise<ToolResult> => {
+          this.setStatus(sessionTask, 'executing_tool');
+          if (mcpTool) {
+            return await this.mcpManager.callTool(
+              toolCall.name,
+              toolCall.arguments as Record<string, unknown>,
+            );
+          } else {
+            return await this.toolRegistry.executeTool(
+              toolCall.name,
+              toolCall.arguments,
+              execContext,
+            );
+          }
+        };
 
         let toolResult: ToolResult;
-
-        const subagentToolNames = new Set([
-          'invoke_subagent',
-          'send_message',
-          'manage_subagents',
-          'define_subagent',
-        ]);
-        const canonicalToolName = this.toolRegistry.resolveToolName(toolCall.name);
-        if (sessionTask.subagentsEnabled === false && subagentToolNames.has(canonicalToolName)) {
+        try {
+          toolResult = await this.pluginManager.executeToolWithMiddleware(
+            pluginCtx,
+            toolCtx,
+            async () => {
+              try {
+                return await coreExecutor();
+              } catch (toolErr: unknown) {
+                const errText = toolErr instanceof Error ? toolErr.message : String(toolErr);
+                return {
+                  toolCallId: toolCall.id,
+                  isError: true,
+                  output: `工具執行失敗 (${toolCall.name}): ${errText}`,
+                  summary: `Error executing ${toolCall.name}`,
+                };
+              }
+            },
+          );
+        } catch (toolErr: unknown) {
+          const errText = toolErr instanceof Error ? toolErr.message : String(toolErr);
           toolResult = {
             toolCallId: toolCall.id,
             isError: true,
-            output: `Subagent orchestration tool '${toolCall.name}' is disabled in settings. Please solve the task directly without spawning subagents.`,
-            summary: `Disabled tool ${toolCall.name}`,
+            output: `工具執行失敗 (${toolCall.name}): ${errText}`,
+            summary: `Error executing ${toolCall.name}`,
           };
-        } else if (!isApproved) {
-          toolResult = {
-            toolCallId: toolCall.id,
-            isError: true,
-            output: `User rejected execution of tool '${toolCall.name}'. ${userFeedback ? `Feedback: ${userFeedback}` : ''}`,
-            summary: `Rejected ${toolCall.name}`,
-          };
-        } else {
-          this.setStatus(sessionTask, 'executing_tool');
+        }
 
-          const execContext: ToolExecutionContext = {
-            workspaceRoot: sessionTask.workspaceRoot,
-            sessionId: sessionTask.sessionId,
-            taskId: sessionTask.taskState.id,
-            depth: 0,
-            provider: sessionTask.taskState.provider,
-            model: sessionTask.taskState.model,
-            apiKey: provider.getApiKey() || this.apiKey,
-            baseURL: provider.getBaseURL() || this.baseURL,
-            anthropicOAuth: sessionTask.anthropicOAuth,
-            openaiOAuth: sessionTask.openaiOAuth,
-            openaiAccountId: sessionTask.openaiAccountId,
-            subagentManager: this.subagentManager,
-            parentSignal: sessionTask.abortController?.signal,
-            onCodeModified: () => {
+        toolResult.toolCallId = toolCall.id;
+
+        // Keep sessionTask tracking in sync
+        if (!toolResult.isError) {
+          const toolSummary =
+            toolResult.summary || `${toolCall.name} executed successfully`;
+          sessionTask.successfulActions.push(toolSummary);
+          if (sessionTask.successfulActions.length > 15) {
+            sessionTask.successfulActions.shift();
+          }
+
+          if (
+            canonicalToolName === 'write_file' ||
+            canonicalToolName === 'edit_file' ||
+            canonicalToolName === 'write_to_file' ||
+            canonicalToolName === 'replace_file_content'
+          ) {
+            const targetPath = String(
+              toolCall.arguments.path ??
+                toolCall.arguments.TargetFile ??
+                toolCall.arguments.AbsolutePath ??
+                '',
+            );
+            if (targetPath) {
+              sessionTask.modifiedFiles.add(targetPath);
+            }
+            if (AutoTestRunner.isCodeFile(targetPath)) {
               sessionTask.codeModified = true;
               sessionTask.hasModifiedCodeInTask = true;
-            },
-            onFileDiff: (diff: FileDiff) => {
-              this.emitEvent('file:diff', { ...diff, sessionId, taskId: sessionTask.taskState.id });
-            },
-            onDiagnostics: (diag) => {
-              this.emitEvent('file:diagnostics', {
-                ...diag,
-                sessionId,
-                taskId: sessionTask.taskState.id,
-              });
-            },
-            onTerminalData: (data: string) => {
-              this.emitEvent('terminal:data', { data, sessionId });
-            },
-            executeTerminalCommand: this.executeTerminalCommand,
-            askQuestion: async (params) => {
-              this.setStatus(sessionTask, 'waiting_user_input');
-              this.emitEvent('question:ask', {
-                toolCallId: toolCall.id,
-                question: params.question,
-                options: params.options,
-                isMultiSelect: params.isMultiSelect,
-                allowCustomInput: params.allowCustomInput ?? true,
-                sessionId,
-                taskId: sessionTask.taskState.id,
-              });
-
-              const answer = await new Promise<{ answers: string[]; customInput?: string }>(
-                (resolve) => {
-                  sessionTask.pendingQuestion = {
-                    toolCallId: toolCall.id,
-                    resolve: (ans) => resolve(ans),
-                  };
-                },
-              );
-
-              sessionTask.pendingQuestion = null;
-              this.setStatus(sessionTask, 'executing_tool');
-              return answer;
-            },
-            runContrastiveProbe: async (probeParams: ContrastiveProbeParams): Promise<ContrastiveProbeResult> => {
-              const llmCaller = async (promptText: string): Promise<string> => {
-                const comp = await provider.streamCompletion(
-                  [
-                    {
-                      id: `msg_probe_${Date.now()}`,
-                      role: 'user',
-                      content: promptText,
-                      timestamp: Date.now(),
-                    },
-                  ],
-                  'You are an expert evaluator assessing and comparing code solution candidates.',
-                  [],
-                  () => {},
-                  sessionTask.abortController?.signal,
-                );
-                return comp.text;
-              };
-
-              const probeResult = await ContrastiveProbeRunner.evaluateCandidates({
-                taskDescription: probeParams.taskDescription,
-                candidates: probeParams.candidates,
-                llmCaller,
-              });
-              this.emitEvent('probe:result', {
-                sessionId,
-                taskId: sessionTask.taskState.id,
-                result: probeResult,
-              });
-              return probeResult;
-            },
-          };
-
-          try {
-            if (mcpTool) {
-              // MCP-sourced tool: delegate to the MCP server manager.
-              toolResult = await this.mcpManager.callTool(
-                toolCall.name,
-                toolCall.arguments as Record<string, unknown>,
-              );
-            } else {
-              toolResult = await this.toolRegistry.executeTool(
-                toolCall.name,
-                toolCall.arguments,
-                execContext,
-              );
             }
-          } catch (toolErr: unknown) {
-            const errText = toolErr instanceof Error ? toolErr.message : String(toolErr);
-            toolResult = {
-              toolCallId: toolCall.id,
-              isError: true,
-              output: `工具執行失敗 (${toolCall.name}): ${errText}`,
-              summary: `Error executing ${toolCall.name}`,
-            };
           }
-          toolResult.toolCallId = toolCall.id;
-          if (!toolResult.isError) {
-            const toolSummary =
-              toolResult.summary ||
-              `${toolCall.name} executed successfully`;
-            sessionTask.successfulActions.push(toolSummary);
-            if (sessionTask.successfulActions.length > 15) {
-              sessionTask.successfulActions.shift();
-            }
-
-            if (
-              canonicalToolName === 'write_file' ||
-              canonicalToolName === 'edit_file' ||
-              canonicalToolName === 'write_to_file' ||
-              canonicalToolName === 'replace_file_content'
-            ) {
-              const targetPath = String(
-                toolCall.arguments.path ??
-                  toolCall.arguments.TargetFile ??
-                  toolCall.arguments.AbsolutePath ??
-                  '',
-              );
-              if (targetPath) {
-                sessionTask.modifiedFiles.add(targetPath);
-              }
-              if (AutoTestRunner.isCodeFile(targetPath)) {
-                sessionTask.codeModified = true;
-                sessionTask.hasModifiedCodeInTask = true;
-              } // Prose/asset edits (.md, .txt, images) never arm the auto test-driven repair loop
-            }
-          } else {
-            const errSummary =
-              toolResult.summary ||
-              (typeof toolResult.output === 'string'
-                ? toolResult.output.slice(0, 200)
-                : `Error executing ${toolCall.name}`);
-            sessionTask.encounteredErrors.push(errSummary);
-            if (sessionTask.encounteredErrors.length > 5) {
-              sessionTask.encounteredErrors.shift();
-            }
+        } else {
+          const errSummary =
+            toolResult.summary ||
+            (typeof toolResult.output === 'string'
+              ? toolResult.output.slice(0, 200)
+              : `Error executing ${toolCall.name}`);
+          sessionTask.encounteredErrors.push(errSummary);
+          if (sessionTask.encounteredErrors.length > 5) {
+            sessionTask.encounteredErrors.shift();
           }
         }
 
         // Emit tool result event
         this.emitEvent('tool:result', { ...toolResult, sessionId, taskId: sessionTask.taskState.id });
 
-        // Cap single tool output to prevent context overflow (max 40,000 chars, approx 10k tokens)
-        const MAX_TOOL_OUTPUT_CHARS = 40_000;
-        let toolOutputStr =
+        const toolOutputStr =
           typeof toolResult.output === 'string'
             ? toolResult.output
             : JSON.stringify(toolResult.output);
-
-        if (toolOutputStr.length > MAX_TOOL_OUTPUT_CHARS) {
-          const truncatedSuffix =
-            `\n\n...[工具輸出過長 (共 ${toolOutputStr.length.toLocaleString()} 字元)，Agent Core 已自動壓縮至安全長度以維護 Token 安全]...\n` +
-            toolOutputStr.slice(-1000);
-          toolOutputStr = toolOutputStr.slice(0, MAX_TOOL_OUTPUT_CHARS - 1500) + truncatedSuffix;
-          if (typeof toolResult.output === 'string') {
-            toolResult.output = toolOutputStr;
-          }
-        }
 
         // Record Tool message
         const toolMsg: ChatMessage = {
@@ -1470,7 +1598,6 @@ export class AgentCoreEngine extends EventEmitter {
         };
         sessionTask.contextManager.addMessage(toolMsg);
         this.syncTaskState(sessionTask);
-
       }
     }
 
@@ -1498,6 +1625,11 @@ export class AgentCoreEngine extends EventEmitter {
       } catch {
         // Safe to ignore, warning is already logged inside autoSynthesizeAndSaveExperience
       }
+    }
+
+    const expPlugin = this.pluginManager.getPlugin<ExperienceLearningPlugin>('harni.experience-learning');
+    if (expPlugin) {
+      await expPlugin.awaitPendingSaves(sessionId);
     }
   }
 
@@ -1569,8 +1701,10 @@ export class AgentCoreEngine extends EventEmitter {
     }
 
     if (targetSessionId) {
+      this.schedulerService.cancelSessionSchedules(targetSessionId, false);
       if (this.tasksBySession.has(targetSessionId)) {
         const task = this.tasksBySession.get(targetSessionId)!;
+        task.wakeupQueue = [];
         task.abortController?.abort();
         if (task.pendingApproval) {
           task.pendingApproval.resolve(false, 'Task cancelled by user');
@@ -1588,6 +1722,8 @@ export class AgentCoreEngine extends EventEmitter {
     if (targetTaskId) {
       for (const task of this.tasksBySession.values()) {
         if (task.taskState.id === targetTaskId) {
+          this.schedulerService.cancelSessionSchedules(task.sessionId, false);
+          task.wakeupQueue = [];
           task.abortController?.abort();
           if (task.pendingApproval) {
             task.pendingApproval.resolve(false, 'Task cancelled by user');
@@ -1606,6 +1742,8 @@ export class AgentCoreEngine extends EventEmitter {
 
     // Only if target is completely omitted or empty do we cancel all sessions
     for (const task of this.tasksBySession.values()) {
+      this.schedulerService.cancelSessionSchedules(task.sessionId, false);
+      task.wakeupQueue = [];
       task.abortController?.abort();
       if (task.pendingApproval) {
         task.pendingApproval.resolve(false, 'Task cancelled by user');
@@ -1616,6 +1754,105 @@ export class AgentCoreEngine extends EventEmitter {
         task.pendingQuestion = null;
       }
       this.setStatus(task, 'cancelled');
+    }
+  }
+
+  private enqueueWakeupEvent(sessionId: string, event: WakeupEvent): void {
+    const sessionTask = this.tasksBySession.get(sessionId);
+    if (!sessionTask) return;
+    if (sessionTask.taskState.status === 'cancelled') return;
+
+    sessionTask.wakeupQueue.push(event);
+    this.emitEvent('wakeup:queued', {
+      sessionId,
+      source: event.source,
+      sourceId: event.sourceId,
+      summary: event.summary,
+    });
+
+    if (
+      !sessionTask.isLoopRunning &&
+      (sessionTask.taskState.status === 'completed' || sessionTask.taskState.status === 'idle')
+    ) {
+      void this.wakeSession(sessionTask);
+    }
+  }
+
+  private drainWakeupQueue(sessionTask: SessionTask): boolean {
+    if (sessionTask.wakeupQueue.length === 0) {
+      return false;
+    }
+
+    const events = sessionTask.wakeupQueue.splice(0, sessionTask.wakeupQueue.length);
+    const lines = events.map((ev, idx) => {
+      const tag = ev.sourceId ? `${ev.source}:${ev.sourceId}` : ev.source;
+      return `[${idx + 1}] (${tag}) ${ev.summary}\n${ev.payloadText}`;
+    });
+
+    const notifMsg: ChatMessage = {
+      id: `msg_wakeup_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      role: 'user',
+      content: `[SYSTEM_NOTIFICATION — Reactive Wakeup]\n${lines.join('\n\n')}`,
+      timestamp: Date.now(),
+    };
+    sessionTask.contextManager.addMessage(notifMsg);
+    this.syncTaskState(sessionTask);
+    return true;
+  }
+
+  private async wakeSession(sessionTask: SessionTask): Promise<void> {
+    if (
+      sessionTask.isLoopRunning ||
+      sessionTask.taskState.status === 'cancelled' ||
+      !sessionTask.lastProvider ||
+      sessionTask.wakeupQueue.length === 0
+    ) {
+      return;
+    }
+
+    const { sessionId } = sessionTask;
+    const taskId = sessionTask.taskState.id;
+    const provider = sessionTask.lastProvider;
+    const abortController = new AbortController();
+
+    sessionTask.abortController = abortController;
+    sessionTask.isLoopRunning = true;
+    sessionTask.taskState.currentTurn = 0;
+    this.setStatus(sessionTask, 'thinking');
+    this.emitEvent('task:status', { status: 'thinking', taskId, sessionId });
+
+    const pluginCtx = this.createPluginContext(sessionTask, abortController.signal, provider);
+
+    try {
+      await this.runLoop(sessionTask, provider);
+    } catch (err: unknown) {
+      if (sessionTask.abortController?.signal.aborted) {
+        this.setStatus(sessionTask, 'cancelled');
+      } else {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        this.setStatus(sessionTask, 'error');
+
+        const errorResult = await this.pluginManager.runTaskError(pluginCtx, err);
+        if (errorResult && errorResult.handled && errorResult.customMessage) {
+          sessionTask.contextManager.addMessage(errorResult.customMessage);
+        } else {
+          const errChatMsg: ChatMessage = {
+            id: `msg_err_${Date.now()}`,
+            role: 'assistant',
+            content: `❌ **執行發生錯誤**:\n\n${errorMsg}`,
+            timestamp: Date.now(),
+          };
+          sessionTask.contextManager.addMessage(errChatMsg);
+          this.emitEvent('error', { code: 'TASK_ERROR', message: errorMsg, sessionId, taskId });
+        }
+      }
+    } finally {
+      if (sessionTask.abortController === abortController) {
+        sessionTask.isLoopRunning = false;
+        sessionTask.abortController = null;
+        sessionTask.pendingApproval = null;
+      }
+      this.syncTaskState(sessionTask);
     }
   }
 
@@ -1662,7 +1899,10 @@ export class AgentCoreEngine extends EventEmitter {
 
     if (status === 'completed' && !sessionTask.experienceSaved) {
       sessionTask.experienceSaved = true;
-      sessionTask.pendingExperiencePromise = this.autoSynthesizeAndSaveExperience(sessionTask);
+      const expPlugin = this.pluginManager.getPlugin<ExperienceLearningPlugin>('harni.experience-learning');
+      if (!expPlugin) {
+        sessionTask.pendingExperiencePromise = this.autoSynthesizeAndSaveExperience(sessionTask);
+      }
     }
   }
 

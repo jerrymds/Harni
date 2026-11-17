@@ -53,7 +53,7 @@ export const Button: React.FC<{ label: string }> = ({ label }) => (
 
   it('detects JSON syntax errors with line and column information', () => {
     const brokenJson = `{
-  "name": "cline-web",
+  "name": "harni",
   "version": 1.0,
   "invalid": [1, 2, 3,]
 }`;

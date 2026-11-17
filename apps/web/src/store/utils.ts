@@ -32,7 +32,7 @@ export const PROVIDER_DEFAULT_MODELS: Record<string, string> = {
 
 export function loadSavedCustomProviders(): LLMProviderConfig[] {
   try {
-    const raw = localStorage.getItem('cline_web_custom_providers');
+    const raw = localStorage.getItem('harni_web_custom_providers');
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
@@ -48,10 +48,10 @@ export const getApiBase = () => `http://${window.location.hostname}:3001`;
 export const getServerAuthToken = (): string => {
   try {
     return (
-      localStorage.getItem('cline_web_server_auth_token') ||
+      localStorage.getItem('harni_web_server_auth_token') ||
       (typeof import.meta !== 'undefined' ? (import.meta as any).env?.VITE_AUTH_TOKEN || '' : '') ||
       (typeof window !== 'undefined'
-        ? (window as any).__CLINE_AUTH_TOKEN__ || (window as any).process?.env?.VITE_AUTH_TOKEN || ''
+        ? (window as any).__HARNI_AUTH_TOKEN__ || (window as any).process?.env?.VITE_AUTH_TOKEN || ''
         : '')
     );
   } catch {
@@ -185,7 +185,7 @@ export async function syncSettingsToDB(settings: Record<string, string>): Promis
 // Helper to load persisted folders from localStorage (for immediate fallback render)
 export function loadSavedFolders(): WorkspaceFolder[] {
   try {
-    const raw = localStorage.getItem('cline_web_folders');
+    const raw = localStorage.getItem('harni_web_folders');
     if (raw) {
       const parsed = JSON.parse(raw) as WorkspaceFolder[];
       if (Array.isArray(parsed) && parsed.length > 0) {
@@ -214,7 +214,7 @@ export function loadSavedFolders(): WorkspaceFolder[] {
 // Helper to persist folders to localStorage
 export function saveFoldersToStorage(folders: WorkspaceFolder[]): void {
   try {
-    localStorage.setItem('cline_web_folders', JSON.stringify(folders));
+    localStorage.setItem('harni_web_folders', JSON.stringify(folders));
   } catch (err) {
     console.warn('[store] Failed to save folders:', err);
   }
@@ -230,15 +230,15 @@ export function persistGoogleAuthMetadata(info: GoogleAuthInfo | null): void {
       picture: info.picture,
       authenticatedAt: info.authenticatedAt,
     };
-    localStorage.setItem('cline_web_google_auth', JSON.stringify(safe));
+    localStorage.setItem('harni_web_google_auth', JSON.stringify(safe));
   } else {
-    localStorage.removeItem('cline_web_google_auth');
+    localStorage.removeItem('harni_web_google_auth');
   }
 }
 
 export function loadGoogleAuthMetadata(): GoogleAuthInfo | null {
   try {
-    const raw = localStorage.getItem('cline_web_google_auth');
+    const raw = localStorage.getItem('harni_web_google_auth');
     if (raw) {
       const parsed = JSON.parse(raw) as GoogleAuthInfo;
       if (parsed && parsed.authenticated) {
@@ -264,9 +264,9 @@ export function loadSavedSessions(
   initialModel: string;
 } {
   try {
-    const raw = localStorage.getItem('cline_web_sessions');
-    const savedActiveId = localStorage.getItem('cline_web_current_session_id');
-    const savedActiveFolderId = localStorage.getItem('cline_web_active_folder_id');
+    const raw = localStorage.getItem('harni_web_sessions');
+    const savedActiveId = localStorage.getItem('harni_web_current_session_id');
+    const savedActiveFolderId = localStorage.getItem('harni_web_active_folder_id');
 
     if (raw) {
       const parsed = JSON.parse(raw) as ChatSession[];
@@ -345,7 +345,7 @@ let saveSessionTimeout: any = null;
 export function saveSessionsToStorage(sessions: ChatSession[], immediate = false): void {
   const executeSave = () => {
     try {
-      localStorage.setItem('cline_web_sessions', JSON.stringify(sessions));
+      localStorage.setItem('harni_web_sessions', JSON.stringify(sessions));
     } catch (err) {
       console.warn('[store] Failed to save sessions, attempting pruning:', err);
       try {
@@ -355,7 +355,7 @@ export function saveSessionsToStorage(sessions: ChatSession[], immediate = false
           }
           return s;
         });
-        localStorage.setItem('cline_web_sessions', JSON.stringify(pruned));
+        localStorage.setItem('harni_web_sessions', JSON.stringify(pruned));
       } catch (pruneErr) {
         console.error('[store] Failed to write sessions to localStorage:', pruneErr);
       }
@@ -374,7 +374,7 @@ export function saveSessionsToStorage(sessions: ChatSession[], immediate = false
 export function loadSavedProviderBaseUrls(): Record<string, string> {
   const result: Record<string, string> = {};
   try {
-    const raw = localStorage.getItem('cline_web_provider_base_urls');
+    const raw = localStorage.getItem('harni_web_provider_base_urls');
     if (raw) {
       const parsed = JSON.parse(raw);
       if (typeof parsed === 'object' && parsed !== null) {
@@ -385,11 +385,11 @@ export function loadSavedProviderBaseUrls(): Record<string, string> {
   const providers: LLMProviderType[] = ['cline', 'anthropic', 'openai', 'antigravity', 'ollama', 'openrouter', 'opencode', 'custom'];
   for (const p of providers) {
     if (!result[p]) {
-      const single = localStorage.getItem(`cline_web_base_url_${p}`);
+      const single = localStorage.getItem(`harni_web_base_url_${p}`);
       if (single) result[p] = single;
     }
   }
-  const legacyBaseUrl = localStorage.getItem('cline_web_base_url');
+  const legacyBaseUrl = localStorage.getItem('harni_web_base_url');
   if (legacyBaseUrl && !result['custom']) {
     result['custom'] = legacyBaseUrl;
   }
@@ -420,7 +420,7 @@ export const DEFAULT_MCP_CONFIG = JSON.stringify(
 
 export function loadSavedSubagents(): Record<string, SubagentInstanceInfo[]> {
   try {
-    const raw = localStorage.getItem('cline_web_subagents');
+    const raw = localStorage.getItem('harni_web_subagents');
     if (raw) {
       const parsed = JSON.parse(raw);
       if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
@@ -469,7 +469,7 @@ export function saveSubagentsToStorage(subagents: Record<string, SubagentInstanc
           });
         }
       }
-      localStorage.setItem('cline_web_subagents', JSON.stringify(sanitized));
+      localStorage.setItem('harni_web_subagents', JSON.stringify(sanitized));
     } catch (err) {
       console.warn('[store] Failed to save subagents to localStorage:', err);
     }

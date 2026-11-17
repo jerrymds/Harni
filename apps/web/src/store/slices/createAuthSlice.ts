@@ -326,11 +326,11 @@ export const createAuthSlice: StateCreator<AgentStoreState, [], [], AuthSlice> =
   initFromDB: async () => {
     try {
       // Auto-migrate any legacy plaintext key from localStorage into encrypted backend vault
-      const legacyLocalApiKey = localStorage.getItem('cline_web_api_key');
+      const legacyLocalApiKey = localStorage.getItem('harni_web_api_key');
       if (legacyLocalApiKey && legacyLocalApiKey.trim()) {
         const provider = get().selectedProvider;
         await get().saveCredential(provider, legacyLocalApiKey.trim());
-        localStorage.removeItem('cline_web_api_key');
+        localStorage.removeItem('harni_web_api_key');
       }
 
       const res = await apiFetch('/api/db/init');
@@ -353,7 +353,7 @@ export const createAuthSlice: StateCreator<AgentStoreState, [], [], AuthSlice> =
                 const parsed = JSON.parse(v);
                 if (Array.isArray(parsed)) {
                   loadedCustomProviders = parsed;
-                  localStorage.setItem('cline_web_custom_providers', v);
+                  localStorage.setItem('harni_web_custom_providers', v);
                 }
               } catch {}
             } else if (k === 'context_window' && typeof v === 'string') {
@@ -369,7 +369,7 @@ export const createAuthSlice: StateCreator<AgentStoreState, [], [], AuthSlice> =
               }
             } else if (k === 'antigravity_bridge_mode' && (v === 'acp' || v === 'direct')) {
               set({ antigravityMode: v });
-              localStorage.setItem('cline_web_antigravity_mode', v);
+              localStorage.setItem('harni_web_antigravity_mode', v);
             }
           }
         }
@@ -416,8 +416,8 @@ export const createAuthSlice: StateCreator<AgentStoreState, [], [], AuthSlice> =
           return;
         } else {
           // SQLite is empty, check if we have legacy data in localStorage to auto-migrate
-          const rawFolders = localStorage.getItem('cline_web_folders');
-          const rawSessions = localStorage.getItem('cline_web_sessions');
+          const rawFolders = localStorage.getItem('harni_web_folders');
+          const rawSessions = localStorage.getItem('harni_web_sessions');
 
           if (rawFolders || rawSessions) {
             console.log('[createAuthSlice] Auto-migrating legacy localStorage conversations to SQLite...');

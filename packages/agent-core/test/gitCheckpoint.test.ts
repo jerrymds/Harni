@@ -13,7 +13,7 @@ import {
 const execFileAsync = promisify(execFile);
 
 describe('GitCheckpointService & Worktree Unit Tests', () => {
-  const testRoot = path.join(os.tmpdir(), `cline_test_checkpoints_${Date.now()}`);
+  const testRoot = path.join(os.tmpdir(), `harni_test_checkpoints_${Date.now()}`);
   const gitRepoDir = path.join(testRoot, 'test_repo');
   const nonGitDir = path.join(testRoot, 'non_git');
   let service: GitCheckpointService;
@@ -26,8 +26,8 @@ describe('GitCheckpointService & Worktree Unit Tests', () => {
 
     // Initialize real git repo for testing
     await execFileAsync('git', ['init'], { cwd: gitRepoDir });
-    await execFileAsync('git', ['config', 'user.email', 'cline-test@example.com'], { cwd: gitRepoDir });
-    await execFileAsync('git', ['config', 'user.name', 'Cline Test'], { cwd: gitRepoDir });
+    await execFileAsync('git', ['config', 'user.email', 'harni-test@example.com'], { cwd: gitRepoDir });
+    await execFileAsync('git', ['config', 'user.name', 'Harni Test'], { cwd: gitRepoDir });
 
     // Create initial commit
     await fs.writeFile(path.join(gitRepoDir, 'hello.txt'), 'version 1', 'utf-8');
@@ -119,7 +119,7 @@ describe('GitCheckpointService & Worktree Unit Tests', () => {
 
     // Create worktree
     const { worktreePath, branch } = await service.createWorktree(gitRepoDir, sessionId);
-    expect(branch).toBe(`cline/task-${sessionId}`);
+    expect(branch).toBe(`harni/task-${sessionId}`);
 
     // Verify worktree directory exists and is a git worktree
     const stat = await fs.stat(worktreePath);
@@ -227,7 +227,7 @@ describe('GitCheckpointService & Worktree Unit Tests', () => {
       service.createWorktree(gitRepoDir, failSessionId, 'invalid-nonexistent-ref'),
     ).rejects.toThrow('Git worktree add 失敗');
 
-    const worktreePath = path.join(gitRepoDir, '.cline-worktrees', failSessionId);
+    const worktreePath = path.join(gitRepoDir, '.harni-worktrees', failSessionId);
     let exists = false;
     try {
       await fs.access(worktreePath);
@@ -254,9 +254,9 @@ describe('GitCheckpointService & Worktree Unit Tests', () => {
     expect(currentCheckpoints[0].id).toBe(ckpt3.id);
   });
 
-  it('scans and prunes orphaned cline/task-* branches', async () => {
+  it('scans and prunes orphaned harni/task-* branches', async () => {
     // Create an orphaned branch manually
-    const orphanBranch = 'cline/task-orphan_test_session';
+    const orphanBranch = 'harni/task-orphan_test_session';
     await execFileAsync('git', ['branch', orphanBranch], { cwd: gitRepoDir });
 
     const checkBefore = await execFileAsync('git', ['branch', '--list', orphanBranch], { cwd: gitRepoDir });
@@ -273,7 +273,7 @@ describe('GitCheckpointService & Worktree Unit Tests', () => {
   it('deletes all session git artifacts and branches via deleteSessionCheckpoints', async () => {
     const targetSession = 'session_to_delete';
     const safeSession = targetSession.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const branchName = `cline/task-${safeSession}`;
+    const branchName = `harni/task-${safeSession}`;
 
     await service.createCheckpoint(gitRepoDir, { sessionId: targetSession, description: 'session ckpt' });
     await execFileAsync('git', ['branch', branchName], { cwd: gitRepoDir });
@@ -293,9 +293,9 @@ describe('GitCheckpointService & Worktree Unit Tests', () => {
     expect(nonGitRes.isGitRepo).toBe(false);
     expect(nonGitRes.branches).toEqual([]);
 
-    // Create a regular branch and an internal cline/task-* branch
+    // Create a regular branch and an internal harni/task-* branch
     await execFileAsync('git', ['branch', 'feature/test-branch'], { cwd: gitRepoDir });
-    await execFileAsync('git', ['branch', 'cline/task-temp-work'], { cwd: gitRepoDir });
+    await execFileAsync('git', ['branch', 'harni/task-temp-work'], { cwd: gitRepoDir });
 
     const res = await service.listBranches(gitRepoDir);
     expect(res.isGitRepo).toBe(true);
@@ -303,8 +303,8 @@ describe('GitCheckpointService & Worktree Unit Tests', () => {
 
     const branchNames = res.branches.map((b) => b.name);
     expect(branchNames).toContain('feature/test-branch');
-    // cline/task-temp-work must be filtered out because it is not current
-    expect(branchNames).not.toContain('cline/task-temp-work');
+    // harni/task-temp-work must be filtered out because it is not current
+    expect(branchNames).not.toContain('harni/task-temp-work');
 
     const currentBranchObj = res.branches.find((b) => b.current);
     expect(currentBranchObj).toBeDefined();
@@ -313,7 +313,7 @@ describe('GitCheckpointService & Worktree Unit Tests', () => {
 
     // Clean up created branch
     await execFileAsync('git', ['branch', '-D', 'feature/test-branch'], { cwd: gitRepoDir });
-    await execFileAsync('git', ['branch', '-D', 'cline/task-temp-work'], { cwd: gitRepoDir });
+    await execFileAsync('git', ['branch', '-D', 'harni/task-temp-work'], { cwd: gitRepoDir });
   });
 
   it('switches and creates branches with validation', async () => {

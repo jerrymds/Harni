@@ -39,9 +39,8 @@ temp_server_test_workspace/
 *.sqlite
 *.sqlite3
 .harni/
-.cline-web/
-.cline-worktrees/
-.clinerules/
+.harni-worktrees/
+.harnirules/
 .codebase-memory/
 memory-bank/
 

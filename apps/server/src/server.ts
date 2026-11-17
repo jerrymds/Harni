@@ -25,6 +25,7 @@ import { registerSkillsRoutes } from './routes/skills.js';
 import { registerMcpRoutes } from './routes/mcp.js';
 import { registerDbRoutes } from './routes/db.js';
 import { registerCheckpointRoutes } from './routes/checkpoint.js';
+import { registerPluginsRoutes } from './routes/plugins.js';
 import type { McpServerConfig } from '@harni/agent-core';
 import { StaticFileService } from './services/staticFileService.js';
 
@@ -34,7 +35,7 @@ export function createApp(config: ServerConfig = {}): AppInstance {
   const authToken =
     config.authToken ||
     process.env.AUTH_TOKEN ||
-    process.env.CLINE_AUTH_TOKEN ||
+    process.env.HARNI_AUTH_TOKEN ||
     process.env.SERVER_API_KEY ||
     undefined;
   const maxBodySize =
@@ -52,7 +53,7 @@ export function createApp(config: ServerConfig = {}): AppInstance {
   const fsService = new FSService(workspaceRoot);
   const ptyService = new PTYService({ workspaceRoot });
   const dbService = new DBService({
-    dbPath: config.dbPath || process.env.HARNI_DB_PATH || process.env.CLINE_DB_PATH,
+    dbPath: config.dbPath || process.env.HARNI_DB_PATH,
   });
 
   const mcpEnabledSetting = dbService.getSetting('mcp_enabled');
@@ -89,6 +90,16 @@ export function createApp(config: ServerConfig = {}): AppInstance {
       return await ptyService.executeCommand(cmd, cwd, onData);
     },
   });
+
+  const savedSettings = dbService.getSettings();
+  for (const [key, val] of Object.entries(savedSettings)) {
+    if (key.startsWith('plugin_enabled_')) {
+      const pluginId = key.slice('plugin_enabled_'.length);
+      if (engine.getPluginManager().hasPlugin(pluginId)) {
+        engine.setPluginEnabled(pluginId, val === 'true');
+      }
+    }
+  }
 
   if (mcpEnabled && Object.keys(mcpServers).length > 0) {
     engine.initializeMcp().then((res) => {
@@ -127,6 +138,7 @@ export function createApp(config: ServerConfig = {}): AppInstance {
   registerMcpRoutes(router);
   registerDbRoutes(router);
   registerCheckpointRoutes(router);
+  registerPluginsRoutes(router);
 
   const staticService = process.env.HARNI_STATIC_DIR
     ? new StaticFileService(process.env.HARNI_STATIC_DIR)

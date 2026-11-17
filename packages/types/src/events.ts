@@ -46,7 +46,38 @@ export interface ServerToClientEvents {
     structuredReport?: import('./agent.js').SubagentStructuredReport;
     worktreePath?: string;
     worktreeBranch?: string;
+    background?: boolean;
+    role?: string;
   };
+  'wakeup:queued': {
+    sessionId: string;
+    source: 'subagent' | 'schedule' | 'message';
+    sourceId?: string;
+    summary: string;
+  };
+  'schedule:created': {
+    sessionId: string;
+    scheduleId: string;
+    kind: 'timer' | 'cron';
+    prompt: string;
+    nextRunAt?: number;
+    cronExpression?: string;
+    durationSeconds?: number;
+    isDaemon?: boolean;
+  };
+  'schedule:triggered': {
+    sessionId: string;
+    scheduleId: string;
+    prompt: string;
+    iteration: number;
+  };
+  'schedule:cancelled': {
+    sessionId: string;
+    scheduleId: string;
+    reason?: string;
+  };
+  'swarm:updated': import('./agent.js').SwarmBoardState;
+  'swarm:message': import('./agent.js').SwarmMessage;
   'test:result': {
     passed: boolean;
     command: string;

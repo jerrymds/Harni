@@ -20,7 +20,7 @@ describe('Request Body Length Limits & DoS / OOM Protection', () => {
     app = createApp({
       port: 0,
       workspaceRoot: tempDir,
-      dbPath: path.join(tempDir, 'cline-body-test.db'),
+      dbPath: path.join(tempDir, 'harni-body-test.db'),
       maxBodySize: 1024, // 1 KB limit
     });
     port = await app.start();

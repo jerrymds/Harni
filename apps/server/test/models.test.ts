@@ -14,7 +14,7 @@ describe('ModelService & /api/models API Endpoint', () => {
     app = createApp({
       port: 0,
       workspaceRoot: tempDir,
-      dbPath: path.join(tempDir, 'cline-test.db'),
+      dbPath: path.join(tempDir, 'harni-test.db'),
     });
     port = await app.start();
   });

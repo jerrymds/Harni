@@ -12,6 +12,7 @@ export interface InvokeSubagentParams {
     timeoutMs?: number;
     isolation?: 'inherit' | 'worktree';
     autoMergeWorktree?: boolean;
+    fork?: string;
   }>;
 }
 
@@ -71,6 +72,11 @@ export class InvokeSubagentTool extends BaseTool<InvokeSubagentParams> {
               description:
                 'If isolation is "worktree", whether to automatically merge changes back into the parent workspace upon successful completion (default: true).',
             },
+            fork: {
+              type: 'string',
+              description:
+                'Optional conversation history source to fork from: "coordinator", an existing subagentId, or a swarm member name.',
+            },
           },
           required: ['typeName', 'role', 'prompt'],
         },
@@ -127,6 +133,9 @@ export class InvokeSubagentTool extends BaseTool<InvokeSubagentParams> {
       timeoutMs: s.timeoutMs,
       isolation: s.isolation,
       autoMergeWorktree: s.autoMergeWorktree,
+      fork: s.fork,
+      swarmBoardService: context.swarmBoardService,
+      getSessionMessages: context.getSessionMessages,
     }));
 
     try {

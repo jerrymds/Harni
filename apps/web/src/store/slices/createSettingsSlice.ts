@@ -1,5 +1,5 @@
 import type { StateCreator } from 'zustand';
-import type { ThinkingDepth } from '@harni/types';
+import type { ThinkingDepth, WorkflowPluginMetadata } from '@harni/types';
 import type { AgentStoreState, SettingsSlice } from '../types.js';
 import {
   apiFetch,
@@ -12,19 +12,19 @@ import {
   syncSettingsToDB,
 } from '../utils.js';
 
-const savedProvider = (localStorage.getItem('cline_web_provider') as any) || 'cline';
+const savedProvider = (localStorage.getItem('harni_web_provider') as any) || 'cline';
 const savedModel =
-  localStorage.getItem('cline_web_model') ||
-  localStorage.getItem(`cline_web_model_${savedProvider}`) ||
+  localStorage.getItem('harni_web_model') ||
+  localStorage.getItem(`harni_web_model_${savedProvider}`) ||
   PROVIDER_DEFAULT_MODELS[savedProvider as keyof typeof PROVIDER_DEFAULT_MODELS] ||
   '';
-const savedMode = (localStorage.getItem('cline_web_mode') as any) || 'code';
+const savedMode = (localStorage.getItem('harni_web_mode') as any) || 'code';
 const initialSessionsData = loadSavedSessions(savedMode, 'folder_default', savedProvider, savedModel);
 const initialProviderBaseUrls = loadSavedProviderBaseUrls();
 
 const loadSavedModelContextWindows = (): Record<string, number> => {
   try {
-    const raw = localStorage.getItem('cline_web_context_windows');
+    const raw = localStorage.getItem('harni_web_context_windows');
     return raw ? JSON.parse(raw) : {};
   } catch {
     return {};
@@ -32,53 +32,62 @@ const loadSavedModelContextWindows = (): Record<string, number> => {
 };
 
 const savedContextWindow = (() => {
-  const raw = localStorage.getItem('cline_web_context_window');
+  const raw = localStorage.getItem('harni_web_context_window');
   if (!raw) return null;
   const num = parseInt(raw, 10);
   return Number.isFinite(num) && num > 0 ? num : null;
 })();
 
+const ensureGitWorkspacePluginEnabled = (get: () => AgentStoreState): void => {
+  const gitPlugin = get().workflowPlugins.find((p) => p.id === 'harni.git-workspace');
+  if (gitPlugin && !gitPlugin.enabled) {
+    void get().toggleWorkflowPlugin('harni.git-workspace', true);
+  }
+};
+
 export const createSettingsSlice: StateCreator<AgentStoreState, [], [], SettingsSlice> = (set, get) => ({
-  thinkingDepth: ((localStorage.getItem('cline_web_thinking_depth') as ThinkingDepth) || 'medium'),
-  autoApprove: localStorage.getItem('cline_web_auto_approve') === 'true',
+  thinkingDepth: ((localStorage.getItem('harni_web_thinking_depth') as ThinkingDepth) || 'medium'),
+  autoApprove: localStorage.getItem('harni_web_auto_approve') === 'true',
   customApiKey: '',
   customBaseUrl: initialProviderBaseUrls[initialSessionsData.initialProvider || savedProvider] || '',
   providerBaseUrls: initialProviderBaseUrls,
-  customProviderName: localStorage.getItem('cline_web_custom_provider_name') || '',
+  customProviderName: localStorage.getItem('harni_web_custom_provider_name') || '',
   customProviders: loadSavedCustomProviders(),
   isSettingsOpen: false,
-  theme: localStorage.getItem('cline_web_theme') || 'eye-friendly',
-  fontSize: localStorage.getItem('cline_web_font_size') || 'sm',
-  codeFont: localStorage.getItem('cline_web_code_font') || 'fira',
-  compactMode: localStorage.getItem('cline_web_compact_mode') === 'true',
-  mcpEnabled: localStorage.getItem('cline_web_mcp_enabled') === 'true',
-  mcpConfig: localStorage.getItem('cline_web_mcp_config') || DEFAULT_MCP_CONFIG,
+  theme: localStorage.getItem('harni_web_theme') || 'eye-friendly',
+  fontSize: localStorage.getItem('harni_web_font_size') || 'sm',
+  codeFont: localStorage.getItem('harni_web_code_font') || 'fira',
+  compactMode: localStorage.getItem('harni_web_compact_mode') === 'true',
+  mcpEnabled: localStorage.getItem('harni_web_mcp_enabled') === 'true',
+  mcpConfig: localStorage.getItem('harni_web_mcp_config') || DEFAULT_MCP_CONFIG,
   serverAuthToken: getServerAuthToken(),
-  autoTestEnabled: localStorage.getItem('cline_web_auto_test_enabled') !== 'false',
-  autoTestCommand: localStorage.getItem('cline_web_auto_test_command') || '',
-  gitCheckpointEnabled: localStorage.getItem('cline_web_git_checkpoint_enabled') !== 'false',
-  worktreeIsolationEnabled: localStorage.getItem('cline_web_worktree_isolation_enabled') === 'true',
-  subagentsEnabled: localStorage.getItem('cline_web_subagents_enabled') !== 'false',
+  autoTestEnabled: localStorage.getItem('harni_web_auto_test_enabled') !== 'false',
+  autoTestCommand: localStorage.getItem('harni_web_auto_test_command') || '',
+  gitCheckpointEnabled: localStorage.getItem('harni_web_git_checkpoint_enabled') !== 'false',
+  worktreeIsolationEnabled: localStorage.getItem('harni_web_worktree_isolation_enabled') === 'true',
+  subagentsEnabled: localStorage.getItem('harni_web_subagents_enabled') !== 'false',
   contextWindow: savedContextWindow,
   modelContextWindows: loadSavedModelContextWindows(),
   quotaInfo: null,
   isLoadingQuota: false,
-  antigravityMode: ((localStorage.getItem('cline_web_antigravity_mode') as 'acp' | 'direct') || 'acp'),
+  antigravityMode: ((localStorage.getItem('harni_web_antigravity_mode') as 'acp' | 'direct') || 'acp'),
+  workflowPlugins: [],
+  isLoadingPlugins: false,
 
   setThinkingDepth: (depth) => {
-    localStorage.setItem('cline_web_thinking_depth', depth);
+    localStorage.setItem('harni_web_thinking_depth', depth);
     set({ thinkingDepth: depth });
     syncSettingsToDB({ thinking_depth: depth });
   },
 
   setAutoApprove: (enabled) => {
-    localStorage.setItem('cline_web_auto_approve', String(enabled));
+    localStorage.setItem('harni_web_auto_approve', String(enabled));
     set({ autoApprove: enabled });
     syncSettingsToDB({ auto_approve: String(enabled) });
   },
 
   setAntigravityMode: (mode) => {
-    localStorage.setItem('cline_web_antigravity_mode', mode);
+    localStorage.setItem('harni_web_antigravity_mode', mode);
     set({ antigravityMode: mode });
     syncSettingsToDB({ antigravity_bridge_mode: mode });
   },
@@ -94,8 +103,8 @@ export const createSettingsSlice: StateCreator<AgentStoreState, [], [], Settings
   setProviderBaseUrl: (provider, url) => {
     const trimmed = url.trim();
     const updated = { ...get().providerBaseUrls, [provider]: trimmed };
-    localStorage.setItem('cline_web_provider_base_urls', JSON.stringify(updated));
-    localStorage.setItem(`cline_web_base_url_${provider}`, trimmed);
+    localStorage.setItem('harni_web_provider_base_urls', JSON.stringify(updated));
+    localStorage.setItem(`harni_web_base_url_${provider}`, trimmed);
     if (provider === get().selectedProvider) {
       set({ customBaseUrl: trimmed, providerBaseUrls: updated });
     } else {
@@ -105,14 +114,14 @@ export const createSettingsSlice: StateCreator<AgentStoreState, [], [], Settings
   },
 
   setCustomProviderName: (name) => {
-    localStorage.setItem('cline_web_custom_provider_name', name);
+    localStorage.setItem('harni_web_custom_provider_name', name);
     set({ customProviderName: name });
     syncSettingsToDB({ custom_provider_name: name });
   },
 
   setCustomProviders: (providers) => {
     const serialized = JSON.stringify(providers);
-    localStorage.setItem('cline_web_custom_providers', serialized);
+    localStorage.setItem('harni_web_custom_providers', serialized);
     set({ customProviders: providers });
     syncSettingsToDB({ custom_providers: serialized });
   },
@@ -141,84 +150,90 @@ export const createSettingsSlice: StateCreator<AgentStoreState, [], [], Settings
   },
 
   setTheme: (theme) => {
-    localStorage.setItem('cline_web_theme', theme);
+    localStorage.setItem('harni_web_theme', theme);
     set({ theme });
     syncSettingsToDB({ theme });
   },
 
   setFontSize: (fontSize) => {
-    localStorage.setItem('cline_web_font_size', fontSize);
+    localStorage.setItem('harni_web_font_size', fontSize);
     set({ fontSize });
     syncSettingsToDB({ font_size: fontSize });
   },
 
   setCodeFont: (codeFont) => {
-    localStorage.setItem('cline_web_code_font', codeFont);
+    localStorage.setItem('harni_web_code_font', codeFont);
     set({ codeFont });
     syncSettingsToDB({ code_font: codeFont });
   },
 
   setCompactMode: (compactMode) => {
-    localStorage.setItem('cline_web_compact_mode', String(compactMode));
+    localStorage.setItem('harni_web_compact_mode', String(compactMode));
     set({ compactMode });
     syncSettingsToDB({ compact_mode: String(compactMode) });
   },
 
   setServerAuthToken: (token: string) => {
     try {
-      localStorage.setItem('cline_web_server_auth_token', token);
+      localStorage.setItem('harni_web_server_auth_token', token);
     } catch {}
     set({ serverAuthToken: token });
   },
 
   setMcpEnabled: (mcpEnabled) => {
-    localStorage.setItem('cline_web_mcp_enabled', String(mcpEnabled));
+    localStorage.setItem('harni_web_mcp_enabled', String(mcpEnabled));
     set({ mcpEnabled });
     syncSettingsToDB({ mcp_enabled: String(mcpEnabled) });
   },
 
   setMcpConfig: (mcpConfig) => {
-    localStorage.setItem('cline_web_mcp_config', mcpConfig);
+    localStorage.setItem('harni_web_mcp_config', mcpConfig);
     set({ mcpConfig });
     syncSettingsToDB({ mcp_config: mcpConfig });
   },
 
   setAutoTestEnabled: (enabled) => {
-    localStorage.setItem('cline_web_auto_test_enabled', String(enabled));
+    localStorage.setItem('harni_web_auto_test_enabled', String(enabled));
     set({ autoTestEnabled: enabled });
     syncSettingsToDB({ auto_test_enabled: String(enabled) });
   },
 
   setAutoTestCommand: (cmd) => {
-    localStorage.setItem('cline_web_auto_test_command', cmd);
+    localStorage.setItem('harni_web_auto_test_command', cmd);
     set({ autoTestCommand: cmd });
     syncSettingsToDB({ auto_test_command: cmd });
   },
 
   setGitCheckpointEnabled: (enabled) => {
-    localStorage.setItem('cline_web_git_checkpoint_enabled', String(enabled));
+    localStorage.setItem('harni_web_git_checkpoint_enabled', String(enabled));
     set({ gitCheckpointEnabled: enabled });
     syncSettingsToDB({ git_checkpoint_enabled: String(enabled) });
+    if (enabled) {
+      ensureGitWorkspacePluginEnabled(get);
+    }
   },
 
   setWorktreeIsolationEnabled: (enabled) => {
-    localStorage.setItem('cline_web_worktree_isolation_enabled', String(enabled));
+    localStorage.setItem('harni_web_worktree_isolation_enabled', String(enabled));
     set({ worktreeIsolationEnabled: enabled });
     syncSettingsToDB({ worktree_isolation_enabled: String(enabled) });
+    if (enabled) {
+      ensureGitWorkspacePluginEnabled(get);
+    }
   },
 
   setSubagentsEnabled: (enabled) => {
-    localStorage.setItem('cline_web_subagents_enabled', String(enabled));
+    localStorage.setItem('harni_web_subagents_enabled', String(enabled));
     set({ subagentsEnabled: enabled });
     syncSettingsToDB({ subagents_enabled: String(enabled) });
   },
 
   setContextWindow: (contextWindow) => {
     if (contextWindow && contextWindow > 0) {
-      localStorage.setItem('cline_web_context_window', String(contextWindow));
+      localStorage.setItem('harni_web_context_window', String(contextWindow));
       syncSettingsToDB({ context_window: String(contextWindow) });
     } else {
-      localStorage.removeItem('cline_web_context_window');
+      localStorage.removeItem('harni_web_context_window');
       syncSettingsToDB({ context_window: '' });
     }
     set({ contextWindow });
@@ -233,14 +248,17 @@ export const createSettingsSlice: StateCreator<AgentStoreState, [], [], Settings
       delete current[modelId];
       syncSettingsToDB({ [`context_window_${modelId}`]: '' });
     }
-    localStorage.setItem('cline_web_context_windows', JSON.stringify(current));
+    localStorage.setItem('harni_web_context_windows', JSON.stringify(current));
     set({ modelContextWindows: current });
   },
 
   setSettingsOpen: (open) => {
     set({ isSettingsOpen: open });
-    if (open && get().selectedProvider === 'antigravity') {
-      get().fetchModelQuota('antigravity');
+    if (open) {
+      get().fetchWorkflowPlugins();
+      if (get().selectedProvider === 'antigravity') {
+        get().fetchModelQuota('antigravity');
+      }
     }
   },
 
@@ -264,5 +282,67 @@ export const createSettingsSlice: StateCreator<AgentStoreState, [], [], Settings
       set({ isLoadingQuota: false });
     }
     return null;
+  },
+  fetchWorkflowPlugins: async () => {
+    set({ isLoadingPlugins: true });
+    try {
+      const res = await apiFetch('/api/plugins');
+      if (res.ok) {
+        const data = await res.json();
+        const plugins: WorkflowPluginMetadata[] = data.plugins || [];
+        const autoTestPlugin = plugins.find((p) => p.id === 'harni.auto-test-repair');
+        if (autoTestPlugin) {
+          localStorage.setItem('harni_web_auto_test_enabled', String(autoTestPlugin.enabled));
+          set({ workflowPlugins: plugins, autoTestEnabled: autoTestPlugin.enabled });
+        } else {
+          set({ workflowPlugins: plugins });
+        }
+      }
+    } catch (err) {
+      console.warn('[createSettingsSlice] Failed to fetch workflow plugins:', err);
+    } finally {
+      set({ isLoadingPlugins: false });
+    }
+  },
+
+  toggleWorkflowPlugin: async (id: string, enabled: boolean) => {
+    const prev = get().workflowPlugins;
+    const optimistic = prev.map((p) => (p.id === id ? { ...p, enabled } : p));
+    set({
+      workflowPlugins: optimistic,
+    });
+
+    try {
+      const res = await apiFetch('/api/plugins/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, enabled }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const nextPlugins: WorkflowPluginMetadata[] = data.plugins || optimistic;
+        if (data.plugins) {
+          set({ workflowPlugins: nextPlugins });
+        }
+        if (id === 'harni.auto-test-repair') {
+          const updatedPlugin = nextPlugins.find((p) => p.id === id);
+          const nextEnabled = updatedPlugin ? updatedPlugin.enabled : enabled;
+          localStorage.setItem('harni_web_auto_test_enabled', String(nextEnabled));
+          set({ autoTestEnabled: nextEnabled });
+          syncSettingsToDB({ auto_test_enabled: String(nextEnabled) });
+        } else if (id === 'harni.git-workspace') {
+          const updatedPlugin = nextPlugins.find((p) => p.id === id);
+          const nextEnabled = updatedPlugin ? updatedPlugin.enabled : enabled;
+          if (nextEnabled && !get().gitCheckpointEnabled && !get().worktreeIsolationEnabled) {
+            get().setGitCheckpointEnabled(true);
+          }
+        }
+      } else {
+        set({ workflowPlugins: prev });
+      }
+    } catch (err) {
+      console.warn('[createSettingsSlice] Failed to toggle workflow plugin:', err);
+      set({ workflowPlugins: prev });
+    }
   },
 });

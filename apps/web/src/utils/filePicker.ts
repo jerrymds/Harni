@@ -8,7 +8,7 @@ export async function pickDirectoryFromExplorer(): Promise<{ name: string; path?
     const timer = setTimeout(() => controller.abort(), 60000);
     const token =
       typeof localStorage !== 'undefined'
-        ? localStorage.getItem('cline_web_server_auth_token') || ''
+        ? localStorage.getItem('harni_web_server_auth_token') || ''
         : '';
     const headers: Record<string, string> = {};
     if (token) {

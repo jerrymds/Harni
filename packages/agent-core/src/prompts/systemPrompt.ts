@@ -1,4 +1,4 @@
-import type { AgentMode, AgentSkill, ToolDefinition, HarnessExperience } from '@harni/types';
+import type { AgentMode, AgentSkill, ToolDefinition, HarnessExperience, SystemPromptSection } from '@harni/types';
 import { formatExperiencesForPrompt } from '../harness/experienceFormat.js';
 
 export interface SystemPromptOptions {
@@ -12,6 +12,7 @@ export interface SystemPromptOptions {
   isSubagent?: boolean;
   experiences?: HarnessExperience[];
   experiencesFormatted?: string;
+  pluginSections?: SystemPromptSection[];
 }
 
 export class SystemPromptBuilder {
@@ -27,6 +28,7 @@ export class SystemPromptBuilder {
       isSubagent = false,
       experiences,
       experiencesFormatted,
+      pluginSections,
     } = options;
 
     const sections: string[] = [];
@@ -116,8 +118,28 @@ export class SystemPromptBuilder {
     if (customInstructions && customInstructions.trim().length > 0) {
       const header = isSubagent
         ? '==== SUBAGENT ROLE INSTRUCTIONS ===='
-        : '==== USER CUSTOM INSTRUCTIONS (.clinerules) ====';
+        : '==== USER CUSTOM INSTRUCTIONS (.harnirules) ====';
       sections.push(`${header}\n${customInstructions.trim()}`);
+    }
+
+    // 11. Workflow Plugin Sections
+    if (pluginSections && pluginSections.length > 0) {
+      const sorted = [...pluginSections].sort(
+        (a, b) => (a.order ?? 100) - (b.order ?? 100),
+      );
+      for (const sec of sorted) {
+        const trimmed = sec.content ? sec.content.trim() : '';
+        if (trimmed.length > 0) {
+          const isDuplicate =
+            sections.includes(trimmed) ||
+            (customInstructions && (customInstructions.includes(trimmed) || trimmed.includes(customInstructions.trim()))) ||
+            (skillsFormatted && (skillsFormatted.includes(trimmed) || trimmed.includes(skillsFormatted.trim()))) ||
+            (experiencesFormatted && (experiencesFormatted.includes(trimmed) || trimmed.includes(experiencesFormatted.trim())));
+          if (!isDuplicate) {
+            sections.push(trimmed);
+          }
+        }
+      }
     }
 
     return sections.join('\n\n');
@@ -177,14 +199,18 @@ You are the primary coordinator (Orchestrator). You can spawn specialized subage
 - **send_message**: Follow up or send additional guidance to an active subagent.
 - **manage_subagents**: List active subagents, or terminate subagents.
 - **define_subagent**: Declare a custom subagent archetype for specialized domain tasks.
+- **schedule**: Schedule a one-shot timer (\`durationSeconds\`) or recurring 5-field cron job (\`cronExpression\`) that wakes up this session with a prompt.
+- **swarm**: Orchestrate peer workers on a shared message board (\`title\`, \`add\` with optional \`tasks\` sharding / \`n\` copies / \`fork\` / \`workspace: "worktree"\`, \`post\` with \`@mention\`, \`read\`, \`status\`, \`kill\`).
 
 Guidelines for Subagent Delegation:
 1. When a task involves exploring many files, directory structure, or broad codebase investigation, invoke \`researcher\` to conduct the investigation and return a concise report.
 2. When implementing feature code, refactoring, or file modifications, invoke \`coder\`.
 3. When testing changes, running test suites, or reviewing diffs, invoke \`reviewer\`.
 4. When planning complex architecture or decomposing large tasks, invoke \`architect\`.
-5. When multiple independent subtasks can be tackled at once (e.g. researching frontend and backend simultaneously), invoke them in parallel with a single \`invoke_subagent\` call.
-6. Review and synthesize findings from subagents before concluding the overall user task.`;
+5. When multiple independent subtasks can be tackled at once (e.g. researching frontend and backend simultaneously), invoke them in parallel with a single \`invoke_subagent\` call, or spawn a \`swarm\` when workers need to collaborate or shard \`tasks\` via the shared message board.
+6. **Context Fork**: Pass \`fork: "coordinator"\` (or an existing subagent ID / swarm member name) to \`invoke_subagent\` or \`swarm\` (\`action: "add"\`) when a worker needs full prior conversation context instead of starting fresh.
+7. **Reactive Wakeup (No Polling Needed)**: When you launch a subagent with \`background: true\`, add \`swarm\` workers, or create a \`schedule\`, you do NOT need to poll or call \`manage_subagents({ action: 'wait' })\` in a blocking loop. You can continue other work or end your turn; the system automatically wakes you with a \`[SYSTEM_NOTIFICATION]\` when the background subagent completes, a worker posts \`@coordinator\` on the swarm board, or the schedule triggers.
+8. Review and synthesize findings from subagents before concluding the overall user task.`;
   }
 
   private static getPlanningModeSection(): string {

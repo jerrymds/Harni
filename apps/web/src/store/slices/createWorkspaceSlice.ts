@@ -16,13 +16,13 @@ import {
 } from '../utils.js';
 import { isRateLimitError, parseClientRateLimit } from '../../utils/rateLimit.js';
 
-const savedProvider = (localStorage.getItem('cline_web_provider') as any) || 'cline';
+const savedProvider = (localStorage.getItem('harni_web_provider') as any) || 'cline';
 const savedModel =
-  localStorage.getItem('cline_web_model') ||
-  localStorage.getItem(`cline_web_model_${savedProvider}`) ||
+  localStorage.getItem('harni_web_model') ||
+  localStorage.getItem(`harni_web_model_${savedProvider}`) ||
   PROVIDER_DEFAULT_MODELS[savedProvider as keyof typeof PROVIDER_DEFAULT_MODELS] ||
   '';
-const savedMode = (localStorage.getItem('cline_web_mode') as any) || 'code';
+const savedMode = (localStorage.getItem('harni_web_mode') as any) || 'code';
 const initialFolders = loadSavedFolders();
 const defaultFolderId = initialFolders[0]?.id || 'folder_default';
 const initialSessionsData = loadSavedSessions(savedMode, defaultFolderId, savedProvider, savedModel);

@@ -17,12 +17,12 @@ import {
   syncSettingsToDB,
 } from '../utils.js';
 
-const savedProvider = (localStorage.getItem('cline_web_provider') as LLMProviderType) || 'cline';
+const savedProvider = (localStorage.getItem('harni_web_provider') as LLMProviderType) || 'cline';
 const savedModel =
-  localStorage.getItem('cline_web_model') ||
-  localStorage.getItem(`cline_web_model_${savedProvider}`) ||
+  localStorage.getItem('harni_web_model') ||
+  localStorage.getItem(`harni_web_model_${savedProvider}`) ||
   PROVIDER_DEFAULT_MODELS[savedProvider];
-const savedMode = (localStorage.getItem('cline_web_mode') as AgentMode) || 'code';
+const savedMode = (localStorage.getItem('harni_web_mode') as AgentMode) || 'code';
 const initialFolders = loadSavedFolders();
 const defaultFolderId = initialFolders[0]?.id || 'folder_default';
 const initialSessionsData = loadSavedSessions(savedMode, defaultFolderId, savedProvider, savedModel);
@@ -118,6 +118,12 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
         payload: { sessionId: currentSessionId },
       }),
     );
+    const workflowPlugins = get().workflowPlugins;
+    const autoTestPlugin = workflowPlugins.find((p) => p.id === 'harni.auto-test-repair');
+    const gitPlugin = workflowPlugins.find((p) => p.id === 'harni.git-workspace');
+    const isAutoTestPluginEnabled = autoTestPlugin ? autoTestPlugin.enabled : get().autoTestEnabled;
+    const isGitPluginEnabled = gitPlugin ? gitPlugin.enabled : true;
+
     const msg = {
       type: 'user:prompt',
       payload: {
@@ -135,10 +141,10 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
               (get().customProviders || []).find((p) => p.id === selectedProvider)?.defaultBaseUrl) ||
           undefined,
         autoApprove: get().autoApprove,
-        autoTest: get().autoTestEnabled,
+        autoTest: isAutoTestPluginEnabled,
         testCommand: get().autoTestCommand || undefined,
-        enableWorktree: get().worktreeIsolationEnabled,
-        enableCheckpoint: get().gitCheckpointEnabled,
+        enableWorktree: isGitPluginEnabled && get().worktreeIsolationEnabled,
+        enableCheckpoint: isGitPluginEnabled && get().gitCheckpointEnabled,
         subagentsEnabled: get().subagentsEnabled,
         antigravityMode: get().antigravityMode,
         thinkingDepth: get().thinkingDepth,
@@ -242,8 +248,8 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
 
     const updatedSessions = [newSessionItem, ...sessions];
 
-    localStorage.setItem('cline_web_current_session_id', newId);
-    localStorage.setItem('cline_web_active_folder_id', folderId);
+    localStorage.setItem('harni_web_current_session_id', newId);
+    localStorage.setItem('harni_web_active_folder_id', folderId);
 
     set({
       sessions: updatedSessions,
@@ -302,13 +308,13 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
       const targetProvider = target.provider || get().selectedProvider;
       const targetModel = target.model || get().selectedModel;
 
-      localStorage.setItem('cline_web_current_session_id', sessionId);
-      localStorage.setItem('cline_web_active_folder_id', folderId);
+      localStorage.setItem('harni_web_current_session_id', sessionId);
+      localStorage.setItem('harni_web_active_folder_id', folderId);
       if (target.provider) {
-        localStorage.setItem('cline_web_provider', target.provider);
+        localStorage.setItem('harni_web_provider', target.provider);
       }
       if (target.model) {
-        localStorage.setItem('cline_web_model', target.model);
+        localStorage.setItem('harni_web_model', target.model);
       }
 
       set({
@@ -390,7 +396,7 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
         model: selectedModel,
         messages: [],
       };
-      localStorage.setItem('cline_web_current_session_id', defaultId);
+      localStorage.setItem('harni_web_current_session_id', defaultId);
       set({
         sessions: [defaultSession],
         currentSessionId: defaultId,
@@ -416,9 +422,9 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
       currentSessionId === sessionId ? filtered[0]?.id || '' : currentSessionId;
     const nextSession = filtered.find((s) => s.id === nextActiveId);
 
-    localStorage.setItem('cline_web_current_session_id', nextActiveId);
+    localStorage.setItem('harni_web_current_session_id', nextActiveId);
     if (nextSession?.folderId) {
-      localStorage.setItem('cline_web_active_folder_id', nextSession.folderId);
+      localStorage.setItem('harni_web_active_folder_id', nextSession.folderId);
     }
 
     const nextProvider = nextSession?.provider || selectedProvider;
@@ -500,7 +506,7 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
   },
 
   setMode: (mode) => {
-    localStorage.setItem('cline_web_mode', mode);
+    localStorage.setItem('harni_web_mode', mode);
     const { sessions, currentSessionId } = get();
     const updatedSessions = sessions.map((s) =>
       s.id === currentSessionId ? { ...s, mode, updatedAt: Date.now() } : s,
@@ -512,14 +518,14 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
   },
 
   setProvider: (provider) => {
-    localStorage.setItem('cline_web_provider', provider);
+    localStorage.setItem('harni_web_provider', provider);
     const customProv = (get().customProviders || []).find((p) => p.id === provider);
     const savedForProvider =
-      localStorage.getItem(`cline_web_model_${provider}`) ||
+      localStorage.getItem(`harni_web_model_${provider}`) ||
       customProv?.defaultModel ||
       PROVIDER_DEFAULT_MODELS[provider] ||
       '';
-    localStorage.setItem('cline_web_model', savedForProvider);
+    localStorage.setItem('harni_web_model', savedForProvider);
 
     const providerBaseUrl =
       get().providerBaseUrls[provider] || customProv?.defaultBaseUrl || '';
@@ -548,8 +554,8 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
   },
 
   setModel: (model) => {
-    localStorage.setItem('cline_web_model', model);
-    localStorage.setItem(`cline_web_model_${get().selectedProvider}`, model);
+    localStorage.setItem('harni_web_model', model);
+    localStorage.setItem(`harni_web_model_${get().selectedProvider}`, model);
 
     const { sessions, currentSessionId, selectedProvider } = get();
     const updatedSessions = sessions.map((s) =>
@@ -608,7 +614,7 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
         if (!currentModel && models.length > 0) {
           const fallback = models[0]?.id || '';
           set({ selectedModel: fallback });
-          localStorage.setItem('cline_web_model', fallback);
+          localStorage.setItem('harni_web_model', fallback);
         }
       }
     } catch (err) {

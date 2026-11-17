@@ -23,7 +23,7 @@ describe('Store Utils & Network Helpers', () => {
   });
 
   it('retrieves server auth token and sets auth headers', () => {
-    localStorage.setItem('cline_web_server_auth_token', 'test-token-xyz');
+    localStorage.setItem('harni_web_server_auth_token', 'test-token-xyz');
     expect(getServerAuthToken()).toBe('test-token-xyz');
 
     const headers = getAuthHeaders({ 'Content-Type': 'application/json' });

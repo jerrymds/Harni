@@ -1,7 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { LLMProviderType, SubagentDefinition, SubagentModelTier } from '@harni/types';
-import { ClinerulesParser } from './clinerulesParser.js';
+import { HarnirulesParser } from './harnirulesParser.js';
 
 export class SubagentRegistry {
   private definitions = new Map<string, SubagentDefinition>();
@@ -111,28 +111,28 @@ export class SubagentRegistry {
    * Parse markdown rules and apply subagent roles and models
    */
   public loadRulesFromContent(content: string, isDedicatedSubagentFile = false): number {
-    const rules = ClinerulesParser.parse(content, isDedicatedSubagentFile);
-    return ClinerulesParser.applyRules(rules, this.definitions);
+    const rules = HarnirulesParser.parse(content, isDedicatedSubagentFile);
+    return HarnirulesParser.applyRules(rules, this.definitions);
   }
 
   /**
-   * Discover and parse .clinerules in the workspace root.
-   * Supports .clinerules as a directory (with sub-agent.md and various markdown files)
-   * as well as a single .clinerules file for backward compatibility.
+   * Discover and parse .harnirules in the workspace root.
+   * Supports .harnirules as a directory (with sub-agent.md and various markdown files)
+   * as well as a single .harnirules file for backward compatibility.
    */
   public async loadFromWorkspace(workspaceRoot: string): Promise<number> {
-    const clinerulesDir = path.join(workspaceRoot, '.clinerules');
+    const harnirulesDir = path.join(workspaceRoot, '.harnirules');
     let totalApplied = 0;
 
     try {
-      const stats = await fs.stat(clinerulesDir);
+      const stats = await fs.stat(harnirulesDir);
       if (stats.isDirectory()) {
-        const files = await fs.readdir(clinerulesDir);
+        const files = await fs.readdir(harnirulesDir);
         const dedicatedNames = ['sub-agent.md', 'subagent.md', 'subagents.md'];
 
         for (const file of files) {
           if (!file.endsWith('.md')) continue;
-          const filePath = path.join(clinerulesDir, file);
+          const filePath = path.join(harnirulesDir, file);
           try {
             const content = await fs.readFile(filePath, 'utf-8');
             const isDedicated = dedicatedNames.includes(file.toLowerCase());
@@ -144,11 +144,11 @@ export class SubagentRegistry {
         return totalApplied;
       }
     } catch {
-      // .clinerules is not a directory or does not exist
+      // .harnirules is not a directory or does not exist
     }
 
-    // Fallback: check .clinerules or .clinerules.md as single files
-    const candidateFiles = ['.clinerules', '.clinerules.md'];
+    // Fallback: check .harnirules or .harnirules.md as single files
+    const candidateFiles = ['.harnirules', '.harnirules.md'];
     for (const file of candidateFiles) {
       const fullPath = path.join(workspaceRoot, file);
       try {

@@ -140,11 +140,11 @@ graph TD
    - **OpenAI GPT**：GPT-4o / o3-mini（支援 API Key 與 Codex 訂閱 OAuth）。
    - **本地與自訂相容服務商**：Ollama、Groq、DeepSeek、OpenRouter、vLLM、公司私有網關。
 8. **版本控制、快照隔離與生命週期管理 (`git/gitCheckpointService.ts`)**
-   - **自動影子快照 (Shadow Commit / Stash)**：在 Agent 開始修改檔案前自動建立 `refs/cline/checkpoints/<id>` 快照；乾淨狀態記錄 commit hash，骯髒工作區自動透過 `git stash create` 安全保存未暫存異動。
+   - **自動影子快照 (Shadow Commit / Stash)**：在 Agent 開始修改檔案前自動建立 `refs/harni/checkpoints/<id>` 快照；乾淨狀態記錄 commit hash，骯髒工作區自動透過 `git stash create` 安全保存未暫存異動。
    - **一鍵無損還原 (One-Click Revert)**：`rollbackCheckpoint` 透過 `git reset --hard` 還原工作區至任務執行前狀態，自動清理任務期間新建的 untracked 檔案，並透過 `git stash apply` 完美恢復使用者在執行前的未暫存修改。
-   - **Git Worktree 隔離沙盒 (Worktree Isolation)**：在 `.cline-worktrees/<sessionId>` 建立獨立 Git 工作樹與分支，共用依賴目錄（Windows 使用 NTFS Directory Junction，POSIX 使用 Symlink），零額外磁碟開銷且完全不干擾使用者編輯中的檔案。
-   - **生命週期修剪與孤兒清理**：`pruneOldCheckpoints` 自動保留最新 `maxRetained` 筆快照（預設 20 筆）；`pruneOrphanedBranches` 清理無活躍任務的 `cline/task-*` 分支；`deleteSessionCheckpoints` 支援會話級聯清理。
-   - **自動忽略防污染**：自動寫入 `.git/info/exclude` 忽略 `.cline-worktrees`，不污染使用者的 `.gitignore`。
+   - **Git Worktree 隔離沙盒 (Worktree Isolation)**：在 `.harni-worktrees/<sessionId>` 建立獨立 Git 工作樹與分支，共用依賴目錄（Windows 使用 NTFS Directory Junction，POSIX 使用 Symlink），零額外磁碟開銷且完全不干擾使用者編輯中的檔案。
+   - **生命週期修剪與孤兒清理**：`pruneOldCheckpoints` 自動保留最新 `maxRetained` 筆快照（預設 20 筆）；`pruneOrphanedBranches` 清理無活躍任務的 `harni/task-*` 分支；`deleteSessionCheckpoints` 支援會話級聯清理。
+   - **自動忽略防污染**：自動寫入 `.git/info/exclude` 忽略 `.harni-worktrees`，不污染使用者的 `.gitignore`。
    - **Worktree 合併與清理**：提供 `mergeWorktree`（一鍵提交並合併回主目錄）與 `discardWorktree`（安全刪除隔離工作樹與分支）。
 9. **互動式決策提問工具 (`tools/askQuestion.ts`)**
    - 支援 `ask_question` 工具：包含題目背景 (`question`)、結構化選項清單 (`options`)、單選/多選切換 (`is_multi_select`) 與自訂文字補充 (`allow_custom_input`)。
@@ -298,7 +298,7 @@ graph TD
 6. **串流 DoS 與 OOM 防護**：
    - 伺服端 `readRequestBody` 與 `readJsonBody` 實作資料流即時計數器，設定 10MB 硬上限，超出立即暫停接收並拋出 413 Payload Too Large。
 7. **Git Checkpoint 生命週期修剪與孤兒清理**：
-   - 自動依 `maxRetained` 修剪過期快照參照，定時清理歷史 `cline/task-*` 分支，防止儲存庫無效膨脹。
+   - 自動依 `maxRetained` 修剪過期快照參照，定時清理歷史 `harni/task-*` 分支，防止儲存庫無效膨脹。
 
 ---
 

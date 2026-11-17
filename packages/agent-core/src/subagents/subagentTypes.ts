@@ -1,4 +1,5 @@
 import type {
+  ChatMessage,
   FileDiff,
   FileDiagnosticsResult,
   LLMProviderType,
@@ -9,6 +10,7 @@ import type {
   TokenUsage,
 } from '@harni/types';
 import type { BaseLLMProvider } from '../providers/baseProvider.js';
+import type { SwarmBoardService } from '../swarm/swarmBoardService.js';
 
 export interface SpawnSubagentParams {
   typeName: string;
@@ -38,12 +40,21 @@ export interface SpawnSubagentParams {
   timeoutMs?: number;
   isolation?: 'inherit' | 'worktree';
   autoMergeWorktree?: boolean;
+  alias?: string;
+  fork?: string;
+  forkedFrom?: string;
+  initialMessages?: ChatMessage[];
+  swarmEnabled?: boolean;
+  swarmBoardService?: SwarmBoardService;
+  getSessionMessages?: () => ChatMessage[];
 }
 
 export interface SubagentExecutionResult {
   id: string;
   typeName: string;
   role: string;
+  alias?: string;
+  forkedFrom?: string;
   status: SubagentStatus;
   result: string;
   error?: string;

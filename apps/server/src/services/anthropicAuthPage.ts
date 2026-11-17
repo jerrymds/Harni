@@ -7,7 +7,7 @@ import type { DBService } from './dbService.js';
  * Anthropic publishes a public OAuth client for Claude Code. After the user
  * approves on claude.ai they are redirected to
  * `https://console.anthropic.com/oauth/code/callback`, which shows an
- * `<code>#<state>` string to copy back into cline-web (a "paste code" flow — no
+ * `<code>#<state>` string to copy back into Harni (a "paste code" flow — no
  * loopback listener needed).
  *
  * The resulting `sk-ant-oat…` access token works directly against

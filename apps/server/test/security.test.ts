@@ -1,9 +1,15 @@
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { DatabaseSync } from 'node:sqlite';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { WebSocket } from 'ws';
 import { createApp } from '../src/server.js';
-import { SecurityService, LEGACY_DEFAULT_SALT } from '../src/services/securityService.js';
+import {
+  SecurityService,
+  LEGACY_DEFAULT_SALT,
+  LEGACY_CLINE_SALT,
+} from '../src/services/securityService.js';
+import { DBService } from '../src/services/dbService.js';
 import { GoogleAuthPage, escapeHtml, serializeJsonForScript } from '../src/services/googleAuthPage.js';
 
 describe('SecurityService, Vault & Authentication', () => {
@@ -16,7 +22,7 @@ describe('SecurityService, Vault & Authentication', () => {
     app = createApp({
       port: 0,
       workspaceRoot: tempDir,
-      dbPath: path.join(tempDir, 'cline-test.db'),
+      dbPath: path.join(tempDir, 'harni-test.db'),
     });
     port = await app.start();
   });
@@ -32,7 +38,7 @@ describe('SecurityService, Vault & Authentication', () => {
 
   it('encrypts, decrypts, masks keys and detects tampering', () => {
     const security = new SecurityService();
-    const sampleKey = 'sk-cline-sec-key-test-1234567890abcdef';
+    const sampleKey = 'sk-harni-sec-key-test-1234567890abcdef';
     const encrypted = security.encrypt(sampleKey);
 
     expect(encrypted.startsWith('enc:v1:')).toBe(true);
@@ -92,6 +98,85 @@ describe('SecurityService, Vault & Authentication', () => {
     const legacyResolved = secLegacy.resolveMasterKeyAndSalt(legacyKeyDir);
     expect(legacyResolved.key).toBe(legacyRawKey);
     expect(legacyResolved.salt.equals(LEGACY_DEFAULT_SALT)).toBe(true);
+  });
+
+  it('decrypts LEGACY_CLINE_SALT ciphertexts and migrates to LEGACY_DEFAULT_SALT', async () => {
+    const legacyKeyDir = path.join(tempDir, 'legacy_cline_sec_keys');
+    await fs.mkdir(legacyKeyDir, { recursive: true });
+    const legacyRawKey = 'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210';
+    await fs.writeFile(path.join(legacyKeyDir, '.master.key'), legacyRawKey, 'utf8');
+
+    const secCline = new SecurityService({ masterKey: legacyRawKey, salt: LEGACY_CLINE_SALT });
+    const sampleSecret = 'sk-or-v1-legacy-cline-secret-123456';
+    const legacyCipherText = secCline.encrypt(sampleSecret);
+
+    const secHarni = new SecurityService({ keyDir: legacyKeyDir });
+    expect(secHarni.decrypt(legacyCipherText)).toBe(sampleSecret);
+
+    const { plainText, migratedCipherText } = secHarni.decryptAndMigrate(legacyCipherText);
+    expect(plainText).toBe(sampleSecret);
+    expect(migratedCipherText).toBeDefined();
+    expect(migratedCipherText!.startsWith('enc:v1:')).toBe(true);
+
+    // Migrated ciphertext should decrypt with harni-salt-v1 and not trigger re-encryption again
+    const pureDefaultSec = new SecurityService({
+      masterKey: legacyRawKey,
+      salt: LEGACY_DEFAULT_SALT,
+    });
+    expect(pureDefaultSec.decrypt(migratedCipherText!)).toBe(sampleSecret);
+    expect(secHarni.decrypt(migratedCipherText!)).toBe(sampleSecret);
+
+    const secondPass = secHarni.decryptAndMigrate(migratedCipherText!);
+    expect(secondPass.plainText).toBe(sampleSecret);
+    expect(secondPass.migratedCipherText).toBeUndefined();
+  });
+
+  it('DBService.getApiKey transparently decrypts and migrates LEGACY_CLINE_SALT credentials', async () => {
+    const legacyKeyDir = path.join(tempDir, 'legacy_db_sec_keys');
+    await fs.mkdir(legacyKeyDir, { recursive: true });
+    const legacyRawKey = 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789';
+    await fs.writeFile(path.join(legacyKeyDir, '.master.key'), legacyRawKey, 'utf8');
+
+    const dbPath = path.join(tempDir, 'legacy-cline-migration.db');
+    const secCline = new SecurityService({ masterKey: legacyRawKey, salt: LEGACY_CLINE_SALT });
+    const expectedKey = 'sk-cline-legacy-api-key-987654321';
+
+    const legacyDb = new DBService({ dbPath, securityService: secCline });
+    try {
+      legacyDb.setApiKey('cline', expectedKey);
+    } finally {
+      legacyDb.close();
+    }
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const secHarni = new SecurityService({ keyDir: legacyKeyDir });
+    const harniDb = new DBService({ dbPath, securityService: secHarni });
+    try {
+      const retrievedKey = harniDb.getApiKey('cline');
+      expect(retrievedKey).toBe(expectedKey);
+      expect(warnSpy).not.toHaveBeenCalled();
+    } finally {
+      warnSpy.mockRestore();
+      harniDb.close();
+    }
+
+    const rawDb = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const row = rawDb
+        .prepare('SELECT encrypted_key FROM credentials WHERE provider = ?')
+        .get('cline') as { encrypted_key: string } | undefined;
+      expect(row).toBeDefined();
+      expect(row!.encrypted_key.startsWith('enc:v1:')).toBe(true);
+
+      const pureDefaultSec = new SecurityService({
+        masterKey: legacyRawKey,
+        salt: LEGACY_DEFAULT_SALT,
+      });
+      expect(pureDefaultSec.decrypt(row!.encrypted_key)).toBe(expectedKey);
+      expect(() => secCline.decrypt(row!.encrypted_key)).toThrow();
+    } finally {
+      rawDb.close();
+    }
   });
 
   it('manages Google OAuth credentials and callback flow', async () => {
@@ -211,7 +296,7 @@ describe('SecurityService, Vault & Authentication', () => {
         port: 0,
         host: '0.0.0.0',
         workspaceRoot: tempDir,
-        dbPath: path.join(tempDir, 'cline-sec-test.db'),
+        dbPath: path.join(tempDir, 'harni-sec-test.db'),
       });
     }).toThrow(/Security Prohibited.*AUTH_TOKEN/);
 
@@ -221,7 +306,7 @@ describe('SecurityService, Vault & Authentication', () => {
       host: '0.0.0.0',
       authToken: secureToken,
       workspaceRoot: tempDir,
-      dbPath: path.join(tempDir, 'cline-sec-auth.db'),
+      dbPath: path.join(tempDir, 'harni-sec-auth.db'),
     });
     const authPort = await authApp.start();
 

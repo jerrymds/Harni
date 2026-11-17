@@ -642,7 +642,7 @@ describe('useAgentStore and Slices', () => {
                 createdAt: 1000,
                 updatedAt: 1050,
                 worktreePath: '/isolated/wt',
-                worktreeBranch: 'cline/task-sub_wt_1',
+                worktreeBranch: 'harni/task-sub_wt_1',
               },
             ],
           },
@@ -651,7 +651,7 @@ describe('useAgentStore and Slices', () => {
 
       let state = useAgentStore.getState();
       expect(state.subagents['sess_p3_sync']).toHaveLength(1);
-      expect(state.subagents['sess_p3_sync'][0].worktreeBranch).toBe('cline/task-sub_wt_1');
+      expect(state.subagents['sess_p3_sync'][0].worktreeBranch).toBe('harni/task-sub_wt_1');
 
       // Now complete subagent with worktree info
       messageHandler({
@@ -663,7 +663,7 @@ describe('useAgentStore and Slices', () => {
             status: 'completed',
             result: 'Merged worktree',
             worktreePath: '/isolated/wt',
-            worktreeBranch: 'cline/task-sub_wt_1',
+            worktreeBranch: 'harni/task-sub_wt_1',
           },
         }),
       });
@@ -671,7 +671,7 @@ describe('useAgentStore and Slices', () => {
       state = useAgentStore.getState();
       expect(state.subagents['sess_p3_sync'][0].status).toBe('completed');
       expect(state.subagents['sess_p3_sync'][0].worktreePath).toBe('/isolated/wt');
-      expect(state.subagents['sess_p3_sync'][0].worktreeBranch).toBe('cline/task-sub_wt_1');
+      expect(state.subagents['sess_p3_sync'][0].worktreeBranch).toBe('harni/task-sub_wt_1');
 
       // Test clearMessages clears session subagents
       useAgentStore.setState({ currentSessionId: 'sess_p3_sync' });

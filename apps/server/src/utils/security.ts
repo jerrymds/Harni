@@ -64,7 +64,7 @@ export function validateHostBindingSecurity(
   if (!isLocalhost && !authToken && !allowInsecureRemote) {
     throw new Error(
       `[Security Prohibited] Server host is configured to bind to '${host}' (non-localhost) without AUTH_TOKEN. ` +
-      `To prevent unauthorized remote command execution (RCE) and credential leakage, you must configure AUTH_TOKEN or CLINE_AUTH_TOKEN in the environment or configuration. ` +
+      `To prevent unauthorized remote command execution (RCE) and credential leakage, you must configure AUTH_TOKEN or HARNI_AUTH_TOKEN in the environment or configuration. ` +
       `If you explicitly intend to allow unauthenticated remote access, set ALLOW_INSECURE_REMOTE_ACCESS=true.`
     );
   }

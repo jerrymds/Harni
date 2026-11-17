@@ -27,7 +27,7 @@ loadEnv();
 
 async function runLLMConnectivityTest() {
   console.log('\n======================================================');
-  console.log('🤖 cline-web LLM 連線連通性測試工具 (Connectivity Tester)');
+  console.log('🤖 Harni LLM 連線連通性測試工具 (Connectivity Tester)');
   console.log('======================================================\n');
 
   // Parse CLI args: e.g. pnpm test:llm --provider cline --model cline-pass/deepseek-v4-pro
@@ -107,7 +107,7 @@ async function runLLMConnectivityTest() {
     {
       id: 'test_1',
       role: 'user',
-      content: '請以繁體中文簡短回覆：「Ping 成功！我已成功連接到 cline-web。」並說明你目前的模型名稱。',
+      content: '請以繁體中文簡短回覆：「Ping 成功！我已成功連接到 Harni。」並說明你目前的模型名稱。',
       timestamp: Date.now(),
     },
   ];

@@ -172,7 +172,7 @@ describe('BranchDropdown Component', () => {
       activeWorktrees: {
         sess_wt: {
           isWorktree: true,
-          branch: 'cline/task-wt-branch',
+          branch: 'harni/task-wt-branch',
           path: '/test/worktree',
         },
       },
@@ -180,7 +180,7 @@ describe('BranchDropdown Component', () => {
 
     render(<BranchDropdown />);
     const trigger = screen.getByTestId('branch-dropdown-trigger');
-    expect(trigger).toHaveTextContent('cline/task-wt-branch');
+    expect(trigger).toHaveTextContent('harni/task-wt-branch');
   });
 
   it('disables refresh button when isLoadingBranches is true and focuses search input', () => {

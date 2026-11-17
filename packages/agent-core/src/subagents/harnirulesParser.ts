@@ -12,9 +12,9 @@ export interface ParsedSubagentRule {
   timeoutMs?: number;
 }
 
-export class ClinerulesParser {
+export class HarnirulesParser {
   /**
-   * Parse markdown content from .clinerules or sub-agent.md to extract subagent roles and models.
+   * Parse markdown content from .harnirules or sub-agent.md to extract subagent roles and models.
    * @param content Markdown file contents.
    * @param isDedicatedSubagentFile When true (e.g. sub-agent.md), parses all role headings directly.
    */
@@ -204,7 +204,7 @@ export class ClinerulesParser {
           existing.allowedTools = rule.allowedTools;
         }
         if (rule.systemPrompt) {
-          existing.systemPrompt = `${existing.systemPrompt}\n\n[Project Custom Instructions (.clinerules)]:\n${rule.systemPrompt}`;
+          existing.systemPrompt = `${existing.systemPrompt}\n\n[Project Custom Instructions (.harnirules)]:\n${rule.systemPrompt}`;
         }
         if (rule.maxTurns) existing.maxTurns = rule.maxTurns;
         if (rule.maxTokensBudget) existing.maxTokensBudget = rule.maxTokensBudget;
@@ -215,7 +215,7 @@ export class ClinerulesParser {
         const newDef: SubagentDefinition = {
           name: rule.name.toLowerCase(),
           role: rule.role || rule.name,
-          description: `Custom subagent defined in .clinerules`,
+          description: `Custom subagent defined in .harnirules`,
           systemPrompt: rule.systemPrompt || `You are a specialized subagent for ${rule.role || rule.name}.`,
           model: rule.model,
           modelTier: rule.modelTier,

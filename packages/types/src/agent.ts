@@ -377,6 +377,40 @@ export interface SubagentInstanceInfo {
   structuredReport?: SubagentStructuredReport;
   worktreePath?: string;
   worktreeBranch?: string;
+  alias?: string;
+  forkedFrom?: string;
+}
+
+export interface SwarmMemberInfo {
+  name: string;
+  subagentId: string;
+  role: string;
+  typeName: string;
+  model?: string;
+  status: SubagentStatus;
+  addedBy: string;
+  workspaceIsolation?: 'inherit' | 'worktree';
+  forkedFrom?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface SwarmMessage {
+  id: string;
+  sessionId: string;
+  sender: string;
+  senderSubagentId?: string;
+  content: string;
+  mentions: string[];
+  timestamp: number;
+}
+
+export interface SwarmBoardState {
+  sessionId: string;
+  title: string;
+  members: SwarmMemberInfo[];
+  messages: SwarmMessage[];
+  updatedAt: number;
 }
 
 

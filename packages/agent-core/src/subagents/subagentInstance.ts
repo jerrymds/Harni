@@ -8,8 +8,10 @@ import type {
   SubagentStatus,
   SubagentStructuredReport,
   TokenUsage,
+  ToolCallMiddlewareContext,
   ToolCallRequest,
   ToolResult,
+  WorkflowPluginContext,
 } from '@harni/types';
 import { ContextManager } from '../context/contextManager.js';
 import { SystemPromptBuilder } from '../prompts/systemPrompt.js';
@@ -23,6 +25,8 @@ import type { ToolExecutionContext } from '../tools/baseTool.js';
 import { ToolRegistry } from '../tools/toolRegistry.js';
 import type { McpServerManager } from '../mcp/mcpServerManager.js';
 import { isRateLimitError } from '../utils/rateLimit.js';
+import type { WorkflowPluginManager } from '../plugins/pluginManager.js';
+import type { SwarmBoardService } from '../swarm/swarmBoardService.js';
 import type { SubagentManager } from './subagentManager.js';
 import type { SubagentExecutionResult } from './subagentTypes.js';
 
@@ -76,6 +80,12 @@ export interface SubagentInstanceOptions {
     },
     signal?: AbortSignal,
   ) => Promise<{ answers: string[]; customInput?: string }>;
+  pluginManager?: WorkflowPluginManager;
+  alias?: string;
+  forkedFrom?: string;
+  initialMessages?: ChatMessage[];
+  swarmBoardService?: SwarmBoardService;
+  getSessionMessages?: () => ChatMessage[];
 }
 
 export class SubagentInstance extends EventEmitter {
@@ -87,6 +97,8 @@ export class SubagentInstance extends EventEmitter {
   public readonly role: string;
   public readonly prompt: string;
   public readonly model?: string;
+  public readonly alias?: string;
+  public readonly forkedFrom?: string;
   public workspaceRoot: string;
 
   private worktreePath?: string;
@@ -136,6 +148,8 @@ export class SubagentInstance extends EventEmitter {
 
   private abortController: AbortController | null = null;
   private currentToolSummary?: string;
+  private pluginManager?: WorkflowPluginManager;
+  private pluginStates = new Map<string, unknown>();
   private codeModified = false;
   private modifiedFiles = new Set<string>();
   private reportedUsage: TokenUsage = {
@@ -153,6 +167,10 @@ export class SubagentInstance extends EventEmitter {
   private updatedAt = Date.now();
   private completedAt?: number;
   private isLoopRunning = false;
+  private initialPromptAppended = false;
+  private pendingInbox: string[] = [];
+  private swarmBoardService?: SwarmBoardService;
+  private getSessionMessages?: () => ChatMessage[];
 
   constructor(options: SubagentInstanceOptions) {
     super();
@@ -164,7 +182,11 @@ export class SubagentInstance extends EventEmitter {
     this.role = options.role;
     this.prompt = options.prompt;
     this.model = options.model;
+    this.alias = options.alias;
+    this.forkedFrom = options.forkedFrom;
     this.workspaceRoot = options.workspaceRoot;
+    this.swarmBoardService = options.swarmBoardService;
+    this.getSessionMessages = options.getSessionMessages;
     this.provider = options.provider;
     this.toolRegistry = options.toolRegistry;
     this.mcpManager = options.mcpManager;
@@ -186,10 +208,122 @@ export class SubagentInstance extends EventEmitter {
     this.worktreePath = options.worktreePath;
     this.worktreeBranch = options.worktreeBranch;
     this.askUserQuestion = options.askUserQuestion;
+    this.pluginManager = options.pluginManager;
     this.contextManager = new ContextManager({
       maxContextTokens: 80000,
       slidingWindowTurnLimit: 20,
     });
+    if (options.initialMessages && options.initialMessages.length > 0) {
+      const cloned = options.initialMessages.map((msg) => ({
+        ...msg,
+        toolCalls: msg.toolCalls ? msg.toolCalls.map((tc) => ({ ...tc })) : undefined,
+        attachments: msg.attachments ? msg.attachments.map((att) => ({ ...att })) : undefined,
+      }));
+      this.contextManager.setMessages(cloned);
+    }
+  }
+
+  public getPluginManager(): WorkflowPluginManager | undefined {
+    return this.pluginManager;
+  }
+
+  public setPluginManager(pluginManager?: WorkflowPluginManager): void {
+    this.pluginManager = pluginManager;
+  }
+
+  private createPluginContext(): WorkflowPluginContext {
+    return {
+      sessionId: this.sessionId,
+      taskId: this.id,
+      isSubagent: true,
+      subagentId: this.id,
+      subagentRole: this.role,
+      depth: this.depth,
+      signal: this.abortController?.signal,
+      getWorkspaceRoot: () => this.workspaceRoot,
+      setWorkspaceRoot: (
+        newRoot: string,
+        meta?: { isWorktree?: boolean; branch?: string },
+      ) => {
+        this.setWorkspaceRoot(newRoot);
+        if (meta?.isWorktree) {
+          this.worktreePath = newRoot;
+        }
+        if (meta?.branch) {
+          this.worktreeBranch = meta.branch;
+        }
+      },
+      getMainWorkspaceRoot: () => this.workspaceRoot,
+      getPluginState: <T>(pluginId: string, initializer?: () => T): T => {
+        let state = this.pluginStates.get(pluginId) as T;
+        if (state === undefined && initializer) {
+          state = initializer();
+          this.pluginStates.set(pluginId, state);
+        }
+        return state;
+      },
+      setPluginState: <T>(pluginId: string, state: T): void => {
+        this.pluginStates.set(pluginId, state);
+      },
+      addMessage: (message: ChatMessage) => {
+        this.contextManager.addMessage(message);
+      },
+      getMessages: () => this.contextManager.getMessages(),
+      setStatus: (status: import('@harni/types').AgentStatus) => {
+        this.setStatus(status as SubagentStatus);
+      },
+      syncTaskState: () => {},
+      emitEvent: () => {},
+      invokeLLM: async (prompt: string, systemPrompt?: string) => {
+        const comp = await this.provider.streamCompletion(
+          [
+            {
+              id: `sub_invoke_${Date.now()}`,
+              role: 'user',
+              content: prompt,
+              timestamp: Date.now(),
+            },
+          ],
+          systemPrompt || 'You are an autonomous AI subagent.',
+          [],
+          () => {},
+          this.abortController?.signal,
+        );
+        return comp.text;
+      },
+      requestToolApproval: async (toolCall: import('@harni/types').ToolCall) => {
+        if (!this.requestToolApproval) {
+          return { approved: false, feedback: 'Approval not configured' };
+        }
+        return await this.requestToolApproval(
+          this.sessionId,
+          {
+            id: toolCall.id,
+            name: toolCall.name,
+            arguments: (toolCall.arguments || {}) as Record<string, unknown>,
+            requiresApproval: true,
+            subagentId: this.id,
+            subagentRole: this.role,
+          },
+          this.abortController?.signal,
+        );
+      },
+      notifyCodeModified: (filePath?: string) => {
+        this.codeModified = true;
+        if (filePath) {
+          this.modifiedFiles.add(filePath);
+        }
+        this.onCodeModified?.();
+      },
+      notifyDiagnostics: (diag) => {
+        this.onDiagnostics?.(diag);
+      },
+      notifyTerminalData: (data) => {
+        this.onTerminalData?.(data);
+      },
+      isSubagentsEnabled: () => false,
+      getAutoTestConfig: () => undefined,
+    };
   }
 
   public static parseStructuredReport(text?: string): SubagentStructuredReport | undefined {
@@ -390,6 +524,8 @@ export class SubagentInstance extends EventEmitter {
       structuredReport: this.structuredReport,
       worktreePath: this.worktreePath,
       worktreeBranch: this.worktreeBranch,
+      alias: this.alias,
+      forkedFrom: this.forkedFrom,
     };
   }
 
@@ -433,7 +569,8 @@ export class SubagentInstance extends EventEmitter {
     if (this.completionPromise) {
       return this.completionPromise;
     }
-    if (this.contextManager.getMessages().length === 0) {
+    if (!this.initialPromptAppended) {
+      this.initialPromptAppended = true;
       const initialUserMessage: ChatMessage = {
         id: `sub_msg_${Date.now()}`,
         role: 'user',
@@ -466,7 +603,40 @@ export class SubagentInstance extends EventEmitter {
       structuredReport: this.structuredReport,
       worktreePath: this.worktreePath,
       worktreeBranch: this.worktreeBranch,
+      alias: this.alias,
+      forkedFrom: this.forkedFrom,
     };
+  }
+
+  public enqueueMessage(content: string): void {
+    if (this.status === 'cancelled') {
+      return;
+    }
+    this.pendingInbox.push(content);
+    if (
+      !this.isLoopRunning &&
+      (this.status === 'completed' || this.status === 'idle')
+    ) {
+      this.completionPromise = this.runLoop().finally(() => {
+        this.completionPromise = null;
+      });
+    }
+  }
+
+  private drainInbox(): boolean {
+    if (this.pendingInbox.length === 0) {
+      return false;
+    }
+    const items = this.pendingInbox.splice(0, this.pendingInbox.length);
+    for (const item of items) {
+      this.contextManager.addMessage({
+        id: `sub_inbox_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        role: 'user',
+        content: item,
+        timestamp: Date.now(),
+      });
+    }
+    return true;
   }
 
   public async receiveMessage(content: string): Promise<string> {
@@ -550,6 +720,7 @@ export class SubagentInstance extends EventEmitter {
 
     try {
       while (turn < maxTurns && !this.abortController?.signal.aborted) {
+        this.drainInbox();
         turn++;
 
         let toolDefs = this.toolRegistry.getDefinitions();
@@ -561,13 +732,24 @@ export class SubagentInstance extends EventEmitter {
           toolDefs = [...toolDefs, ...mcpDefs];
         }
 
+        const subCtx = this.pluginManager ? this.createPluginContext() : undefined;
+        if (this.pluginManager && subCtx) {
+          toolDefs = await this.pluginManager.runResolveTools(subCtx, toolDefs);
+        }
+
         const baseSystemPrompt = this.definition.systemPrompt;
+        const pluginSections =
+          this.pluginManager && subCtx
+            ? await this.pluginManager.runBuildSystemPrompt(subCtx)
+            : undefined;
+
         const systemPrompt = SystemPromptBuilder.build({
           workspaceRoot: this.workspaceRoot,
           mode: 'custom',
           customInstructions: `${baseSystemPrompt}\n\n[Role]: ${this.role}\n[Subagent Depth]: ${this.depth}`,
           tools: toolDefs,
           isSubagent: true,
+          pluginSections,
         });
 
         let turnHasUsageChunk = false;
@@ -649,6 +831,9 @@ export class SubagentInstance extends EventEmitter {
         this.contextManager.addMessage(assistantMessage);
 
         if (!result.toolCalls || result.toolCalls.length === 0) {
+          if (this.drainInbox()) {
+            continue;
+          }
           // Finished execution
           this.currentToolSummary = undefined;
           this.result = result.text || 'Task completed successfully.';
@@ -669,6 +854,15 @@ export class SubagentInstance extends EventEmitter {
             taskId: this.id,
             depth: this.depth,
             subagentManager: this.subagentManager,
+            swarmBoardService: this.swarmBoardService,
+            agentAlias: this.alias || this.id,
+            getSessionMessages: this.getSessionMessages,
+            resolveForkMessages: (source: string) =>
+              this.subagentManager?.resolveForkMessages(
+                this.sessionId,
+                source,
+                this.getSessionMessages,
+              ),
             model: this.model,
             parentSignal: this.abortController?.signal,
             onFileDiff: this.onFileDiff,
@@ -678,6 +872,9 @@ export class SubagentInstance extends EventEmitter {
             anthropicOAuth: this.anthropicOAuth,
             openaiOAuth: this.openaiOAuth,
             openaiAccountId: this.openaiAccountId,
+            skipInlineDiagnostics: this.pluginManager
+              ? this.pluginManager.hasPlugin('harni.syntax-diagnostics')
+              : false,
             askQuestion: this.askUserQuestion
               ? async (qParams) => {
                   const prevStatus = this.status;
@@ -707,8 +904,84 @@ export class SubagentInstance extends EventEmitter {
 
           let toolResult: ToolResult;
 
-          // A2 Check: If read-only subagent and calling non-allowed MCP tool
-          if (
+          if (this.pluginManager && subCtx) {
+            const canonicalToolName = this.toolRegistry.resolveToolName(toolCall.name);
+            const isMcpTool = Boolean(mcpTool);
+            const mcpToolAllowedReadOnly =
+              isMcpTool && this.mcpManager
+                ? this.mcpManager.isToolAllowedForReadOnly(toolCall.name)
+                : true;
+            const requiresApproval = mcpTool
+              ? (this.mcpManager?.getToolRequiresApproval(toolCall.name) ?? false)
+              : (this.toolRegistry.getTool(toolCall.name)?.requiresApproval ?? false);
+
+            const toolCtx: ToolCallMiddlewareContext = {
+              toolCall,
+              canonicalToolName,
+              requiresApproval,
+              isMcpTool,
+              mcpToolAllowedReadOnly:
+                this.definition.enableWriteTools === false
+                  ? mcpToolAllowedReadOnly
+                  : true,
+              metadata: {},
+            };
+
+            const coreExecutor = async (): Promise<ToolResult> => {
+              if (mcpTool && this.mcpManager) {
+                return await this.mcpManager.callTool(
+                  toolCall.name,
+                  (toolCall.arguments || {}) as Record<string, unknown>,
+                );
+              } else {
+                return await this.toolRegistry.executeTool(
+                  toolCall.name,
+                  toolCall.arguments,
+                  execContext,
+                );
+              }
+            };
+
+            try {
+              toolResult = await this.pluginManager.executeToolWithMiddleware(
+                subCtx,
+                toolCtx,
+                async () => {
+                  try {
+                    return await coreExecutor();
+                  } catch (err: unknown) {
+                    const errStr = err instanceof Error ? err.message : String(err);
+                    return {
+                      toolCallId: toolCall.id,
+                      isError: true,
+                      output: `Subagent tool error (${toolCall.name}): ${errStr}`,
+                      summary: `Failed ${toolCall.name}`,
+                    };
+                  }
+                },
+              );
+            } catch (err: unknown) {
+              const errStr = err instanceof Error ? err.message : String(err);
+              toolResult = {
+                toolCallId: toolCall.id,
+                isError: true,
+                output: `Subagent tool error (${toolCall.name}): ${errStr}`,
+                summary: `Failed ${toolCall.name}`,
+              };
+            }
+            toolResult.toolCallId = toolCall.id;
+
+            this.emit('tool', {
+              toolName: toolCall.name,
+              summary:
+                toolResult.summary ||
+                (toolResult.isError
+                  ? `Error: ${toolResult.output}`
+                  : `Finished ${toolCall.name}`),
+              status: toolResult.isError ? 'error' : 'complete',
+            });
+            this.currentToolSummary = undefined;
+          } else if (
             this.definition.enableWriteTools === false &&
             mcpTool &&
             this.mcpManager &&
@@ -806,6 +1079,22 @@ export class SubagentInstance extends EventEmitter {
                 this.currentToolSummary = undefined;
               }
             }
+
+            const MAX_SUBAGENT_TOOL_OUTPUT_CHARS = 30_000;
+            let fallbackOutputStr =
+              typeof toolResult.output === 'string'
+                ? toolResult.output
+                : JSON.stringify(toolResult.output);
+
+            if (fallbackOutputStr.length > MAX_SUBAGENT_TOOL_OUTPUT_CHARS) {
+              const truncatedSuffix =
+                `\n\n...[Subagent 工具輸出過長 (共 ${fallbackOutputStr.length.toLocaleString()} 字元)，已自動壓縮至安全長度以維護 Token 安全]...\n` +
+                fallbackOutputStr.slice(-1000);
+              fallbackOutputStr = fallbackOutputStr.slice(0, 28_000) + truncatedSuffix;
+              if (typeof toolResult.output === 'string') {
+                toolResult.output = fallbackOutputStr;
+              }
+            }
           }
 
           toolResult.toolCallId = toolCall.id;
@@ -835,22 +1124,10 @@ export class SubagentInstance extends EventEmitter {
             }
           }
 
-          // Truncation check
-          const MAX_SUBAGENT_TOOL_OUTPUT_CHARS = 30_000;
-          let toolOutputStr =
+          const toolOutputStr =
             typeof toolResult.output === 'string'
               ? toolResult.output
               : JSON.stringify(toolResult.output);
-
-          if (toolOutputStr.length > MAX_SUBAGENT_TOOL_OUTPUT_CHARS) {
-            const truncatedSuffix =
-              `\n\n...[Subagent 工具輸出過長 (共 ${toolOutputStr.length.toLocaleString()} 字元)，已自動壓縮至安全長度以維護 Token 安全]...\n` +
-              toolOutputStr.slice(-1000);
-            toolOutputStr = toolOutputStr.slice(0, 28_000) + truncatedSuffix;
-            if (typeof toolResult.output === 'string') {
-              toolResult.output = toolOutputStr;
-            }
-          }
 
           const toolMsg: ChatMessage = {
             id: `sub_tool_${Date.now()}`,
@@ -1005,6 +1282,8 @@ export class SubagentInstance extends EventEmitter {
       structuredReport: this.structuredReport,
       worktreePath: this.worktreePath,
       worktreeBranch: this.worktreeBranch,
+      alias: this.alias,
+      forkedFrom: this.forkedFrom,
     };
   }
 

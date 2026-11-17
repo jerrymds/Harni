@@ -6,3 +6,4 @@ export * from './events.js';
 export * from './harness.js';
 export * from './probe.js';
 export * from './dynamicHarness.js';
+export * from './plugin.js';

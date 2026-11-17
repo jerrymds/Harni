@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import type {
   AntigravityExecutionMode,
+  ChatMessage,
   HarnessExperience,
   LLMProviderType,
   SubagentDefinition,
@@ -23,6 +24,7 @@ import { ReadFileTool } from '../tools/readFile.js';
 import { ReplaceFileContentTool } from '../tools/replaceFileContent.js';
 import { SearchFilesTool } from '../tools/searchFiles.js';
 import { SendMessageTool } from '../tools/sendMessage.js';
+import { SwarmTool } from '../tools/swarm.js';
 import { ToolRegistry } from '../tools/toolRegistry.js';
 import { UseSkillTool } from '../tools/useSkill.js';
 import { WriteFileTool } from '../tools/writeFile.js';
@@ -76,6 +78,7 @@ export interface SubagentManagerConfig {
     },
     signal?: AbortSignal,
   ) => Promise<{ answers: string[]; customInput?: string }>;
+  pluginManager?: import('../plugins/pluginManager.js').WorkflowPluginManager;
 }
 
 export class SubagentManager extends EventEmitter {
@@ -98,6 +101,7 @@ export class SubagentManager extends EventEmitter {
   private skillRegistry?: SkillRegistry;
   private dynamicHarnessEnabled: boolean;
   private antigravityMode?: AntigravityExecutionMode;
+  private pluginManager?: import('../plugins/pluginManager.js').WorkflowPluginManager;
   private getExperiencesForPrompt?: (
     query: string,
     workspaceRoot: string,
@@ -146,10 +150,21 @@ export class SubagentManager extends EventEmitter {
     this.executeTerminalCommand = config.executeTerminalCommand;
     this.requestToolApproval = config.requestToolApproval;
     this.askUserQuestion = config.askUserQuestion;
+    this.pluginManager = config.pluginManager;
     this.registry = new SubagentRegistry(true);
     if (config.modelTierMap) {
       this.registry.setModelTierMap(config.modelTierMap);
     }
+  }
+
+  public getPluginManager(): import('../plugins/pluginManager.js').WorkflowPluginManager | undefined {
+    return this.pluginManager;
+  }
+
+  public setPluginManager(
+    pluginManager?: import('../plugins/pluginManager.js').WorkflowPluginManager,
+  ): void {
+    this.pluginManager = pluginManager;
   }
 
   public getRegistry(): SubagentRegistry {
@@ -253,6 +268,44 @@ export class SubagentManager extends EventEmitter {
     return this.instances.get(id);
   }
 
+  public getInstanceByAlias(sessionId: string, alias: string): SubagentInstance | undefined {
+    const lower = alias.toLowerCase();
+    for (const inst of this.instances.values()) {
+      if (inst.sessionId === sessionId && inst.alias?.toLowerCase() === lower) {
+        return inst;
+      }
+    }
+    return undefined;
+  }
+
+  public resolveForkMessages(
+    sessionId: string,
+    source: string,
+    getSessionMessages?: () => ChatMessage[],
+  ): ChatMessage[] | undefined {
+    const trimmed = source.trim();
+    if (!trimmed) return undefined;
+    if (trimmed.toLowerCase() === 'coordinator') {
+      return getSessionMessages ? getSessionMessages() : undefined;
+    }
+    const byId = this.instances.get(trimmed);
+    if (byId && byId.sessionId === sessionId) {
+      return byId.getMessages();
+    }
+    const byAlias = this.getInstanceByAlias(sessionId, trimmed);
+    if (byAlias) {
+      return byAlias.getMessages();
+    }
+    return undefined;
+  }
+
+  public deliverSwarmMessage(subagentId: string, content: string): boolean {
+    const inst = this.instances.get(subagentId);
+    if (!inst) return false;
+    inst.enqueueMessage(content);
+    return true;
+  }
+
   public getInstancesBySession(sessionId: string): SubagentInstanceInfo[] {
     const list: SubagentInstanceInfo[] = [];
     for (const inst of this.instances.values()) {
@@ -271,7 +324,7 @@ export class SubagentManager extends EventEmitter {
     this.registry.register(definition);
   }
 
-  public async loadWorkspaceClinerules(workspaceRoot?: string): Promise<number> {
+  public async loadWorkspaceHarnirules(workspaceRoot?: string): Promise<number> {
     const root = workspaceRoot || this.workspaceRoot;
     return await this.registry.loadFromWorkspace(root);
   }
@@ -353,7 +406,26 @@ export class SubagentManager extends EventEmitter {
         }
 
         // Restrict tools based on definition
-        const subagentToolRegistry = this.createScopedToolRegistry(effectiveDefinition);
+        const subagentToolRegistry = this.createScopedToolRegistry(
+          effectiveDefinition,
+          params.swarmEnabled,
+        );
+
+        let resolvedInitialMessages = params.initialMessages;
+        if (!resolvedInitialMessages && params.fork) {
+          resolvedInitialMessages = this.resolveForkMessages(
+            params.sessionId,
+            params.fork,
+            params.getSessionMessages,
+          );
+          if (!resolvedInitialMessages) {
+            return {
+              ok: false,
+              error: new Error(`Fork source '${params.fork}' was not found or has no conversation history.`),
+              params,
+            };
+          }
+        }
 
         const effectiveProvider = params.provider || this.defaultProvider;
         const resolvedModel = this.registry.resolveModel({
@@ -425,6 +497,12 @@ export class SubagentManager extends EventEmitter {
           openaiAccountId: params.openaiAccountId,
           maxRateLimitRetries: this.maxRateLimitRetries,
           rateLimitBaseDelayMs: this.rateLimitBaseDelayMs,
+          pluginManager: this.pluginManager,
+          alias: params.alias,
+          forkedFrom: params.forkedFrom || params.fork,
+          initialMessages: resolvedInitialMessages,
+          swarmBoardService: params.swarmBoardService,
+          getSessionMessages: params.getSessionMessages,
         });
 
         this.instances.set(subagentId, instance);
@@ -511,6 +589,8 @@ export class SubagentManager extends EventEmitter {
             result: cancelledResult.result,
             error: cancelledResult.error,
             durationMs: 0,
+            background: params.background,
+            role: params.role,
           });
           return cancelledResult;
         }
@@ -563,6 +643,8 @@ export class SubagentManager extends EventEmitter {
             result: cancelledResult.result,
             error: cancelledResult.error,
             durationMs: 0,
+            background: params.background,
+            role: params.role,
           });
           return cancelledResult;
         }
@@ -618,6 +700,8 @@ export class SubagentManager extends EventEmitter {
             structuredReport: result.structuredReport,
             worktreePath: result.worktreePath,
             worktreeBranch: result.worktreeBranch,
+            background: params.background,
+            role: params.role,
           });
 
           return result;
@@ -784,7 +868,10 @@ export class SubagentManager extends EventEmitter {
     }
   }
 
-  private createScopedToolRegistry(definition: SubagentDefinition): ToolRegistry {
+  private createScopedToolRegistry(
+    definition: SubagentDefinition,
+    swarmEnabled?: boolean,
+  ): ToolRegistry {
     const scopedRegistry = new ToolRegistry(false);
 
     const allowed = definition.allowedTools
@@ -831,6 +918,9 @@ export class SubagentManager extends EventEmitter {
       scopedRegistry.register(new SendMessageTool());
       scopedRegistry.register(new ManageSubagentsTool());
       scopedRegistry.register(new DefineSubagentTool());
+      scopedRegistry.register(new SwarmTool());
+    } else if (swarmEnabled) {
+      scopedRegistry.register(new SwarmTool());
     }
 
     // Skills integration

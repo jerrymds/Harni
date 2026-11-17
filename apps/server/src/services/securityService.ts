@@ -14,11 +14,13 @@ export interface MasterKeyAndSalt {
   salt: Buffer;
 }
 
-export const LEGACY_DEFAULT_SALT = Buffer.from('cline-web-salt-v1', 'utf8');
+export const LEGACY_DEFAULT_SALT = Buffer.from('harni-salt-v1', 'utf8');
+export const LEGACY_CLINE_SALT = Buffer.from('cline-web-salt-v1', 'utf8');
 
 export class SecurityService {
   private static instance: SecurityService;
   private derivedKey: Buffer;
+  private legacyDerivedKey?: Buffer;
 
   constructor(options: SecurityServiceOptions = {}) {
     let masterSecret: string;
@@ -41,6 +43,11 @@ export class SecurityService {
 
     // Derive a 32-byte (256-bit) AES key using scrypt with 16-byte random salt
     this.derivedKey = crypto.scryptSync(masterSecret, salt, 32);
+
+    // Derive backward-compatible key for legacy plaintext .master.key encrypted before cline-web -> harni rename
+    if (salt.equals(LEGACY_DEFAULT_SALT)) {
+      this.legacyDerivedKey = crypto.scryptSync(masterSecret, LEGACY_CLINE_SALT, 32);
+    }
   }
 
   public static getInstance(options?: SecurityServiceOptions): SecurityService {
@@ -57,13 +64,13 @@ export class SecurityService {
   /**
    * Resolves or generates the persistent master key and random salt.
    * Priority:
-   * 1. process.env.APP_MASTER_KEY or process.env.CLINE_SECRET_KEY (JSON or string)
-   * 2. Key stored in ~/.harni/.master.key (or legacy ~/.cline-web/.master.key)
+   * 1. process.env.APP_MASTER_KEY or process.env.HARNI_SECRET_KEY (JSON or string)
+   * 2. Key stored in ~/.harni/.master.key
    * 3. Auto-generate new 256-bit random key and 16-byte random salt, saved to disk as JSON
    * 4. Fallback: In-memory ephemeral CSPRNG random key & salt (never predictable machine metadata)
    */
   public resolveMasterKeyAndSalt(customDir?: string): MasterKeyAndSalt {
-    const envKey = process.env.APP_MASTER_KEY || process.env.CLINE_SECRET_KEY;
+    const envKey = process.env.APP_MASTER_KEY || process.env.HARNI_SECRET_KEY;
     if (envKey && envKey.trim()) {
       const trimmed = envKey.trim();
       if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
@@ -82,7 +89,6 @@ export class SecurityService {
 
     const dir = customDir || path.join(os.homedir(), '.harni');
     const keyPath = path.join(dir, '.master.key');
-    const legacyKeyPath = path.join(os.homedir(), '.cline-web', '.master.key');
 
     try {
       if (!fs.existsSync(dir)) {
@@ -107,28 +113,6 @@ export class SecurityService {
         // Legacy format: raw hex or text key
         if (stored.length >= 16) {
           return { key: stored, salt: LEGACY_DEFAULT_SALT };
-        }
-      }
-
-      // Auto-migration: If no key in .harni yet, check if legacy .cline-web key exists
-      if (!customDir && fs.existsSync(legacyKeyPath)) {
-        try {
-          const legacyStored = fs.readFileSync(legacyKeyPath, 'utf8').trim();
-          fs.writeFileSync(keyPath, legacyStored, { encoding: 'utf8', mode: 0o600 });
-          console.log(`[SecurityService] Migrated master key from ${legacyKeyPath} to ${keyPath}`);
-          if (legacyStored.startsWith('{') && legacyStored.endsWith('}')) {
-            const parsed = JSON.parse(legacyStored);
-            if (parsed.key && typeof parsed.key === 'string' && parsed.key.length >= 16) {
-              const saltBuf = parsed.salt
-                ? Buffer.from(parsed.salt, 'hex')
-                : LEGACY_DEFAULT_SALT;
-              return { key: parsed.key, salt: saltBuf };
-            }
-          } else if (legacyStored.length >= 16) {
-            return { key: legacyStored, salt: LEGACY_DEFAULT_SALT };
-          }
-        } catch (err) {
-          console.warn(`[SecurityService] Failed to migrate legacy master key:`, err);
         }
       }
 
@@ -176,18 +160,11 @@ export class SecurityService {
     return `enc:v1:${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted}`;
   }
 
-  /**
-   * Decrypts ciphertext string.
-   * If input is not in `enc:v1:...` format, returns input gracefully (for legacy migration).
-   */
-  public decrypt(cipherText: string): string {
-    if (!cipherText) return '';
-
-    if (!cipherText.startsWith('enc:v1:')) {
-      // Legacy plaintext
-      return cipherText;
-    }
-
+  private parseCipherParts(cipherText: string): {
+    iv: Buffer;
+    authTag: Buffer;
+    encryptedHex: string;
+  } {
     const parts = cipherText.split(':');
     if (parts.length !== 5) {
       throw new Error('Invalid encrypted format');
@@ -198,15 +175,87 @@ export class SecurityService {
       throw new Error('Corrupted ciphertext');
     }
 
-    const iv = Buffer.from(ivHex, 'hex');
-    const authTag = Buffer.from(tagHex, 'hex');
-    const decipher = crypto.createDecipheriv('aes-256-gcm', this.derivedKey, iv);
+    return {
+      iv: Buffer.from(ivHex, 'hex'),
+      authTag: Buffer.from(tagHex, 'hex'),
+      encryptedHex,
+    };
+  }
+
+  private decryptWithKey(
+    iv: Buffer,
+    authTag: Buffer,
+    encryptedHex: string,
+    key: Buffer,
+  ): string {
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
     decipher.setAuthTag(authTag);
 
     let decrypted = decipher.update(encryptedHex, 'hex', 'utf8');
     decrypted += decipher.final('utf8');
 
     return decrypted;
+  }
+
+  private decryptInternal(cipherText: string): {
+    plainText: string;
+    usedLegacyKey: boolean;
+  } {
+    if (!cipherText) {
+      return { plainText: '', usedLegacyKey: false };
+    }
+
+    if (!cipherText.startsWith('enc:v1:')) {
+      // Legacy plaintext
+      return { plainText: cipherText, usedLegacyKey: false };
+    }
+
+    const { iv, authTag, encryptedHex } = this.parseCipherParts(cipherText);
+
+    try {
+      const plainText = this.decryptWithKey(iv, authTag, encryptedHex, this.derivedKey);
+      return { plainText, usedLegacyKey: false };
+    } catch (err) {
+      if (this.legacyDerivedKey) {
+        try {
+          const plainText = this.decryptWithKey(
+            iv,
+            authTag,
+            encryptedHex,
+            this.legacyDerivedKey,
+          );
+          return { plainText, usedLegacyKey: true };
+        } catch {
+          throw err;
+        }
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * Decrypts ciphertext string.
+   * If input is not in `enc:v1:...` format, returns input gracefully (for legacy migration).
+   */
+  public decrypt(cipherText: string): string {
+    return this.decryptInternal(cipherText).plainText;
+  }
+
+  /**
+   * Decrypts ciphertext string and returns a re-encrypted payload if a legacy key was used.
+   */
+  public decryptAndMigrate(cipherText: string): {
+    plainText: string;
+    migratedCipherText?: string;
+  } {
+    const { plainText, usedLegacyKey } = this.decryptInternal(cipherText);
+    if (usedLegacyKey && plainText) {
+      return {
+        plainText,
+        migratedCipherText: this.encrypt(plainText),
+      };
+    }
+    return { plainText };
   }
 
   /**

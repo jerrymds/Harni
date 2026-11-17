@@ -16,7 +16,7 @@ import {
   ProviderFactory,
   McpServerManager,
   SubagentInstance,
-  ClinerulesParser,
+  HarnirulesParser,
   GitCheckpointService,
 } from '../src/index.js';
 
@@ -29,7 +29,7 @@ describe('Hierarchical Multi-Agent Orchestration', () => {
     await fs.mkdir(tempTestDir, { recursive: true });
     await fs.writeFile(
       path.join(tempTestDir, 'sample.txt'),
-      'Hello from cline-web hierarchical multi-agent workspace!',
+      'Hello from Harni hierarchical multi-agent workspace!',
       'utf-8',
     );
   });
@@ -403,9 +403,9 @@ describe('Hierarchical Multi-Agent Orchestration', () => {
     expect(lastMsg?.content).toContain('Based on the researcher report');
   });
 
-  it('parses .clinerules directory with sub-agent.md to bind custom roles and models', async () => {
-    const clinerulesDir = path.join(tempTestDir, '.clinerules');
-    await fs.mkdir(clinerulesDir, { recursive: true });
+  it('parses .harnirules directory with sub-agent.md to bind custom roles and models', async () => {
+    const harnirulesDir = path.join(tempTestDir, '.harnirules');
+    await fs.mkdir(harnirulesDir, { recursive: true });
 
     const subagentMarkdown = `
 # 階層式子代理人角色與模型配置 (Subagent Roles & Models)
@@ -426,11 +426,11 @@ describe('Hierarchical Multi-Agent Orchestration', () => {
 - **Instructions**: 檢查程式碼注入與安全弱點。
 `;
 
-    const subagentPath = path.join(clinerulesDir, 'sub-agent.md');
+    const subagentPath = path.join(harnirulesDir, 'sub-agent.md');
     await fs.writeFile(subagentPath, subagentMarkdown, 'utf-8');
 
-    // Also add another markdown rule in .clinerules/
-    const codingStandardsPath = path.join(clinerulesDir, 'coding-standards.md');
+    // Also add another markdown rule in .harnirules/
+    const codingStandardsPath = path.join(harnirulesDir, 'coding-standards.md');
     await fs.writeFile(codingStandardsPath, '# Coding Standards\nUse TypeScript strictly.', 'utf-8');
 
     const registry = new SubagentRegistry(true);
@@ -438,7 +438,7 @@ describe('Hierarchical Multi-Agent Orchestration', () => {
 
     expect(count).toBe(3);
 
-    // Existing roles updated with models from .clinerules/sub-agent.md
+    // Existing roles updated with models from .harnirules/sub-agent.md
     const researcher = registry.get('researcher')!;
     expect(researcher.model).toBe('gemini-3.8-flash');
     expect(researcher.role).toBe('專案速查員');
@@ -448,15 +448,15 @@ describe('Hierarchical Multi-Agent Orchestration', () => {
     expect(coder.model).toBe('gemini-3.8-pro');
     expect(coder.role).toBe('系統重構專員');
 
-    // New custom role created from .clinerules/sub-agent.md
+    // New custom role created from .harnirules/sub-agent.md
     expect(registry.has('security_auditor')).toBe(true);
     const auditor = registry.get('security_auditor')!;
     expect(auditor.model).toBe('claude-3-7-sonnet');
     expect(auditor.role).toBe('系統資安稽核員');
     expect(auditor.allowedTools).toEqual(['read_file', 'search_files']);
 
-    // Clean up .clinerules directory in temp test directory
-    await fs.rm(clinerulesDir, { recursive: true, force: true });
+    // Clean up .harnirules directory in temp test directory
+    await fs.rm(harnirulesDir, { recursive: true, force: true });
   });
 
   it('resolves models based on tiered routing and explicit overrides', () => {
@@ -1583,7 +1583,7 @@ All unit tests pass with zero regressions.
     });
   });
 
-  it('P2-4: parses model tier, token budget, and timeoutMs from clinerules', () => {
+  it('P2-4: parses model tier, token budget, and timeoutMs from harnirules', () => {
     const content = `
 ## Subagents
 ### fast_worker
@@ -1594,7 +1594,7 @@ All unit tests pass with zero regressions.
 - Timeout: 30000ms
 - System Prompt: You are a fast worker.
 `;
-    const parsed = ClinerulesParser.parse(content);
+    const parsed = HarnirulesParser.parse(content);
     expect(parsed).toHaveLength(1);
     expect(parsed[0].name).toBe('fast_worker');
     expect(parsed[0].modelTier).toBe('fast');
@@ -1602,7 +1602,7 @@ All unit tests pass with zero regressions.
     expect(parsed[0].timeoutMs).toBe(30000);
 
     const registry = new SubagentRegistry(false);
-    ClinerulesParser.applyRules(parsed, registry['definitions']);
+    HarnirulesParser.applyRules(parsed, registry['definitions']);
 
     const def = registry.get('fast_worker');
     expect(def).toBeDefined();

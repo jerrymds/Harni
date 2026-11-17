@@ -157,7 +157,7 @@ export class GitCheckpointService {
         const [headMarker, rawName, rawCommit] = line.split('|');
         const name = (rawName || '').trim();
         if (!name) continue;
-        if (name.startsWith('cline/task-') && name !== currentBranch) {
+        if (name.startsWith('harni/task-') && name !== currentBranch) {
           continue;
         }
         const commit = (rawCommit || '').trim() || undefined;
@@ -208,7 +208,7 @@ export class GitCheckpointService {
     }
 
     const target = (branchName || '').trim();
-    if (!target || target.startsWith('-') || /[\s~^:?*\[\\]|\.\./.test(target)) {
+    if (!target || target.startsWith('-') || /[\s~^:?*[\]\\]|\.\./.test(target)) {
       return {
         success: false,
         currentBranch: await this.getCurrentBranch(workspaceRoot),
@@ -286,7 +286,7 @@ export class GitCheckpointService {
   }
 
   /**
-   * Ensure .cline-worktrees is ignored locally via .git/info/exclude
+   * Ensure .harni-worktrees is ignored locally via .git/info/exclude
    */
   public async ensureGitExclude(workspaceRoot: string): Promise<void> {
     if (this.excludedRoots.has(workspaceRoot)) return;
@@ -304,8 +304,8 @@ export class GitCheckpointService {
         await fs.mkdir(path.join(gitDir, 'info'), { recursive: true });
       }
 
-      if (!content.includes('.cline-worktrees')) {
-        content += '\n# Cline Web Worktrees\n.cline-worktrees\n.cline-worktrees/**\n.cline/snapshots\n';
+      if (!content.includes('.harni-worktrees')) {
+        content += '\n# Harni Worktrees\n.harni-worktrees\n.harni-worktrees/**\n.harni/snapshots\n';
         await fs.writeFile(excludeFile, content, 'utf-8');
       }
     } catch {
@@ -344,14 +344,14 @@ export class GitCheckpointService {
       if (status.isDirty) {
         // Create a dangling stash commit without clearing the working directory
         const stashRes = await this.runGit(
-          ['stash', 'create', `cline-checkpoint-${id}`],
+          ['stash', 'create', `harni-checkpoint-${id}`],
           workspaceRoot,
         );
         if (stashRes.exitCode === 0 && stashRes.stdout) {
           stashRef = stashRes.stdout;
-          // Store a dedicated lightweight reference in refs/cline/checkpoints/
+          // Store a dedicated lightweight reference in refs/harni/checkpoints/
           await this.runGit(
-            ['update-ref', `refs/cline/checkpoints/${id}`, stashRef],
+            ['update-ref', `refs/harni/checkpoints/${id}`, stashRef],
             workspaceRoot,
           );
         }
@@ -360,7 +360,7 @@ export class GitCheckpointService {
       // If no stashRef was needed, update ref to HEAD
       if (!stashRef && commitHash) {
         await this.runGit(
-          ['update-ref', `refs/cline/checkpoints/${id}`, commitHash],
+          ['update-ref', `refs/harni/checkpoints/${id}`, commitHash],
           workspaceRoot,
         );
       }
@@ -509,8 +509,8 @@ export class GitCheckpointService {
     await this.ensureGitExclude(workspaceRoot);
 
     const safeSessionId = sessionId.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const branch = `cline/task-${safeSessionId}`;
-    const worktreesDir = path.join(workspaceRoot, '.cline-worktrees');
+    const branch = `harni/task-${safeSessionId}`;
+    const worktreesDir = path.join(workspaceRoot, '.harni-worktrees');
     await fs.mkdir(worktreesDir, { recursive: true });
 
     const worktreePath = path.join(worktreesDir, safeSessionId);
@@ -646,7 +646,7 @@ export class GitCheckpointService {
       const statusRes = await this.getStatus(worktreePath);
       if (statusRes.isDirty) {
         await this.runGit(['add', '-A'], worktreePath, 120000);
-        const msg = commitMessage || `cline: completed task in session ${sessionId}`;
+        const msg = commitMessage || `harni: completed task in session ${sessionId}`;
         await this.runGit(['commit', '-m', msg], worktreePath, 60000);
       }
 
@@ -684,7 +684,7 @@ export class GitCheckpointService {
     if (!record) {
       // Check if worktree directory exists anyway
       const safeSessionId = sessionId.replace(/[^a-zA-Z0-9_-]/g, '_');
-      const worktreePath = path.join(workspaceRoot, '.cline-worktrees', safeSessionId);
+      const worktreePath = path.join(workspaceRoot, '.harni-worktrees', safeSessionId);
       try {
         await this.runGit(['worktree', 'remove', '--force', worktreePath], workspaceRoot, 60000);
         await fs.rm(worktreePath, { recursive: true, force: true });
@@ -785,7 +785,7 @@ export class GitCheckpointService {
     const isGit = await this.isGitRepo(workspaceRoot);
     if (isGit) {
       await this.runGit(
-        ['update-ref', '-d', `refs/cline/checkpoints/${checkpointId}`],
+        ['update-ref', '-d', `refs/harni/checkpoints/${checkpointId}`],
         workspaceRoot,
       );
     }
@@ -828,7 +828,7 @@ export class GitCheckpointService {
   }
 
   /**
-   * Scan and prune orphaned/stale cline/task-* worktree branches and unlinked directories
+   * Scan and prune orphaned/stale harni/task-* worktree branches and unlinked directories
    */
   public async pruneStaleBranches(workspaceRoot: string): Promise<string[]> {
     const isGit = await this.isGitRepo(workspaceRoot);
@@ -839,9 +839,9 @@ export class GitCheckpointService {
     // 1. Prune git worktree administrative metadata
     await this.runGit(['worktree', 'prune'], workspaceRoot);
 
-    // 2. Query all local branches matching cline/task-*
+    // 2. Query all local branches matching harni/task-*
     const branchRes = await this.runGit(
-      ['branch', '--list', 'cline/task-*'],
+      ['branch', '--list', 'harni/task-*'],
       workspaceRoot,
     );
 
@@ -849,7 +849,7 @@ export class GitCheckpointService {
       const branches = branchRes.stdout
         .split('\n')
         .map((b) => b.replace(/^\*?\s+/, '').trim())
-        .filter((b) => b.startsWith('cline/task-'));
+        .filter((b) => b.startsWith('harni/task-'));
 
       const activeBranchSet = new Set(
         Array.from(this.activeWorktrees.values()).map((w) => w.branch),
@@ -858,8 +858,8 @@ export class GitCheckpointService {
       for (const branch of branches) {
         // If not in activeWorktrees, it is considered stale / orphaned!
         if (!activeBranchSet.has(branch)) {
-          const sessionId = branch.replace(/^cline\/task-/, '');
-          const worktreeDir = path.join(workspaceRoot, '.cline-worktrees', sessionId);
+          const sessionId = branch.replace(/^harni\/task-/, '');
+          const worktreeDir = path.join(workspaceRoot, '.harni-worktrees', sessionId);
           try {
             await this.runGit(['worktree', 'remove', '--force', worktreeDir], workspaceRoot, 10000);
             await fs.rm(worktreeDir, { recursive: true, force: true });
@@ -875,9 +875,9 @@ export class GitCheckpointService {
       }
     }
 
-    // 3. Clean up any empty/unregistered directories in .cline-worktrees
+    // 3. Clean up any empty/unregistered directories in .harni-worktrees
     try {
-      const worktreesDir = path.join(workspaceRoot, '.cline-worktrees');
+      const worktreesDir = path.join(workspaceRoot, '.harni-worktrees');
       const entries = await fs.readdir(worktreesDir, { withFileTypes: true });
       const activePaths = new Set(
         Array.from(this.activeWorktrees.values()).map((w) => path.resolve(w.worktreePath)),
@@ -895,7 +895,7 @@ export class GitCheckpointService {
         }
       }
     } catch {
-      // .cline-worktrees does not exist, ignore
+      // .harni-worktrees does not exist, ignore
     }
 
     await this.runGit(['worktree', 'prune'], workspaceRoot);
@@ -921,7 +921,7 @@ export class GitCheckpointService {
     for (const ckpt of sessionCkpts) {
       if (isGit) {
         await this.runGit(
-          ['update-ref', '-d', `refs/cline/checkpoints/${ckpt.id}`],
+          ['update-ref', '-d', `refs/harni/checkpoints/${ckpt.id}`],
           workspaceRoot,
         );
       }
@@ -933,14 +933,14 @@ export class GitCheckpointService {
     if (this.activeWorktrees.has(sessionId)) {
       await this.discardWorktree(workspaceRoot, sessionId);
       const safeSessionId = sessionId.replace(/[^a-zA-Z0-9_-]/g, '_');
-      deletedBranches.push(`cline/task-${safeSessionId}`);
+      deletedBranches.push(`harni/task-${safeSessionId}`);
     } else if (isGit) {
       // Also check if an orphaned branch exists for this session
       const safeSessionId = sessionId.replace(/[^a-zA-Z0-9_-]/g, '_');
-      const branch = `cline/task-${safeSessionId}`;
+      const branch = `harni/task-${safeSessionId}`;
       const branchRes = await this.runGit(['branch', '--list', branch], workspaceRoot);
       if (branchRes.exitCode === 0 && branchRes.stdout.includes(branch)) {
-        const worktreeDir = path.join(workspaceRoot, '.cline-worktrees', safeSessionId);
+        const worktreeDir = path.join(workspaceRoot, '.harni-worktrees', safeSessionId);
         try {
           await this.runGit(['worktree', 'remove', '--force', worktreeDir], workspaceRoot, 10000);
           await fs.rm(worktreeDir, { recursive: true, force: true });

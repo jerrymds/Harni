@@ -29,7 +29,7 @@ describe('AgentCoreEngine Multi-turn Loop', () => {
             {
               id: 'call_1',
               name: 'write_to_file',
-              arguments: { path: 'hello.txt', content: 'Hello from cline-web Agent!' },
+              arguments: { path: 'hello.txt', content: 'Hello from Harni Agent!' },
             },
           ],
         },
@@ -63,7 +63,7 @@ describe('AgentCoreEngine Multi-turn Loop', () => {
     expect(completedEventReceived).toBe(true);
 
     const createdHello = await fs.readFile(path.join(tempTestDir, 'hello.txt'), 'utf-8');
-    expect(createdHello).toBe('Hello from cline-web Agent!');
+    expect(createdHello).toBe('Hello from Harni Agent!');
   });
 
   it('filters out subagent tools and orchestration prompt when subagentsEnabled is false', async () => {

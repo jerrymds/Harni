@@ -112,23 +112,25 @@ export class ReplaceFileContentTool extends BaseTool<ReplaceFileContentParams> {
       let output = `Successfully replaced target content in '${filePath}'.`;
 
       // Instant Syntax & Linter Diagnostics Feedback
-      try {
-        const diagResult = await SyntaxLinterService.diagnoseFile({
-          filePath: safePath,
-          workspaceRoot: context.workspaceRoot,
-          content: newContent,
-        });
+      if (!context.skipInlineDiagnostics) {
+        try {
+          const diagResult = await SyntaxLinterService.diagnoseFile({
+            filePath: safePath,
+            workspaceRoot: context.workspaceRoot,
+            content: newContent,
+          });
 
-        if (diagResult.diagnostics.length > 0) {
-          if (context.onDiagnostics) {
-            context.onDiagnostics(diagResult);
+          if (diagResult.diagnostics.length > 0) {
+            if (context.onDiagnostics) {
+              context.onDiagnostics(diagResult);
+            }
+            if (diagResult.formattedOutput) {
+              output += `\n${diagResult.formattedOutput}`;
+            }
           }
-          if (diagResult.formattedOutput) {
-            output += `\n${diagResult.formattedOutput}`;
-          }
+        } catch {
+          // Non-blocking for replacement
         }
-      } catch {
-        // Non-blocking for replacement
       }
 
       return {

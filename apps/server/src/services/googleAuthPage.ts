@@ -248,7 +248,7 @@ export class GoogleAuthPage {
     <div class="icon">✅</div>
     <h2>Google 官方帳號認證成功！</h2>
     <div class="email-badge">${escapeHtml(authData.email)}</div>
-    <p style="margin-top: 16px; font-size: 12px; color: #6b7280;">憑證已加密儲存，視窗將自動關閉並同步至 cline-web...</p>
+    <p style="margin-top: 16px; font-size: 12px; color: #6b7280;">憑證已加密儲存，視窗將自動關閉並同步至 Harni...</p>
   </div>
 
   <script>

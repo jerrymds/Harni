@@ -32,7 +32,7 @@ function resolveDefaultWorkspace(): string {
 const app = createApp({
   port: parseInt(process.env.PORT || '3001', 10),
   host: process.env.HOST || '127.0.0.1',
-  authToken: process.env.AUTH_TOKEN || process.env.CLINE_AUTH_TOKEN || process.env.SERVER_API_KEY,
+  authToken: process.env.AUTH_TOKEN || process.env.HARNI_AUTH_TOKEN || process.env.SERVER_API_KEY,
   workspaceRoot: resolveDefaultWorkspace(),
 });
 

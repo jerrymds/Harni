@@ -23,6 +23,7 @@ import type {
   ToolCallRequest,
   WorkspaceFolder,
   WorkspaceInfo,
+  WorkflowPluginMetadata,
 } from '@harni/types';
 
 export type {
@@ -169,6 +170,8 @@ export interface SettingsSliceState {
   quotaInfo: ModelQuotaResponse | null;
   isLoadingQuota: boolean;
   antigravityMode: 'acp' | 'direct';
+  workflowPlugins: WorkflowPluginMetadata[];
+  isLoadingPlugins: boolean;
 }
 
 export interface SettingsSliceActions {
@@ -198,6 +201,8 @@ export interface SettingsSliceActions {
   setModelContextWindow: (modelId: string, contextWindow: number | null) => void;
   setSettingsOpen: (open: boolean) => void;
   fetchModelQuota: (provider?: LLMProviderType, forceRefresh?: boolean) => Promise<ModelQuotaResponse | null>;
+  fetchWorkflowPlugins: () => Promise<void>;
+  toggleWorkflowPlugin: (id: string, enabled: boolean) => Promise<void>;
 }
 
 export type SettingsSlice = SettingsSliceState & SettingsSliceActions;

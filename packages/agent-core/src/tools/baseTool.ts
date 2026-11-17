@@ -10,6 +10,11 @@ export interface ToolExecutionContext {
   apiKey?: string;
   baseURL?: string;
   subagentManager?: import('../subagents/subagentManager.js').SubagentManager;
+  schedulerService?: import('../scheduler/schedulerService.js').SchedulerService;
+  swarmBoardService?: import('../swarm/swarmBoardService.js').SwarmBoardService;
+  getSessionMessages?: () => import('@harni/types').ChatMessage[];
+  resolveForkMessages?: (source: string) => import('@harni/types').ChatMessage[] | undefined;
+  agentAlias?: string;
   onFileDiff?: (diff: FileDiff) => void;
   onTerminalData?: (data: string) => void;
   onDiagnostics?: (data: import('@harni/types').FileDiagnosticsResult) => void;
@@ -33,6 +38,7 @@ export interface ToolExecutionContext {
   runContrastiveProbe?: (
     params: import('@harni/types').ContrastiveProbeParams,
   ) => Promise<import('@harni/types').ContrastiveProbeResult>;
+  skipInlineDiagnostics?: boolean;
 }
 
 export abstract class BaseTool<TParams = Record<string, unknown>> {

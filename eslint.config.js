@@ -1,6 +1,5 @@
 import js from '@eslint/js';
-import tsPlugin from '@typescript-eslint/eslint-plugin';
-import tsParser from '@typescript-eslint/parser';
+import tseslint from 'typescript-eslint';
 import reactHooksPlugin from 'eslint-plugin-react-hooks';
 
 export default [
@@ -26,14 +25,14 @@ export default [
     },
     files: ['**/*.{ts,tsx}'],
     languageOptions: {
-      parser: tsParser,
+      parser: tseslint.parser,
       parserOptions: {
         ecmaVersion: 'latest',
         sourceType: 'module',
       },
     },
     plugins: {
-      '@typescript-eslint': tsPlugin,
+      '@typescript-eslint': tseslint.plugin,
       'react-hooks': reactHooksPlugin,
     },
     rules: {
@@ -42,6 +41,7 @@ export default [
       'no-undef': 'off',
       'no-empty': 'off',
       'no-useless-assignment': 'off',
+      'no-control-regex': 'off',
       'preserve-caught-error': 'off',
       'react-hooks/rules-of-hooks': 'error',
       'react-hooks/exhaustive-deps': 'off',
