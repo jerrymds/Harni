@@ -21,7 +21,12 @@ export function timingSafeCompare(a: string, b: string): boolean {
 export function extractCookie(cookieHeader: string | undefined, name: string): string | undefined {
   if (!cookieHeader) return undefined;
   const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
-  return match ? decodeURIComponent(match[1]) : undefined;
+  if (!match) return undefined;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -70,6 +75,8 @@ export function validateHostBindingSecurity(
   }
 }
 
+const MAX_AUTH_STATE_ENTRIES = 256;
+
 /** Short-lived PKCE verifier store, keyed by `state`, for paste-code OAuth flows. */
 const pkceStore = new Map<string, { verifier: string; createdAt: number }>();
 
@@ -77,6 +84,11 @@ export function putPkce(state: string, verifier: string): void {
   const now = Date.now();
   for (const [k, v] of pkceStore) {
     if (now - v.createdAt > 15 * 60 * 1000) pkceStore.delete(k);
+  }
+  while (pkceStore.size >= MAX_AUTH_STATE_ENTRIES) {
+    const oldest = pkceStore.keys().next().value;
+    if (oldest !== undefined) pkceStore.delete(oldest);
+    else break;
   }
   pkceStore.set(state, { verifier, createdAt: now });
 }
@@ -87,4 +99,86 @@ export function takePkce(state: string | null | undefined): string | undefined {
   if (!entry) return undefined;
   pkceStore.delete(state);
   return Date.now() - entry.createdAt > 15 * 60 * 1000 ? undefined : entry.verifier;
+}
+
+/** Short-lived CSRF state store for Google OAuth callbacks. */
+const oauthStateStore = new Map<string, number>();
+const OAUTH_STATE_TTL_MS = 15 * 60 * 1000;
+
+export function generateOAuthState(): string {
+  return crypto.randomBytes(24).toString('hex');
+}
+
+export function putOAuthState(state: string): void {
+  const now = Date.now();
+  for (const [k, createdAt] of oauthStateStore) {
+    if (now - createdAt > OAUTH_STATE_TTL_MS) {
+      oauthStateStore.delete(k);
+    }
+  }
+  while (oauthStateStore.size >= MAX_AUTH_STATE_ENTRIES) {
+    const oldest = oauthStateStore.keys().next().value;
+    if (oldest !== undefined) oauthStateStore.delete(oldest);
+    else break;
+  }
+  oauthStateStore.set(state, now);
+}
+
+export function takeOAuthState(state: string | null | undefined): boolean {
+  if (!state) return false;
+  const createdAt = oauthStateStore.get(state);
+  if (createdAt === undefined) return false;
+  oauthStateStore.delete(state);
+  return Date.now() - createdAt <= OAUTH_STATE_TTL_MS;
+}
+
+const LOCAL_ORIGIN_PATTERN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
+
+/**
+ * Validates whether an HTTP/WebSocket Origin header belongs to a trusted local
+ * desktop/browser origin or an explicitly configured allowlist.
+ */
+export function isAllowedOrigin(origin: string | undefined, requestHost?: string): boolean {
+  if (!origin) return false;
+  const trimmed = origin.trim();
+  if (!trimmed || trimmed === 'null') return false;
+
+  if (LOCAL_ORIGIN_PATTERN.test(trimmed)) {
+    return true;
+  }
+  if (trimmed.startsWith('file://') || trimmed.startsWith('app://')) {
+    return true;
+  }
+
+  if (requestHost) {
+    try {
+      const parsed = new URL(trimmed);
+      if (
+        (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+        parsed.host.toLowerCase() === requestHost.toLowerCase()
+      ) {
+        return true;
+      }
+    } catch {
+      return false;
+    }
+  }
+
+  const extra = [
+    process.env.HARNI_ALLOWED_ORIGINS,
+    process.env.GOOGLE_OAUTH_ALLOWED_ORIGINS,
+  ]
+    .filter(Boolean)
+    .join(',');
+  if (extra) {
+    const allowed = extra
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (allowed.includes(trimmed)) {
+      return true;
+    }
+  }
+
+  return false;
 }

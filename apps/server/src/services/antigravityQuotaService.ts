@@ -220,8 +220,8 @@ export class AntigravityQuotaService {
 
       this.cache = { response, cachedAt: now };
       return response;
-    } catch (err: any) {
-      const errorMsg = err?.message || String(err);
+    } catch (err: unknown) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
       console.warn('[AntigravityQuotaService] Failed to query agy /usage:', errorMsg);
 
       // If we have previous cache, return it with error note

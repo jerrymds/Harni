@@ -17,10 +17,15 @@ import type {
   ModelQuotaResponse,
   OpenAIAuthInfo,
   QuestionPrompt,
+  ScheduleInfo,
+  SessionChangedFile,
   SubagentInstanceInfo,
+  SwarmBoardState,
+  SwarmMessage,
   ThinkingDepth,
   TokenUsage,
   ToolCallRequest,
+  WakeupEventInfo,
   WorkspaceFolder,
   WorkspaceInfo,
   WorkflowPluginMetadata,
@@ -42,13 +47,20 @@ export type {
   ModelInfo,
   OpenAIAuthInfo,
   QuestionPrompt,
+  ScheduleInfo,
+  SessionChangedFile,
   SubagentInstanceInfo,
+  SwarmBoardState,
+  SwarmMessage,
   ThinkingDepth,
   TokenUsage,
   ToolCallRequest,
+  WakeupEventInfo,
   WorkspaceFolder,
   WorkspaceInfo,
 };
+
+export type WorkspaceViewMode = 'chat' | 'orchestrator';
 
 export interface ChatSliceState {
   status: AgentStatus;
@@ -65,6 +77,11 @@ export interface ChatSliceState {
   availableModels: Record<string, ModelInfo[]>;
   isLoadingModels: boolean;
   subagents: Record<string, SubagentInstanceInfo[]>;
+  activeWorkspaceView: WorkspaceViewMode;
+  sessionChangedFiles: Record<string, SessionChangedFile[]>;
+  swarmBoards: Record<string, SwarmBoardState>;
+  sessionSchedules: Record<string, ScheduleInfo[]>;
+  wakeupLogs: Record<string, WakeupEventInfo[]>;
 }
 
 export interface ChatSliceActions {
@@ -75,13 +92,19 @@ export interface ChatSliceActions {
   moveSessionToFolder: (sessionId: string, targetFolderId: string) => void;
   clearMessages: () => void;
   cancelTask: () => void;
+  cancelTaskForSession: (sessionId: string) => void;
   approveTool: (toolCallId: string, approved: boolean, feedback?: string) => void;
+  approveToolForSession: (sessionId: string, toolCallId: string, approved: boolean, feedback?: string) => void;
   answerQuestion: (toolCallId: string, answers: string[], customInput?: string) => void;
+  answerQuestionForSession: (sessionId: string, toolCallId: string, answers: string[], customInput?: string) => void;
   setMode: (mode: AgentMode) => void;
   setProvider: (provider: LLMProviderType) => void;
   setModel: (model: string) => void;
   fetchModels: (provider?: LLMProviderType, apiKey?: string, baseURL?: string) => Promise<void>;
   killSubagent: (subagentId: string) => void;
+  killSubagentForSession: (sessionId: string, subagentId: string) => void;
+  setActiveWorkspaceView: (view: WorkspaceViewMode) => void;
+  openChangedFile: (sessionId: string, filePath: string) => void;
 }
 
 export type ChatSlice = ChatSliceState & ChatSliceActions;

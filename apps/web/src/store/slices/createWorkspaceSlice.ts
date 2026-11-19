@@ -1,5 +1,15 @@
 import type { StateCreator } from 'zustand';
-import type { AgentStatus, ChatMessage, ServerMessage, WorkspaceFolder } from '@harni/types';
+import {
+  normalizeAgentMode,
+  type AgentStatus,
+  type ChatMessage,
+  type LLMProviderType,
+  type ScheduleInfo,
+  type ServerMessage,
+  type SessionChangedFile,
+  type SwarmBoardState,
+  type WorkspaceFolder,
+} from '@harni/types';
 import type { AgentStoreState, WorkspaceSlice } from '../types.js';
 import {
   apiFetch,
@@ -14,25 +24,27 @@ import {
   syncFoldersToDB,
   syncSessionToDB,
 } from '../utils.js';
+import { redactUrlToken } from '../../utils/url.js';
 import { isRateLimitError, parseClientRateLimit } from '../../utils/rateLimit.js';
 
-const savedProvider = (localStorage.getItem('harni_web_provider') as any) || 'cline';
+const savedProvider =
+  (localStorage.getItem('harni_web_provider') as LLMProviderType | null) || 'cline';
 const savedModel =
   localStorage.getItem('harni_web_model') ||
   localStorage.getItem(`harni_web_model_${savedProvider}`) ||
   PROVIDER_DEFAULT_MODELS[savedProvider as keyof typeof PROVIDER_DEFAULT_MODELS] ||
   '';
-const savedMode = (localStorage.getItem('harni_web_mode') as any) || 'code';
+const savedMode = normalizeAgentMode(localStorage.getItem('harni_web_mode'));
 const initialFolders = loadSavedFolders();
 const defaultFolderId = initialFolders[0]?.id || 'folder_default';
 const initialSessionsData = loadSavedSessions(savedMode, defaultFolderId, savedProvider, savedModel);
 
 // --- Stream Buffering Helpers to eliminate V8 GC churn & Chrome high-frequency DOM/state thrashing ---
 let thinkingBuffer: Record<string, string> = {};
-let thinkingFlushTimer: any = null;
+let thinkingFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 let tokenBuffer: Record<string, string> = {};
-let tokenFlushTimer: any = null;
+let tokenFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function flushThinkingBuffer(
   get: () => AgentStoreState,
@@ -153,6 +165,27 @@ export function flushAllStreamBuffers(
   flushTokenBuffer(get, set);
 }
 
+export function upsertChangedFiles(
+  existing: SessionChangedFile[],
+  incoming: SessionChangedFile[],
+): SessionChangedFile[] {
+  const byPath = new Map<string, SessionChangedFile>();
+  for (const item of existing) {
+    byPath.set(item.path, item);
+  }
+  for (const item of incoming) {
+    const prev = byPath.get(item.path);
+    byPath.set(item.path, {
+      ...prev,
+      ...item,
+      diff: item.diff ?? prev?.diff,
+      subagentId: item.subagentId ?? prev?.subagentId,
+      subagentRole: item.subagentRole ?? prev?.subagentRole,
+    });
+  }
+  return Array.from(byPath.values()).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
 export function resolveTargetWorkspaceRoot(
   get: () => AgentStoreState,
   explicitRoot?: string,
@@ -162,6 +195,16 @@ export function resolveTargetWorkspaceRoot(
   const targetFolderId = currentSession?.folderId || activeFolderId;
   const currentFolder = folders.find((f) => f.id === targetFolderId);
   return explicitRoot || currentFolder?.path || workspaceInfo?.rootPath;
+}
+
+let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+let wsReconnectAttempt = 0;
+
+function clearWsReconnectTimer(): void {
+  if (wsReconnectTimer !== null) {
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = null;
+  }
 }
 
 export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], WorkspaceSlice> = (set, get) => ({
@@ -196,8 +239,14 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
     get().fetchCheckpoints();
     get().fetchBranches();
 
+    clearWsReconnectTimer();
     const existingWs = get().ws;
-    if (existingWs && existingWs.readyState === WebSocket.OPEN) return;
+    if (
+      existingWs &&
+      (existingWs.readyState === WebSocket.OPEN || existingWs.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
 
     const token = get().serverAuthToken || getServerAuthToken();
     const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
@@ -208,26 +257,39 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
+      wsReconnectAttempt = 0;
+      clearWsReconnectTimer();
       set({ connected: true, ws });
-      console.log('[WS Client] Connected to server at', wsUrl);
-      const { currentSessionId } = get();
-      if (currentSessionId && ws.readyState === WebSocket.OPEN) {
-        ws.send(
-          JSON.stringify({
-            type: 'session:subscribe',
-            payload: { sessionId: currentSessionId },
-          }),
-        );
+      console.log('[WS Client] Connected to server at', redactUrlToken(wsUrl));
+      const { currentSessionId, sessions } = get();
+      const idsToSubscribe = new Set<string>();
+      if (currentSessionId) idsToSubscribe.add(currentSessionId);
+      for (const s of sessions) {
+        if (s?.id) idsToSubscribe.add(s.id);
+      }
+      if (ws.readyState === WebSocket.OPEN) {
+        for (const sid of idsToSubscribe) {
+          ws.send(
+            JSON.stringify({
+              type: 'session:subscribe',
+              payload: { sessionId: sid },
+            }),
+          );
+        }
       }
     };
 
     ws.onclose = () => {
       flushAllStreamBuffers(get, set);
       set({ connected: false, ws: null });
-      console.log('[WS Client] Disconnected from server. Reconnecting in 3s...');
-      setTimeout(() => {
+      clearWsReconnectTimer();
+      const delayMs = Math.min(30_000, 3000 * Math.pow(2, wsReconnectAttempt));
+      wsReconnectAttempt = Math.min(wsReconnectAttempt + 1, 4);
+      console.log(`[WS Client] Disconnected from server. Reconnecting in ${delayMs}ms...`);
+      wsReconnectTimer = setTimeout(() => {
+        wsReconnectTimer = null;
         get().connect(url);
-      }, 3000);
+      }, delayMs);
     };
 
     ws.onerror = (err) => {
@@ -248,7 +310,7 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
         switch (msg.type) {
           case 'task:status': {
             const { sessions, currentSessionId } = get();
-            const targetSessionId = (msg.payload as any).sessionId || currentSessionId;
+            const targetSessionId = msg.payload.sessionId || currentSessionId;
             const newStatus = msg.payload.status;
 
             const isDone =
@@ -263,6 +325,7 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
                     status: newStatus,
                     activeThinking: isDone ? '' : s.activeThinking,
                     pendingApproval: isDone ? null : s.pendingApproval,
+                    pendingQuestion: isDone ? null : s.pendingQuestion,
                     updatedAt: Date.now(),
                   }
                 : s,
@@ -273,6 +336,7 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
                 status: newStatus,
                 activeThinking: isDone ? '' : get().activeThinking,
                 pendingApproval: isDone ? null : get().pendingApproval,
+                pendingQuestion: isDone ? null : get().pendingQuestion,
                 sessions: updatedSessions,
               });
             } else {
@@ -286,7 +350,7 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
 
           case 'task:state': {
             const { sessions, currentSessionId } = get();
-            const targetSessionId = (msg.payload as any).sessionId || currentSessionId;
+            const targetSessionId = msg.payload.sessionId || currentSessionId;
             const updatedMessages = msg.payload.messages || [];
 
             const updatedSessions = sessions.map((s) =>
@@ -337,7 +401,7 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
           }
 
           case 'chat:token': {
-            const targetSessionId = (msg.payload as any).sessionId || get().currentSessionId;
+            const targetSessionId = msg.payload.sessionId || get().currentSessionId;
             // If there is pending thinking text for this session, flush it first to preserve ordering
             if (thinkingBuffer[targetSessionId]) {
               flushThinkingBuffer(get, set);
@@ -354,7 +418,7 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
           }
 
           case 'chat:thinking': {
-            const targetSessionId = (msg.payload as any).sessionId || get().currentSessionId;
+            const targetSessionId = msg.payload.sessionId || get().currentSessionId;
             thinkingBuffer[targetSessionId] = (thinkingBuffer[targetSessionId] || '') + msg.payload.thought;
 
             // Batch stream thinking updates to ~50ms window (~20fps instead of 80fps+)
@@ -368,7 +432,7 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
 
           case 'question:ask': {
             const { sessions, currentSessionId } = get();
-            const targetSessionId = (msg.payload as any).sessionId || currentSessionId;
+            const targetSessionId = msg.payload.sessionId || currentSessionId;
 
             const updatedSessions = sessions.map((s) =>
               s.id === targetSessionId
@@ -389,7 +453,7 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
 
           case 'tool:request': {
             const { sessions, currentSessionId } = get();
-            const targetSessionId = (msg.payload as any).sessionId || currentSessionId;
+            const targetSessionId = msg.payload.sessionId || currentSessionId;
 
             if (msg.payload.requiresApproval) {
               const updatedSessions = sessions.map((s) =>
@@ -412,7 +476,7 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
 
           case 'tool:result': {
             const { sessions, currentSessionId } = get();
-            const targetSessionId = (msg.payload as any).sessionId || currentSessionId;
+            const targetSessionId = msg.payload.sessionId || currentSessionId;
 
             const updatedSessions = sessions.map((s) =>
               s.id === targetSessionId
@@ -526,7 +590,7 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
           }
 
           case 'subagent:completed': {
-            const { subagents, currentSessionId } = get();
+            const { subagents, currentSessionId, sessionChangedFiles } = get();
             const sid = msg.payload.sessionId || currentSessionId;
             const existing = subagents[sid] || [];
             const updated = existing.map((s) =>
@@ -552,16 +616,183 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
               ...subagents,
               [sid]: updated,
             };
-            set({
-              subagents: updatedSubagents,
-            });
+
+            const reportedFiles = msg.payload.structuredReport?.modifiedFiles;
+            if (Array.isArray(reportedFiles) && reportedFiles.length > 0) {
+              const now = Date.now();
+              const incomingFiles: SessionChangedFile[] = reportedFiles
+                .filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
+                .map((filePath) => ({
+                  path: filePath,
+                  updatedAt: now,
+                  source: 'subagent' as const,
+                  subagentId: msg.payload.subagentId,
+                  subagentRole: msg.payload.role,
+                }));
+              set({
+                subagents: updatedSubagents,
+                sessionChangedFiles: {
+                  ...sessionChangedFiles,
+                  [sid]: upsertChangedFiles(sessionChangedFiles[sid] || [], incomingFiles),
+                },
+              });
+            } else {
+              set({ subagents: updatedSubagents });
+            }
             saveSubagentsToStorage(updatedSubagents);
             break;
           }
 
-          case 'file:diff':
-            set({ activeDiff: msg.payload, isDocumentViewerOpen: true });
+          case 'file:diff': {
+            const { currentSessionId, sessionChangedFiles } = get();
+            const sid = msg.payload.sessionId || currentSessionId;
+            const changedEntry: SessionChangedFile = {
+              path: msg.payload.path,
+              diff: msg.payload,
+              updatedAt: Date.now(),
+              source: msg.payload.subagentId ? 'subagent' : 'main',
+              subagentId: msg.payload.subagentId,
+              subagentRole: msg.payload.subagentRole,
+            };
+            const nextChangedFiles = {
+              ...sessionChangedFiles,
+              [sid]: upsertChangedFiles(sessionChangedFiles[sid] || [], [changedEntry]),
+            };
+            if (sid === currentSessionId) {
+              set({
+                sessionChangedFiles: nextChangedFiles,
+                activeDiff: msg.payload,
+                isDocumentViewerOpen: true,
+              });
+            } else {
+              set({ sessionChangedFiles: nextChangedFiles });
+            }
             break;
+          }
+
+          case 'wakeup:queued': {
+            const { wakeupLogs } = get();
+            const sid = msg.payload.sessionId;
+            const prevLogs = wakeupLogs[sid] || [];
+            const nextEntry = {
+              id: `wakeup_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+              sessionId: sid,
+              source: msg.payload.source,
+              sourceId: msg.payload.sourceId,
+              summary: msg.payload.summary,
+              timestamp: msg.timestamp || Date.now(),
+            };
+            set({
+              wakeupLogs: {
+                ...wakeupLogs,
+                [sid]: [nextEntry, ...prevLogs].slice(0, 50),
+              },
+            });
+            break;
+          }
+
+          case 'schedule:created': {
+            const { sessionSchedules } = get();
+            const sid = msg.payload.sessionId;
+            const prev = sessionSchedules[sid] || [];
+            const nextItem: ScheduleInfo = {
+              id: msg.payload.scheduleId,
+              sessionId: sid,
+              kind: msg.payload.kind,
+              prompt: msg.payload.prompt,
+              createdAt: msg.timestamp || Date.now(),
+              nextRunAt: msg.payload.nextRunAt,
+              durationSeconds: msg.payload.durationSeconds,
+              cronExpression: msg.payload.cronExpression,
+              iterations: msg.payload.iterations ?? 0,
+              isDaemon: Boolean(msg.payload.isDaemon),
+            };
+            const exists = prev.some((item) => item.id === nextItem.id);
+            const updated = exists
+              ? prev.map((item) => (item.id === nextItem.id ? { ...item, ...nextItem } : item))
+              : [nextItem, ...prev];
+            set({
+              sessionSchedules: {
+                ...sessionSchedules,
+                [sid]: updated,
+              },
+            });
+            break;
+          }
+
+          case 'schedule:triggered': {
+            const { sessionSchedules } = get();
+            const sid = msg.payload.sessionId;
+            const prev = sessionSchedules[sid] || [];
+            const updated = prev.flatMap((item) => {
+              if (item.id !== msg.payload.scheduleId) {
+                return [item];
+              }
+              if (item.kind === 'timer') {
+                return [];
+              }
+              return [{ ...item, iterations: msg.payload.iteration }];
+            });
+            set({
+              sessionSchedules: {
+                ...sessionSchedules,
+                [sid]: updated,
+              },
+            });
+            break;
+          }
+
+          case 'schedule:cancelled': {
+            const { sessionSchedules } = get();
+            const sid = msg.payload.sessionId;
+            const prev = sessionSchedules[sid] || [];
+            set({
+              sessionSchedules: {
+                ...sessionSchedules,
+                [sid]: prev.filter((item) => item.id !== msg.payload.scheduleId),
+              },
+            });
+            break;
+          }
+
+          case 'swarm:updated': {
+            const board = msg.payload;
+            const { swarmBoards } = get();
+            set({
+              swarmBoards: {
+                ...swarmBoards,
+                [board.sessionId]: board,
+              },
+            });
+            break;
+          }
+
+          case 'swarm:message': {
+            const swarmMsg = msg.payload;
+            const { swarmBoards } = get();
+            const existingBoard: SwarmBoardState = swarmBoards[swarmMsg.sessionId] || {
+              sessionId: swarmMsg.sessionId,
+              title: '',
+              members: [],
+              messages: [],
+              updatedAt: swarmMsg.timestamp,
+            };
+            const alreadyHas = existingBoard.messages.some((m) => m.id === swarmMsg.id);
+            const nextMessages = alreadyHas
+              ? existingBoard.messages
+              : [...existingBoard.messages, swarmMsg];
+            set({
+              swarmBoards: {
+                ...swarmBoards,
+                [swarmMsg.sessionId]: {
+                  ...existingBoard,
+                  messages: nextMessages,
+                  updatedAt: swarmMsg.timestamp,
+                },
+              },
+            });
+            break;
+          }
 
           case 'file:diagnostics': {
             const { fileDiagnostics } = get();
@@ -684,13 +915,23 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
           case 'error': {
             console.error('[WS Error]', msg.payload);
             const { sessions, currentSessionId } = get();
-            const targetSessionId = (msg.payload as any).sessionId || currentSessionId;
+            const targetSessionId = msg.payload.sessionId || currentSessionId;
             const currentSession = sessions.find((s) => s.id === targetSessionId);
             const isLimit = isRateLimitError(msg.payload.message, msg.payload.code);
-            const payloadDetails = (msg.payload as any).details;
+            const rawDetails = msg.payload.details;
+            const payloadDetails =
+              rawDetails &&
+              typeof rawDetails === 'object' &&
+              'isRateLimit' in rawDetails &&
+              Boolean((rawDetails as { isRateLimit?: unknown }).isRateLimit)
+                ? (rawDetails as ReturnType<typeof parseClientRateLimit> & {
+                    formattedContent?: string;
+                    formattedMessage?: string;
+                  })
+                : null;
             const callingModel = currentSession?.model || get().selectedModel;
             const parsedRateLimit = isLimit
-              ? (payloadDetails && payloadDetails.isRateLimit
+              ? (payloadDetails
                   ? { ...payloadDetails, formattedContent: msg.payload.message }
                   : parseClientRateLimit(msg.payload.message, callingModel, currentSession?.provider))
               : null;
@@ -701,7 +942,10 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
                   role: 'assistant',
                   content:
                     parsedRateLimit.formattedContent ||
-                    parsedRateLimit.formattedMessage ||
+                    ('formattedMessage' in parsedRateLimit &&
+                    typeof parsedRateLimit.formattedMessage === 'string'
+                      ? parsedRateLimit.formattedMessage
+                      : undefined) ||
                     msg.payload.message,
                   rateLimitInfo: {
                     isRateLimit: true,
@@ -774,43 +1018,50 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
     const updatedFolders = [...folders, newFolder];
     set({ folders: updatedFolders, activeFolderId: newId });
     saveFoldersToStorage(updatedFolders);
-    syncFoldersToDB(updatedFolders);
+    const syncPromise = syncFoldersToDB(updatedFolders, Boolean(newFolder.path));
     get().newSession(newId);
 
     if (newFolder.path) {
-      get().fetchBranches(newFolder.path);
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(
-          JSON.stringify({
-            type: 'workspace:set',
-            payload: { path: newFolder.path, sessionId: get().currentSessionId },
-          }),
-        );
-      }
+      const targetPath = newFolder.path;
+      void syncPromise.then(() => {
+        get().fetchBranches(targetPath);
+        const currentWs = get().ws;
+        if (currentWs && currentWs.readyState === WebSocket.OPEN) {
+          currentWs.send(
+            JSON.stringify({
+              type: 'workspace:set',
+              payload: { path: targetPath, sessionId: get().currentSessionId },
+            }),
+          );
+        }
+      });
     }
     return newId;
   },
 
   updateFolderPath: (folderId, path) => {
-    const { folders, ws, activeFolderId } = get();
+    const { folders, activeFolderId } = get();
     const trimmed = path.trim();
     const updated = folders.map((f) =>
       f.id === folderId ? { ...f, path: trimmed || undefined } : f,
     );
     set({ folders: updated });
     saveFoldersToStorage(updated);
-    syncFoldersToDB(updated);
+    const syncPromise = syncFoldersToDB(updated, Boolean(trimmed));
 
     if (folderId === activeFolderId && trimmed) {
-      get().fetchBranches(trimmed);
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(
-          JSON.stringify({
-            type: 'workspace:set',
-            payload: { path: trimmed },
-          }),
-        );
-      }
+      void syncPromise.then(() => {
+        get().fetchBranches(trimmed);
+        const currentWs = get().ws;
+        if (currentWs && currentWs.readyState === WebSocket.OPEN) {
+          currentWs.send(
+            JSON.stringify({
+              type: 'workspace:set',
+              payload: { path: trimmed },
+            }),
+          );
+        }
+      });
     }
   },
 
@@ -1171,7 +1422,7 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
         if (Array.isArray(data.branches)) {
           updates.branches = data.branches;
         }
-        set(updates as any);
+        set(updates);
         if (!Array.isArray(data.branches)) {
           await get().fetchBranches(root);
         }

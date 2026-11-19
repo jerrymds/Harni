@@ -41,6 +41,7 @@ temp_server_test_workspace/
 .harni/
 .harni-worktrees/
 .harnirules/
+.agent/
 .codebase-memory/
 memory-bank/
 

@@ -34,7 +34,11 @@ export const ApprovalCard: React.FC<ApprovalCardProps> = memo(({
         {isCommand ? (
           <div className="flex items-center space-x-2 text-emerald-700">
             <Terminal className="h-3.5 w-3.5 shrink-0 text-ag-blue" />
-            <span className="font-semibold">{(toolCall.arguments as any).command}</span>
+            <span className="font-semibold">
+              {typeof toolCall.arguments?.command === 'string'
+                ? toolCall.arguments.command
+                : JSON.stringify(toolCall.arguments)}
+            </span>
           </div>
         ) : (
           <pre className="text-[11px] whitespace-pre-wrap text-slate-700">

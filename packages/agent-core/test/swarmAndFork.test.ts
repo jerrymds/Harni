@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { execFile } from 'node:child_process';
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
+import { promisify } from 'node:util';
 import type { ChatMessage } from '@harni/types';
 import {
   AgentCoreEngine,
@@ -8,6 +11,7 @@ import {
   SubagentManager,
   SwarmBoardService,
   SwarmTool,
+  ToolGuardPlugin,
   extractMentions,
 } from '../src/index.js';
 
@@ -373,5 +377,233 @@ describe('Context Fork & SwarmTool', () => {
     expect(board.getMessages('sess_p2p_wake')).toHaveLength(0);
 
     await engine.dispose();
+  });
+
+  it('enforces SwarmTool batch limits, rollback on failure, and ToolGuardPlugin subagent disablement', async () => {
+    const board = new SwarmBoardService();
+    const mgr = new SubagentManager({ workspaceRoot: tempTestDir });
+    const tool = new SwarmTool();
+    const ctx = {
+      workspaceRoot: tempTestDir,
+      sessionId: 'sess_guard_batch',
+      taskId: 'task_root',
+      subagentManager: mgr,
+      swarmBoardService: board,
+    };
+
+    const tooMany = await tool.execute(
+      { action: 'add', name: 'worker', brief: 'Do work', n: 25 },
+      ctx,
+    );
+    expect(tooMany.isError).toBe(true);
+    expect(tooMany.output).toContain('exceeds maximum allowed per batch');
+
+    // Partial failure in spawnSubagents should kill already-spawned workers in the batch
+    const origSpawn = mgr.spawnSubagents.bind(mgr);
+    let killSpyCalledWith: string[] = [];
+    const origManage = mgr.manageSubagents.bind(mgr);
+    mgr.manageSubagents = (action, ids, sid) => {
+      if (action === 'kill' && ids) killSpyCalledWith.push(...ids);
+      return origManage(action, ids, sid);
+    };
+    mgr.spawnSubagents = async (list) => {
+      const first = await origSpawn([
+        {
+          ...list[0],
+          customProvider: new MockProvider({ script: [{ text: 'ok' }] }),
+        },
+      ]);
+      return [
+        first[0],
+        {
+          id: 'failed_1',
+          typeName: list[1].typeName,
+          role: list[1].role,
+          status: 'error',
+          result: 'Simulated spawn failure',
+          error: 'Simulated spawn failure',
+          durationMs: 0,
+          toolCallCount: 0,
+        },
+      ];
+    };
+
+    const partialFail = await tool.execute(
+      { action: 'add', name: 'batch', brief: 'Work', tasks: ['a', 'b'] },
+      ctx,
+    );
+    expect(partialFail.isError).toBe(true);
+    expect(killSpyCalledWith).toHaveLength(1);
+    expect(board.listMembers('sess_guard_batch')).toHaveLength(0);
+
+    // ToolGuardPlugin blocks 'swarm' when subagentsEnabled is false
+    const guard = new ToolGuardPlugin();
+    const filtered = guard.onResolveTools(
+      { sessionId: 's', workspaceRoot: tempTestDir, isSubagent: false, isSubagentsEnabled: () => false } as never,
+      [{ name: 'read_file', description: '', parameters: { type: 'object', properties: {} }, requiresApproval: false }, { name: 'swarm', description: '', parameters: { type: 'object', properties: {} }, requiresApproval: false }],
+    );
+    expect(filtered.map((t) => t.name)).toEqual(['read_file']);
+
+    const denied = await guard.onToolCall(
+      { sessionId: 's', workspaceRoot: tempTestDir, isSubagent: false, isSubagentsEnabled: () => false } as never,
+      { toolCall: { id: 'c1', name: 'swarm', arguments: {} }, canonicalToolName: 'swarm', requiresApproval: false, isMcpTool: false, metadata: {} },
+      async () => ({ toolCallId: 'c1', output: 'ok' }),
+    );
+    expect(denied.isError).toBe(true);
+    expect(denied.output).toContain('disabled in settings');
+
+    mgr.clearSessionSubagents('sess_guard_batch');
+    board.dispose();
+  });
+
+  it('preserves swarm worker worktree across @mention wakeup and cleans up worktree on kill', async () => {
+    const execFileAsync = promisify(execFile);
+    const repoDir = path.join(os.tmpdir(), `harni_swarm_wt_${Date.now()}`);
+    await fs.mkdir(repoDir, { recursive: true });
+    await execFileAsync('git', ['init'], { cwd: repoDir });
+    await execFileAsync('git', ['config', 'user.email', 'harni-test@example.com'], { cwd: repoDir });
+    await execFileAsync('git', ['config', 'user.name', 'Harni Test'], { cwd: repoDir });
+    await fs.writeFile(path.join(repoDir, 'base.txt'), 'base content', 'utf-8');
+    await execFileAsync('git', ['add', 'base.txt'], { cwd: repoDir });
+    await execFileAsync('git', ['commit', '-m', 'Initial commit'], { cwd: repoDir });
+
+    const coordProvider = new MockProvider({
+      script: [
+        { text: 'Coordinator initialized.' },
+        { text: 'Noted worker round 1.' },
+        { text: 'Noted worker round 2.' },
+      ],
+    });
+
+    const engine = new AgentCoreEngine({
+      workspaceRoot: repoDir,
+      autoTestEnabled: false,
+      gitCheckpointEnabled: false,
+      experienceLearningEnabled: false,
+      subagentsEnabled: true,
+      customProvider: coordProvider,
+    });
+
+    try {
+      await engine.startTask('Start worktree swarm test', {
+        sessionId: 'sess_wt_swarm',
+        customProvider: coordProvider,
+      });
+
+      const subMgr = (engine as unknown as { subagentManager: SubagentManager }).subagentManager;
+      const board = engine.getSwarmBoardService();
+
+      const workerProvider = new MockProvider({
+        script: [
+          {
+            text: 'Writing round 1 file.',
+            toolCalls: [
+              {
+                id: 'wt_call_1',
+                name: 'write_file',
+                arguments: { path: 'round1.txt', content: 'from round 1' },
+              },
+            ],
+          },
+          { text: 'Round 1 complete.' },
+          {
+            text: 'Writing round 2 file.',
+            toolCalls: [
+              {
+                id: 'wt_call_2',
+                name: 'write_file',
+                arguments: { path: 'round2.txt', content: 'from round 2' },
+              },
+            ],
+          },
+          { text: 'Round 2 complete.' },
+        ],
+      });
+
+      const [workerRes] = await subMgr.spawnSubagents([
+        {
+          typeName: 'self',
+          role: 'worker-wt',
+          alias: 'worker-wt',
+          prompt: 'Write round1.txt',
+          sessionId: 'sess_wt_swarm',
+          parentId: 'root',
+          workspaceRoot: repoDir,
+          isolation: 'worktree',
+          autoMergeWorktree: false,
+          autoApprove: true,
+          background: true,
+          swarmEnabled: true,
+          swarmBoardService: board,
+          customProvider: workerProvider,
+        },
+      ]);
+
+      board.registerMember('sess_wt_swarm', {
+        name: 'worker-wt',
+        subagentId: workerRes.id,
+        role: 'worker-wt',
+        typeName: 'self',
+        status: workerRes.status,
+        addedBy: 'coordinator',
+        workspaceIsolation: 'worktree',
+      });
+
+      await subMgr.waitForSubagents([workerRes.id], 'sess_wt_swarm');
+      const infoAfterRound1 = subMgr.getInstance(workerRes.id)?.getInfo();
+      const wtPath = infoAfterRound1?.worktreePath;
+      expect(wtPath).toBeTruthy();
+      expect(engine.getActiveWorktreePaths()).toContain(path.resolve(wtPath!));
+      expect(await fs.readFile(path.join(wtPath!, 'round1.txt'), 'utf-8')).toBe('from round 1');
+
+      // Wake up worker via @mention for round 2 — worktree must be reused, not recreated
+      board.postMessage({
+        sessionId: 'sess_wt_swarm',
+        sender: 'coordinator',
+        content: '@worker-wt Please write round2.txt now.',
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        const deadline = Date.now() + 5000;
+        const check = async () => {
+          const existsRound2 = await fs
+            .access(path.join(wtPath!, 'round2.txt'))
+            .then(() => true)
+            .catch(() => false);
+          const status = subMgr.getInstance(workerRes.id)?.getStatus();
+          if (existsRound2 && status === 'completed') {
+            resolve();
+          } else if (Date.now() > deadline) {
+            reject(new Error('Timed out waiting for worker-wt round 2 in existing worktree'));
+          } else {
+            setTimeout(check, 25);
+          }
+        };
+        setTimeout(check, 25);
+      });
+
+      // Round 1 file must still exist inside the reused worktree
+      expect(await fs.readFile(path.join(wtPath!, 'round1.txt'), 'utf-8')).toBe('from round 1');
+      expect(await fs.readFile(path.join(wtPath!, 'round2.txt'), 'utf-8')).toBe('from round 2');
+
+      // Cross-session kill must be ignored
+      const wrongSessionKill = subMgr.manageSubagents('kill', [workerRes.id], 'other_session');
+      expect(wrongSessionKill).toHaveLength(0);
+      expect(engine.getActiveWorktreePaths()).toContain(path.resolve(wtPath!));
+
+      // Owning session kill must terminate and immediately remove active worktree path
+      const ownKill = subMgr.manageSubagents('kill', [workerRes.id], 'sess_wt_swarm');
+      expect(ownKill).toHaveLength(1);
+      expect(engine.getActiveWorktreePaths()).not.toContain(path.resolve(wtPath!));
+    } finally {
+      await engine.dispose();
+      await new Promise((r) => setTimeout(r, 150));
+      try {
+        await execFileAsync('git', ['worktree', 'prune'], { cwd: repoDir });
+      } catch {
+        // ignore
+      }
+      await fs.rm(repoDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
   });
 });

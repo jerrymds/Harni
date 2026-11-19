@@ -36,6 +36,10 @@ export class GitWorkspacePlugin implements WorkflowPlugin {
     ctx: WorkflowPluginContext,
     options: Record<string, unknown>,
   ): Promise<void> {
+    if (ctx.taskState?.mode === 'ask') {
+      return;
+    }
+
     const mainWorkspaceRoot = ctx.getMainWorkspaceRoot();
     const state = ctx.getPluginState<GitWorkspacePluginState>(this.id, () => ({}));
 

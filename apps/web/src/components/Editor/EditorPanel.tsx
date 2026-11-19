@@ -14,6 +14,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAgentStore, useShallow } from '../../store/useAgentStore.js';
+import { safeUrlTransform } from '../../utils/url.js';
 
 export const EditorPanel: React.FC = () => {
   const {
@@ -296,7 +297,7 @@ export const EditorPanel: React.FC = () => {
             >
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
-                urlTransform={(url) => (/^javascript:/i.test(url.trim()) ? '' : url)}
+                urlTransform={safeUrlTransform}
                 components={{
                   h1: ({ children }) => (
                     <h1 className="text-2xl font-bold text-ag-textPrimary border-b border-ag-border pb-2 mb-4 mt-6 first:mt-0 select-text">
@@ -363,7 +364,7 @@ export const EditorPanel: React.FC = () => {
                       {children}
                     </td>
                   ),
-                  code: ({ className, children, ...props }: any) => {
+                  code: ({ className, children, ...props }) => {
                     const match = /language-(\w+)/.exec(className || '');
                     const isInline = !match && !String(children).includes('\n');
                     if (isInline) {
@@ -390,7 +391,7 @@ export const EditorPanel: React.FC = () => {
                       </div>
                     );
                   },
-                  a: ({ href, children }: any) => (
+                  a: ({ href, children }) => (
                     <a
                       href={href}
                       target="_blank"
@@ -410,7 +411,7 @@ export const EditorPanel: React.FC = () => {
               height="100%"
               language={getLanguage(activeFile.path)}
               value={currentContent}
-              onChange={(val) => setCurrentContent(val || '')}
+              onChange={(val: string | undefined) => setCurrentContent(val || '')}
               theme={isDark ? 'vs-dark' : 'vs'}
               options={{
                 minimap: { enabled: false },

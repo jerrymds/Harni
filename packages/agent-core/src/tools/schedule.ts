@@ -101,12 +101,16 @@ export class ScheduleTool extends BaseTool<ScheduleToolParams> {
           output: "Missing required parameter 'scheduleId' for action 'cancel'.",
         };
       }
-      const cancelled = scheduler.cancelSchedule(params.scheduleId, 'Cancelled via schedule tool');
+      const cancelled = scheduler.cancelSchedule(
+        params.scheduleId,
+        'Cancelled via schedule tool',
+        sessionId,
+      );
       if (!cancelled) {
         return {
           toolCallId: '',
           isError: true,
-          output: `Schedule '${params.scheduleId}' not found.`,
+          output: `Schedule '${params.scheduleId}' not found for this session.`,
         };
       }
       return {

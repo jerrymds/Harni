@@ -165,7 +165,9 @@ export class AnthropicAuthPage {
    */
   public static async ensureSession(db: DBService): Promise<{ accessToken: string } | null> {
     const payload = db.getOAuthPayload('anthropic');
-    const accessToken: string | undefined = payload?.accessToken || payload?.access_token;
+    const accessToken: string | undefined =
+      payload?.accessToken ||
+      (typeof payload?.access_token === 'string' ? payload.access_token : undefined);
     if (!payload || !accessToken) return null;
 
     const expiresAt: number | undefined = payload.expiresAt;

@@ -34,10 +34,12 @@ export interface PostSwarmMessageParams {
   content: string;
 }
 
+export const MAX_SWARM_BOARD_MESSAGES = 500;
+
 export function extractMentions(content: string): string[] {
   const mentions: string[] = [];
   const seen = new Set<string>();
-  const regex = /(?:^|[\s(,;\[])@([a-zA-Z0-9_-]+)/g;
+  const regex = /(?:^|[\s(,;[])@([a-zA-Z0-9_-]+)/g;
   let match: RegExpExecArray | null;
   while ((match = regex.exec(content)) !== null) {
     const tag = match[1];
@@ -121,6 +123,10 @@ export class SwarmBoardService extends EventEmitter {
       createdAt: now,
       updatedAt: now,
     };
+    const previous = board.members.get(params.name);
+    if (previous && previous.subagentId !== params.subagentId) {
+      board.subagentToMember.delete(previous.subagentId);
+    }
     board.members.set(params.name, info);
     board.subagentToMember.set(params.subagentId, params.name);
     board.updatedAt = now;
@@ -208,6 +214,9 @@ export class SwarmBoardService extends EventEmitter {
     };
 
     board.messages.push(message);
+    if (board.messages.length > MAX_SWARM_BOARD_MESSAGES) {
+      board.messages.splice(0, board.messages.length - MAX_SWARM_BOARD_MESSAGES);
+    }
     board.updatedAt = now;
 
     this.emit('swarm:message', { ...message, mentions: [...message.mentions] });

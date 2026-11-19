@@ -1,3 +1,4 @@
+import type * as http from 'node:http';
 import type { LLMProviderType } from '@harni/types';
 import type { Router } from './router.js';
 import { sendJsonResponse } from '../utils/http.js';
@@ -65,7 +66,7 @@ export function registerModelRoutes(router: Router): void {
     }
   });
 
-  const handleQuotaRequest = async ({ res, url }: { res: any; url: URL }) => {
+  const handleQuotaRequest = async ({ res, url }: { res: http.ServerResponse; url: URL }) => {
     try {
       const provider = (url.searchParams.get('provider') || 'antigravity') as LLMProviderType;
       const forceRefresh =

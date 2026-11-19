@@ -1,9 +1,45 @@
+import type * as http from 'node:http';
 import type { Router } from './router.js';
+import type { RequestContext } from '../types/server.js';
 import { readJsonBody, readRequestBody, sendJsonError, sendJsonResponse } from '../utils/http.js';
-import { putPkce, takePkce } from '../utils/security.js';
+import {
+  generateOAuthState,
+  putOAuthState,
+  putPkce,
+  takeOAuthState,
+  takePkce,
+} from '../utils/security.js';
 import { GoogleAuthPage, escapeHtml } from '../services/googleAuthPage.js';
 import { AnthropicAuthPage } from '../services/anthropicAuthPage.js';
 import { OpenAIAuthPage } from '../services/openaiAuthPage.js';
+
+const LOCAL_HOST_PATTERN = /^(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/i;
+
+function resolveSafeGoogleRedirectUri(req: http.IncomingMessage): string {
+  if (process.env.GOOGLE_OAUTH_REDIRECT_URI?.trim()) {
+    return process.env.GOOGLE_OAUTH_REDIRECT_URI.trim();
+  }
+  const hostHeader = typeof req.headers.host === 'string' ? req.headers.host.trim() : '';
+  if (hostHeader && LOCAL_HOST_PATTERN.test(hostHeader)) {
+    return `http://${hostHeader}/auth/google/callback`;
+  }
+  const extra = [process.env.HARNI_ALLOWED_ORIGINS, process.env.GOOGLE_OAUTH_ALLOWED_ORIGINS]
+    .filter(Boolean)
+    .join(',');
+  if (hostHeader && extra) {
+    for (const origin of extra.split(',').map((s) => s.trim()).filter(Boolean)) {
+      try {
+        const parsed = new URL(origin);
+        if (parsed.host.toLowerCase() === hostHeader.toLowerCase()) {
+          return `${parsed.protocol}//${parsed.host}/auth/google/callback`;
+        }
+      } catch {
+        // Ignore malformed configured origin
+      }
+    }
+  }
+  return 'http://localhost:3001/auth/google/callback';
+}
 
 export function registerAuthRoutes(router: Router): void {
   // --- Google OAuth Config Endpoint ---
@@ -23,19 +59,22 @@ export function registerAuthRoutes(router: Router): void {
   });
 
   // --- Official Google OAuth2 Login & Account Chooser Redirection ---
-  const handleGoogleLogin = ({ req, res, url, ctx }: any) => {
+  const handleGoogleLogin = ({ req, res, url, ctx }: RequestContext) => {
     const customClientId = ctx.dbService.getSetting('google_client_id') || undefined;
     const customClientSecret = ctx.dbService.getApiKey('google_client_secret') || undefined;
-    const redirectUri = `http://${req.headers.host || 'localhost:3001'}/auth/google/callback`;
+    const redirectUri = resolveSafeGoogleRedirectUri(req);
+    const state = generateOAuthState();
+    putOAuthState(state);
     const googleAuthUrl = GoogleAuthPage.buildGoogleOAuthUrl({
       clientId: customClientId,
       clientSecret: customClientSecret,
       redirectUri,
+      state,
     });
 
     // If requested as raw URL or redirect helper
     if (url.searchParams.get('format') === 'json') {
-      sendJsonResponse(res, 200, { url: googleAuthUrl });
+      sendJsonResponse(res, 200, { url: googleAuthUrl, state });
       return;
     }
 
@@ -47,26 +86,35 @@ export function registerAuthRoutes(router: Router): void {
   router.get('/auth/google/login', handleGoogleLogin);
   router.get('/api/auth/google/login', handleGoogleLogin);
 
-  const handleGoogleCallback = async ({ req, res, url, ctx }: any) => {
+  const handleGoogleCallback = async ({ req, res, url, ctx }: RequestContext) => {
     try {
-      let email = 'user@example.com';
+      let email = '';
       let name = 'Google Antigravity User';
       let picture = 'https://lh3.googleusercontent.com/a/default-user';
       let accessToken: string | undefined;
       let refreshToken: string | undefined;
 
       let code: string | null = null;
+      let state: string | null = null;
       if (req.method === 'GET') {
         code = url.searchParams.get('code');
-        const queryEmail = url.searchParams.get('email');
-        const queryName = url.searchParams.get('name');
-        if (queryEmail) email = queryEmail.trim();
-        if (queryName) name = queryName.trim();
+        state = url.searchParams.get('state');
       } else if (req.method === 'POST') {
         const body = await readRequestBody(req, ctx.readBodyOpts);
         code = body.code || null;
+        state = body.state || null;
         if (body.email) email = body.email.trim();
         if (body.name) name = body.name.trim();
+      }
+
+      if (!takeOAuthState(state)) {
+        sendJsonResponse(
+          res,
+          400,
+          `<h3>Google 官方認證發生錯誤: ${escapeHtml('OAuth state 驗證失敗或已逾時，請重新登入。')}</h3>`,
+          'text/html; charset=utf-8',
+        );
+        return;
       }
 
       const clientId =
@@ -76,10 +124,19 @@ export function registerAuthRoutes(router: Router): void {
       const clientSecret =
         ctx.dbService.getApiKey('google_client_secret') ||
         process.env.GOOGLE_CLIENT_SECRET;
-      const redirectUri = `http://${req.headers.host || 'localhost:3001'}/auth/google/callback`;
+      const redirectUri = resolveSafeGoogleRedirectUri(req);
 
-      // If authorization code was returned from accounts.google.com, attempt token exchange
-      if (code && clientSecret) {
+      // If authorization code was returned from accounts.google.com, require clientSecret for token exchange
+      if (code) {
+        if (!clientSecret) {
+          sendJsonResponse(
+            res,
+            400,
+            `<h3>Google 官方認證發生錯誤: ${escapeHtml('Google OAuth 缺少 clientSecret 設定，無法完成授權碼交換。')}</h3>`,
+            'text/html; charset=utf-8',
+          );
+          return;
+        }
         try {
           const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
             method: 'POST',
@@ -92,25 +149,75 @@ export function registerAuthRoutes(router: Router): void {
               grant_type: 'authorization_code',
             }),
           });
-          if (tokenRes.ok) {
-            const tokenData = (await tokenRes.json()) as any;
-            accessToken = tokenData.access_token;
-            refreshToken = tokenData.refresh_token;
+          if (!tokenRes.ok) {
+            sendJsonResponse(
+              res,
+              400,
+              `<h3>Google 官方認證發生錯誤: ${escapeHtml('Google OAuth Token 交換失敗，請重新登入。')}</h3>`,
+              'text/html; charset=utf-8',
+            );
+            return;
+          }
 
-            // Fetch Google user profile
-            const userRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
-              headers: { Authorization: `Bearer ${accessToken}` },
-            });
-            if (userRes.ok) {
-              const userData = (await userRes.json()) as any;
-              if (userData.email) email = userData.email;
-              if (userData.name) name = userData.name;
-              if (userData.picture) picture = userData.picture;
-            }
+          const tokenData = (await tokenRes.json()) as {
+            access_token?: string;
+            refresh_token?: string;
+          };
+          accessToken = tokenData.access_token;
+          refreshToken = tokenData.refresh_token;
+
+          if (!accessToken) {
+            sendJsonResponse(
+              res,
+              400,
+              `<h3>Google 官方認證發生錯誤: ${escapeHtml('Google OAuth 未回傳有效的 access_token。')}</h3>`,
+              'text/html; charset=utf-8',
+            );
+            return;
+          }
+
+          // Fetch Google user profile
+          const userRes = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+            headers: { Authorization: `Bearer ${accessToken}` },
+          });
+          if (userRes.ok) {
+            const userData = (await userRes.json()) as {
+              email?: string;
+              name?: string;
+              picture?: string;
+            };
+            if (userData.email) email = userData.email;
+            if (userData.name) name = userData.name;
+            if (userData.picture) picture = userData.picture;
           }
         } catch (tokenErr) {
           console.warn('[Server] Google OAuth token exchange warning:', tokenErr);
+          sendJsonResponse(
+            res,
+            502,
+            `<h3>Google 官方認證發生錯誤: ${escapeHtml('無法連線至 Google OAuth 服務，請稍後再試。')}</h3>`,
+            'text/html; charset=utf-8',
+          );
+          return;
         }
+      } else if (!email) {
+        sendJsonResponse(
+          res,
+          400,
+          `<h3>Google 官方認證發生錯誤: ${escapeHtml('缺少 Google 授權碼 (code) 或帳號資訊，請重新登入。')}</h3>`,
+          'text/html; charset=utf-8',
+        );
+        return;
+      }
+
+      if (!email) {
+        sendJsonResponse(
+          res,
+          400,
+          `<h3>Google 官方認證發生錯誤: ${escapeHtml('無法取得 Google 帳號 Email，請確認授權範圍後重新登入。')}</h3>`,
+          'text/html; charset=utf-8',
+        );
+        return;
       }
 
       const authPayload = {
@@ -129,7 +236,11 @@ export function registerAuthRoutes(router: Router): void {
       const callbackHtml = GoogleAuthPage.renderCallbackPage(authPayload);
       sendJsonResponse(res, 200, callbackHtml, 'text/html; charset=utf-8');
     } catch (err: unknown) {
-      const statusCode = typeof (err as any)?.statusCode === 'number' ? (err as any).statusCode : 500;
+      const maybeStatus =
+        typeof err === 'object' && err !== null && 'statusCode' in err
+          ? (err as { statusCode?: unknown }).statusCode
+          : undefined;
+      const statusCode = typeof maybeStatus === 'number' ? maybeStatus : 500;
       const errorMsg = err instanceof Error ? err.message : String(err);
       if (!res.headersSent && !res.writableEnded) {
         sendJsonResponse(res, statusCode, `<h3>Google 官方認證發生錯誤: ${escapeHtml(errorMsg)}</h3>`, 'text/html; charset=utf-8');
@@ -148,21 +259,31 @@ export function registerAuthRoutes(router: Router): void {
       const customClientId = ctx.dbService.getSetting('google_client_id') || undefined;
       const customClientSecret = ctx.dbService.getApiKey('google_client_secret') || undefined;
       if (encryptedKey && encryptedKey.trim()) {
-        let authInfo: any = {
+        let authInfo: Record<string, unknown> = {
           authenticated: true,
           email: 'user@gmail.com',
           name: 'Google User',
           authenticatedAt: Date.now(),
         };
         try {
-          const parsed = JSON.parse(encryptedKey);
-          authInfo = { ...authInfo, ...parsed, authenticated: true };
+          const parsed = JSON.parse(encryptedKey) as Record<string, unknown>;
+          const {
+            accessToken: _accessToken,
+            refreshToken: _refreshToken,
+            clientSecret: _clientSecret,
+            ...safeParsed
+          } = parsed;
+          authInfo = { ...authInfo, ...safeParsed, authenticated: true };
         } catch {}
         if (customClientId) authInfo.clientId = customClientId;
-        if (customClientSecret) authInfo.clientSecret = customClientSecret;
+        authInfo.hasClientSecret = Boolean(customClientSecret);
         sendJsonResponse(res, 200, authInfo);
       } else {
-        sendJsonResponse(res, 200, { authenticated: false, clientId: customClientId, clientSecret: customClientSecret });
+        sendJsonResponse(res, 200, {
+          authenticated: false,
+          clientId: customClientId,
+          hasClientSecret: Boolean(customClientSecret),
+        });
       }
     } catch (err: unknown) {
       sendJsonError(res, err, 500, { authenticated: false });
@@ -176,7 +297,13 @@ export function registerAuthRoutes(router: Router): void {
         name?: string;
         picture?: string;
         code?: string;
+        state?: string;
       }>(req, ctx.readBodyOpts);
+
+      if (!takeOAuthState(body?.state)) {
+        sendJsonResponse(res, 400, { error: 'OAuth state 驗證失敗或已逾時，請重新登入。' });
+        return;
+      }
 
       const authPayload = {
 
@@ -213,7 +340,7 @@ export function registerAuthRoutes(router: Router): void {
   });
 
   // --- Claude (Pro/Max subscription) OAuth — Claude Code compatible, paste-code flow ---
-  const handleAnthropicLogin = ({ res, url }: any) => {
+  const handleAnthropicLogin = ({ res, url }: RequestContext) => {
     const { verifier, challenge } = AnthropicAuthPage.generatePkce();
     const state = AnthropicAuthPage.generateState();
     putPkce(state, verifier);

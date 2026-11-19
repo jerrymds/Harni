@@ -8,12 +8,13 @@ import {
   type WorkflowPluginCategory,
   type WorkflowPluginContext,
 } from '@harni/types';
+import { resolveCanonicalToolName } from '../tools/toolAdapter.js';
 
 export class ToolGuardPlugin implements WorkflowPlugin {
   public readonly id = 'harni.tool-guard';
   public readonly name = 'Tool Guard & Permission Plugin';
   public readonly description =
-    'Enforces tool approval gates, read-only MCP permission checks, and tool output truncation.';
+    'Enforces tool approval gates, ask-mode read-only guardrails, read-only MCP permission checks, and tool output truncation.';
   public readonly priority = PluginPriority.GUARD;
   public readonly category: WorkflowPluginCategory = 'guard';
   public readonly isBuiltin = true;
@@ -25,16 +26,54 @@ export class ToolGuardPlugin implements WorkflowPlugin {
     'send_message',
     'manage_subagents',
     'define_subagent',
+    'swarm',
   ]);
+
+  private askModeBlockedTools = new Set([
+    'write_file',
+    'edit_file',
+    'run_command',
+    'schedule',
+    'define_subagent',
+    'swarm',
+  ]);
+
+  private defaultReadOnlySubagents = new Set(['researcher', 'architect']);
+
+  private isAskMode(ctx: WorkflowPluginContext): boolean {
+    return !ctx.isSubagent && ctx.taskState?.mode === 'ask';
+  }
+
+  private isReadOnlySubagent(ctx: WorkflowPluginContext, typeName: string): boolean {
+    if (ctx.isReadOnlySubagentType) {
+      return ctx.isReadOnlySubagentType(typeName);
+    }
+    return this.defaultReadOnlySubagents.has(typeName.trim().toLowerCase());
+  }
 
   public onResolveTools(
     ctx: WorkflowPluginContext,
     tools: ToolDefinition[],
   ): ToolDefinition[] {
+    let resolved = tools;
     if (!ctx.isSubagent && ctx.isSubagentsEnabled?.() === false) {
-      return tools.filter((t) => !this.subagentToolNames.has(t.name));
+      resolved = resolved.filter((t) => !this.subagentToolNames.has(t.name));
     }
-    return tools;
+
+    if (this.isAskMode(ctx)) {
+      resolved = resolved.filter((t) => {
+        const canonical = resolveCanonicalToolName(t.name);
+        if (this.askModeBlockedTools.has(canonical)) {
+          return false;
+        }
+        if (ctx.isMcpToolAllowedReadOnly && ctx.isMcpToolAllowedReadOnly(t.name) === false) {
+          return false;
+        }
+        return true;
+      });
+    }
+
+    return resolved;
   }
 
   public async onToolCall(
@@ -42,6 +81,57 @@ export class ToolGuardPlugin implements WorkflowPlugin {
     toolCtx: ToolCallMiddlewareContext,
     next: ToolCallNext,
   ): Promise<ToolResult> {
+    // 0. Ask-mode hard read-only guardrails
+    if (this.isAskMode(ctx)) {
+      if (this.askModeBlockedTools.has(toolCtx.canonicalToolName)) {
+        return {
+          toolCallId: toolCtx.toolCall.id,
+          isError: true,
+          output: `Tool '${toolCtx.toolCall.name}' is disabled in 'ask' mode (read-only). Switch to 'code' mode to modify files or run commands.`,
+          summary: `Blocked in ask mode: ${toolCtx.toolCall.name}`,
+        };
+      }
+
+      if (toolCtx.isMcpTool && toolCtx.mcpToolAllowedReadOnly === false) {
+        return {
+          toolCallId: toolCtx.toolCall.id,
+          isError: true,
+          output: `MCP tool '${toolCtx.toolCall.name}' is not permitted in 'ask' mode (read-only).`,
+          summary: `Permission denied in ask mode: ${toolCtx.toolCall.name}`,
+        };
+      }
+
+      if (toolCtx.canonicalToolName === 'invoke_subagent') {
+        const subagents = (
+          toolCtx.toolCall.arguments as
+            | { subagents?: Array<{ typeName?: string; isolation?: string }> }
+            | undefined
+        )?.subagents;
+
+        if (Array.isArray(subagents)) {
+          for (const sub of subagents) {
+            if (sub?.isolation === 'worktree') {
+              return {
+                toolCallId: toolCtx.toolCall.id,
+                isError: true,
+                output: `Worktree isolation is not permitted in 'ask' mode (read-only). Switch to 'code' mode to isolate or edit files.`,
+                summary: 'Blocked worktree subagent in ask mode',
+              };
+            }
+            const typeName = typeof sub?.typeName === 'string' ? sub.typeName.trim() : '';
+            if (!typeName || !this.isReadOnlySubagent(ctx, typeName)) {
+              return {
+                toolCallId: toolCtx.toolCall.id,
+                isError: true,
+                output: `Subagent type '${typeName || 'unknown'}' is not permitted in 'ask' mode (read-only). Only read-only subagents (e.g. 'researcher', 'architect') are allowed.`,
+                summary: `Blocked subagent '${typeName || 'unknown'}' in ask mode`,
+              };
+            }
+          }
+        }
+      }
+    }
+
     // 1. Read-only subagent attempting destructive / non-allowed MCP tool
     if (
       ctx.isSubagent &&

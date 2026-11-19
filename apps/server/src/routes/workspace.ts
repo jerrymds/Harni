@@ -1,20 +1,24 @@
 import * as path from 'node:path';
 import type { Router } from './router.js';
-import { sendJsonResponse } from '../utils/http.js';
+import { sendJsonError, sendJsonResponse } from '../utils/http.js';
+import {
+  recordApprovedWorkspaceRoot,
+  resolveContextWorkspaceRoot,
+} from '../utils/workspaceSecurity.js';
 
 export function registerWorkspaceRoutes(router: Router): void {
   router.get('/api/workspace', async ({ res, url, ctx }) => {
     try {
       const queryWorkspaceRoot = url.searchParams.get('workspaceRoot') || undefined;
-      const info = await ctx.fsService.getWorkspaceInfo(queryWorkspaceRoot);
+      const authorizedRoot = resolveContextWorkspaceRoot(ctx, queryWorkspaceRoot);
+      const info = await ctx.fsService.getWorkspaceInfo(authorizedRoot);
       sendJsonResponse(res, 200, info);
     } catch (err: unknown) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      sendJsonResponse(res, 500, { error: errorMsg });
+      sendJsonError(res, err);
     }
   });
 
-  router.get('/api/workspace/browse-directory', async ({ res }) => {
+  router.get('/api/workspace/browse-directory', async ({ res, ctx }) => {
     try {
       const { exec } = await import('node:child_process');
       const isWin = process.platform === 'win32';
@@ -25,6 +29,7 @@ export function registerWorkspaceRoutes(router: Router): void {
         exec(psCommand, { timeout: 60000 }, (_error, stdout) => {
           const selectedPath = (stdout || '').trim().split('\r\n')[0] || '';
           if (selectedPath) {
+            recordApprovedWorkspaceRoot(ctx.approvedWorkspaceRoots, selectedPath);
             const name = path.basename(selectedPath) || selectedPath;
             sendJsonResponse(res, 200, { path: selectedPath, name });
           } else {
@@ -37,6 +42,7 @@ export function registerWorkspaceRoutes(router: Router): void {
         exec(macCommand, { timeout: 60000 }, (_error, stdout) => {
           const selectedPath = (stdout || '').trim();
           if (selectedPath) {
+            recordApprovedWorkspaceRoot(ctx.approvedWorkspaceRoots, selectedPath);
             const name = path.basename(selectedPath) || selectedPath;
             sendJsonResponse(res, 200, { path: selectedPath, name });
           } else {
@@ -49,6 +55,7 @@ export function registerWorkspaceRoutes(router: Router): void {
         exec(`zenity --file-selection --directory --title="請選擇專案工作目錄"`, { timeout: 60000 }, (_error, stdout) => {
           const selectedPath = (stdout || '').trim();
           if (selectedPath) {
+            recordApprovedWorkspaceRoot(ctx.approvedWorkspaceRoots, selectedPath);
             const name = path.basename(selectedPath) || selectedPath;
             sendJsonResponse(res, 200, { path: selectedPath, name });
           } else {

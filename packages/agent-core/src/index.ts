@@ -42,6 +42,7 @@ export * from './diagnostics/syntaxLinterService.js';
 export * from './git/gitCheckpointService.js';
 export * from './utils/rateLimit.js';
 export * from './utils/agyBinaryResolver.js';
+export * from './utils/pathSecurity.js';
 export * from './harness/index.js';
 export * from './plugins/index.js';
 export * from '@harni/types';

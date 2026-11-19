@@ -154,8 +154,11 @@ export class OpenAIAuthPage {
       const tokens = await res.json().catch(() => ({})) as TokenResponse;
       if (!res.ok || !tokens.access_token) throw new Error(tokens.error_description || 'OpenAI 登入已過期，請重新登入。');
       this.storeTokens(db, tokens, payload);
-      const updated = db.getOAuthPayload('openai')!;
-      return { accessToken: updated.accessToken, accountId: updated.accountId };
+      const updated = db.getOAuthPayload('openai');
+      return {
+        accessToken: updated?.accessToken || tokens.access_token,
+        accountId: updated?.accountId,
+      };
     }
     return { accessToken: payload.accessToken, accountId: payload.accountId };
   }

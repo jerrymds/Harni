@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { AntigravityProvider, composeAntigravityModel } from '../src/providers/antigravityProvider.js';
+import { AgentCoreEngine, MockProvider } from '../src/index.js';
 
 /**
  * 建立一個「永遠不回應」的 SSE stream，模擬 Bridge 卡住的情況。
@@ -650,5 +654,182 @@ describe('AntigravityProvider Mode B: Interactive Permission Approval', () => {
       expect(calls[0].name).toBe('run_command');
       expect(calls[0].arguments.command).toBe('npm run build');
     });
+  });
+});
+
+describe('AntigravityProvider.extractIncompleteAcpTools', () => {
+  it('正確追蹤 in_progress、completed、failed、cancelled、auto_resumed 與 generic tool fallback pop', () => {
+    expect(AntigravityProvider.extractIncompleteAcpTools(undefined)).toEqual([]);
+    expect(AntigravityProvider.extractIncompleteAcpTools('')).toEqual([]);
+
+    // in_progress 未結束會保留
+    const inProgressOnly =
+      '[ACP Tool in_progress: dotnet build]\n[ACP Tool running: npm test]\n';
+    expect(AntigravityProvider.extractIncompleteAcpTools(inProgressOnly)).toEqual([
+      'dotnet build',
+      'npm test',
+    ]);
+
+    // completed / failed / cancelled 會清除對應工具
+    const resolved =
+      '[ACP Tool in_progress: dotnet build]\n' +
+      '[ACP Tool pending: lint]\n' +
+      '[ACP Tool running: unit test]\n' +
+      '[ACP Tool completed: dotnet build]\n' +
+      '[ACP Tool failed: lint]\n' +
+      '[ACP Tool cancelled: unit test]\n';
+    expect(AntigravityProvider.extractIncompleteAcpTools(resolved)).toEqual([]);
+
+    // auto_resumed 支援逗號分隔清除多個工具
+    const autoResumed =
+      '[ACP Tool in_progress: build_a]\n' +
+      '[ACP Tool in_progress: build_b]\n' +
+      '[ACP Tool in_progress: build_c]\n' +
+      '[ACP Tool auto_resumed: build_a, build_b]\n';
+    expect(AntigravityProvider.extractIncompleteAcpTools(autoResumed)).toEqual(['build_c']);
+
+    // 若無精確標題匹配（如 generic tool），則 pop 最後一個 active tool
+    const fallbackPop =
+      '[ACP Tool in_progress: dotnet build]\n' +
+      '[ACP Tool completed: tool]\n';
+    expect(AntigravityProvider.extractIncompleteAcpTools(fallbackPop)).toEqual([]);
+
+    // File 相對路徑與絕對路徑可透過路徑後綴匹配清除，不影響併行執行中的 dotnet build
+    const pathSuffixResolved =
+      '[ACP Tool in_progress: dotnet build]\n' +
+      '[ACP Tool in_progress: File TibAgentApi/Controllers/StoreController.cs]\n' +
+      '[ACP Tool completed: File /D:/Work/Project/Tibtrade/OMMS/TibAgentApi/Controllers/StoreController.cs]\n';
+    expect(AntigravityProvider.extractIncompleteAcpTools(pathSuffixResolved)).toEqual([
+      'dotnet build',
+    ]);
+
+    // 未識別的具名完成事件不會誤 pop 執行中的工具
+    const unrelatedCompletion =
+      '[ACP Tool in_progress: dotnet build]\n' +
+      '[ACP Tool completed: unrelated_tool]\n';
+    expect(AntigravityProvider.extractIncompleteAcpTools(unrelatedCompletion)).toEqual([
+      'dotnet build',
+    ]);
+  });
+});
+
+describe('AntigravityProvider ACP_SYNC_EXECUTION_RULE injection', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('ACP 模式注入 [ACP_SYNC_EXECUTION_RULE] 且不重複注入；Direct 模式不注入', async () => {
+    const capturedPrompts: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(async (_url: string, options: any) => {
+        const parsed = JSON.parse(options.body);
+        capturedPrompts.push(parsed.systemPrompt);
+        return {
+          ok: true,
+          body: createNormalStream(),
+        } as unknown as Response;
+      }),
+    );
+
+    // 1. ACP 模式正常注入
+    const acpProvider = new AntigravityProvider({
+      baseURL: 'http://127.0.0.1:8123',
+      model: 'claude-sonnet-5-5:acp',
+    });
+    await acpProvider.streamCompletion([], 'base system prompt', [], () => {});
+    expect(capturedPrompts[0]).toContain('[ACP_SYNC_EXECUTION_RULE]');
+    expect(capturedPrompts[0]).toContain('WaitMsBeforeAsync');
+
+    // 2. 已包含規則時不重複注入
+    await acpProvider.streamCompletion(
+      [],
+      'base system prompt [ACP_SYNC_EXECUTION_RULE] existing',
+      [],
+      () => {},
+    );
+    expect(capturedPrompts[1].match(/\[ACP_SYNC_EXECUTION_RULE\]/g)?.length).toBe(1);
+
+    // 3. Direct 模式不注入
+    const directProvider = new AntigravityProvider({
+      baseURL: 'http://127.0.0.1:8123',
+      model: 'gemini-3.8-flash',
+      antigravityMode: 'direct',
+    });
+    await directProvider.streamCompletion([], 'base system prompt', [], () => {});
+    expect(capturedPrompts[2]).toBe('base system prompt');
+  });
+});
+
+describe('AgentCoreEngine ACP incomplete tool auto-continuation', () => {
+  it('當 thinking 留下 [ACP Tool in_progress: ...] 且 toolCalls 為空時自動續接，最多重試 3 次', async () => {
+    const tmpWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'harni-acp-cont-'));
+    try {
+      // Case 1: 第 1 回合留下 in_progress，第 2 回合完成
+      const engine1 = new AgentCoreEngine({ workspaceRoot: tmpWorkspace });
+      const mock1 = new MockProvider({
+        script: [
+          {
+            thought: '[ACP Tool in_progress: dotnet build]\n',
+            text: 'Build started, waiting...',
+          },
+          {
+            thought: '[ACP Tool completed: dotnet build]\n',
+            text: 'Build finished and edits done.',
+          },
+        ],
+      });
+      const capturedMessages1: any[] = [];
+      const origStream1 = mock1.streamCompletion.bind(mock1);
+      mock1.streamCompletion = async (messages, systemPrompt, tools, onChunk, signal) => {
+        capturedMessages1.push(messages.map((m) => ({ role: m.role, content: m.content })));
+        return origStream1(messages, systemPrompt, tools, onChunk, signal);
+      };
+
+      await engine1.startTask('Run build and finish', {
+        customProvider: mock1,
+        subagentsEnabled: false,
+      });
+
+      expect(capturedMessages1.length).toBe(2);
+      const lastMsgTurn2 = capturedMessages1[1][capturedMessages1[1].length - 1];
+      expect(lastMsgTurn2.role).toBe('user');
+      expect(lastMsgTurn2.content).toContain('[SYSTEM_NOTIFICATION]');
+      expect(lastMsgTurn2.content).toContain('dotnet build');
+
+      // Case 2: 持續處於 in_progress，最多自動續接 3 次（總計 4 次呼叫：1 次初始 + 3 次重試）
+      const engine2 = new AgentCoreEngine({ workspaceRoot: tmpWorkspace });
+      const mock2 = new MockProvider({
+        script: [
+          { thought: '[ACP Tool in_progress: stuck_cmd]\n', text: 'Attempt 1' },
+          { thought: '[ACP Tool in_progress: stuck_cmd]\n', text: 'Attempt 2' },
+          { thought: '[ACP Tool in_progress: stuck_cmd]\n', text: 'Attempt 3' },
+          { thought: '[ACP Tool in_progress: stuck_cmd]\n', text: 'Attempt 4' },
+          { thought: '[ACP Tool completed: stuck_cmd]\n', text: 'Should not reach' },
+        ],
+      });
+      let callCount2 = 0;
+      const origStream2 = mock2.streamCompletion.bind(mock2);
+      mock2.streamCompletion = async (messages, systemPrompt, tools, onChunk, signal) => {
+        callCount2++;
+        return origStream2(messages, systemPrompt, tools, onChunk, signal);
+      };
+
+      let completedStatusCount = 0;
+      engine2.on('task:status', (ev) => {
+        if (ev.status === 'completed') completedStatusCount++;
+      });
+
+      await engine2.startTask('Run stuck command', {
+        customProvider: mock2,
+        subagentsEnabled: false,
+      });
+
+      expect(callCount2).toBe(4);
+      expect(completedStatusCount).toBe(1);
+    } finally {
+      await fs.rm(tmpWorkspace, { recursive: true, force: true });
+    }
   });
 });

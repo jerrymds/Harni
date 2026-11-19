@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 import type { Dirent } from 'node:fs';
 import * as path from 'node:path';
 import { watch, type ChokidarOptions, type FSWatcher } from 'chokidar';
+import { resolveSafePath as resolveSafeWorkspacePath } from '@harni/agent-core';
 import type { FileNode, WorkspaceInfo } from '@harni/types';
 
 export interface WatcherLimits {
@@ -220,21 +221,11 @@ export class FSService {
   }
 
   /**
-   * Safely resolves a path and prevents path traversal outside the workspaceRoot.
+   * Safely resolves a path and prevents path traversal (including via symlinks) outside the workspaceRoot.
    */
   public resolveSafePath(targetPath: string, customRoot?: string): string {
     const root = path.resolve(customRoot || this.workspaceRoot);
-    const resolved = path.isAbsolute(targetPath)
-      ? path.resolve(targetPath)
-      : path.resolve(root, targetPath);
-
-    const relative = path.relative(root, resolved);
-    if (relative.startsWith('..') || path.isAbsolute(relative)) {
-      throw new Error(
-        `Path traversal denied: '${targetPath}' is outside workspace root '${root}'`,
-      );
-    }
-    return resolved;
+    return resolveSafeWorkspacePath(targetPath, root);
   }
 
   /**
@@ -711,14 +702,19 @@ export class FSService {
 
     const timer = setTimeout(async () => {
       this.debounceTimers.delete(timerKey);
-      const children = await this.getDirectoryNodes(relDir, root);
-      for (const listener of this.onDirChangeListeners) {
-        listener(relDir, children, root);
-      }
-      if (relDir === '') {
-        for (const listener of this.onTreeChangeListeners) {
-          listener(children, root);
+      if (this.closed) return;
+      try {
+        const children = await this.getDirectoryNodes(relDir, root);
+        for (const listener of this.onDirChangeListeners) {
+          listener(relDir, children, root);
         }
+        if (relDir === '') {
+          for (const listener of this.onTreeChangeListeners) {
+            listener(children, root);
+          }
+        }
+      } catch (err) {
+        console.warn(`[FSService] Failed to notify directory change for '${relDir}' in '${root}':`, err);
       }
     }, 150);
 
@@ -754,9 +750,14 @@ export class FSService {
 
     const timer = setTimeout(async () => {
       this.debounceTimers.delete(timerKey);
-      const tree = await this.getFileTree(1, root);
-      for (const listener of this.onTreeChangeListeners) {
-        listener(tree, root);
+      if (this.closed) return;
+      try {
+        const tree = await this.getFileTree(1, root);
+        for (const listener of this.onTreeChangeListeners) {
+          listener(tree, root);
+        }
+      } catch (err) {
+        console.warn(`[FSService] Failed to notify tree change in '${root}':`, err);
       }
     }, 150);
 

@@ -1,10 +1,35 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import * as path from 'node:path';
 
-let nodePty: any = null;
+interface NodePtyProcess {
+  onData(listener: (data: string) => void): void;
+  onExit(listener: () => void): void;
+  write(data: string): void;
+  resize?(cols: number, rows: number): void;
+  kill(): void;
+}
+
+interface NodePtyModule {
+  spawn(
+    file: string,
+    args: string[],
+    options: {
+      name: string;
+      cols: number;
+      rows: number;
+      cwd: string;
+      env: Record<string, string>;
+      useConpty?: boolean;
+    },
+  ): NodePtyProcess;
+}
+
+export type PtyProcessHandle = NodePtyProcess | ChildProcessWithoutNullStreams;
+
+let nodePty: NodePtyModule | null = null;
 try {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  nodePty = require('node-pty');
+  nodePty = require('node-pty') as NodePtyModule;
 } catch {
   nodePty = null;
 }
@@ -41,7 +66,7 @@ export interface PTYSession {
   cols: number;
   rows: number;
   isNodePty: boolean;
-  proc: any;
+  proc: PtyProcessHandle | null;
   createdAt: number;
   write(data: string): void;
   resize(cols: number, rows: number): void;
@@ -115,7 +140,7 @@ export class PTYService {
     shell: string,
     cols: number,
     rows: number,
-  ): { proc: any; isNodePty: boolean } {
+  ): { proc: PtyProcessHandle; isNodePty: boolean } {
     if (nodePty) {
       try {
         const proc = nodePty.spawn(shell, [], {
@@ -202,9 +227,9 @@ export class PTYService {
       createdAt: Date.now(),
       write: (data: string) => {
         if (!session.proc) return;
-        if (session.isNodePty) {
+        if (session.isNodePty && 'write' in session.proc) {
           session.proc.write(data);
-        } else if (session.proc.stdin) {
+        } else if ('stdin' in session.proc && session.proc.stdin) {
           const formatted = isWindows && data.endsWith('\r') && !data.endsWith('\r\n') ? data + '\n' : data;
           session.proc.stdin.write(formatted);
         }
@@ -212,7 +237,7 @@ export class PTYService {
       resize: (newCols: number, newRows: number) => {
         session.cols = newCols;
         session.rows = newRows;
-        if (session.isNodePty && session.proc?.resize) {
+        if (session.isNodePty && session.proc && 'resize' in session.proc && session.proc.resize) {
           try {
             session.proc.resize(newCols, newRows);
           } catch {}

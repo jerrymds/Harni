@@ -221,4 +221,33 @@ describe('DocumentViewerDrawer Component', () => {
     expect(screen.queryByRole('button', { name: /^檢視$/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^原始碼$/ })).not.toBeInTheDocument();
   });
+
+  it('sanitizes dangerous URI schemes in markdown preview links', () => {
+    useAgentStore.setState({
+      isDocumentViewerOpen: true,
+      activeFile: {
+        path: 'docs/XSS.md',
+        content: [
+          '[js](javascript:alert(1))',
+          '[tabjs](java&#9;script:alert(2))',
+          '[vbs](vbscript:msgbox(3))',
+          '[data](data:text/html,<script>alert(4)</script>)',
+          '[safe](https://example.com/docs)',
+          '[rel](./README.md)',
+        ].join('\n\n'),
+      },
+    });
+
+    render(<DocumentViewerDrawer />);
+
+    expect(screen.getByText('js').closest('a')).toHaveAttribute('href', '');
+    expect(screen.getByText('tabjs').closest('a')).toHaveAttribute('href', '');
+    expect(screen.getByText('vbs').closest('a')).toHaveAttribute('href', '');
+    expect(screen.getByText('data').closest('a')).toHaveAttribute('href', '');
+    expect(screen.getByRole('link', { name: 'safe' })).toHaveAttribute(
+      'href',
+      'https://example.com/docs',
+    );
+    expect(screen.getByRole('link', { name: 'rel' })).toHaveAttribute('href', './README.md');
+  });
 });

@@ -53,13 +53,16 @@ export const McpManager: React.FC<McpManagerProps> = ({
     try {
       const res = await fetch('/api/mcp/status');
       if (res.ok) {
-        const data = await res.json();
+        const data = (await res.json()) as {
+          servers?: Array<{ name: string; status: McpServerLiveStatus['status']; toolCount?: number; error?: string }>;
+          tools?: McpServerLiveTool[];
+        };
         const map: Record<string, McpServerLiveStatus> = {};
         if (Array.isArray(data.servers)) {
-          data.servers.forEach((s: any) => {
+          data.servers.forEach((s) => {
             map[s.name] = {
               status: s.status,
-              toolCount: s.toolCount,
+              toolCount: s.toolCount ?? 0,
               error: s.error,
             };
           });
@@ -79,13 +82,16 @@ export const McpManager: React.FC<McpManagerProps> = ({
     try {
       const res = await fetch('/api/mcp/restart', { method: 'POST' });
       if (res.ok) {
-        const data = await res.json();
+        const data = (await res.json()) as {
+          statuses?: Array<{ name: string; status: McpServerLiveStatus['status']; toolCount?: number; error?: string }>;
+          tools?: McpServerLiveTool[];
+        };
         const map: Record<string, McpServerLiveStatus> = {};
         if (Array.isArray(data.statuses)) {
-          data.statuses.forEach((s: any) => {
+          data.statuses.forEach((s) => {
             map[s.name] = {
               status: s.status,
-              toolCount: s.toolCount,
+              toolCount: s.toolCount ?? 0,
               error: s.error,
             };
           });
@@ -122,7 +128,7 @@ export const McpManager: React.FC<McpManagerProps> = ({
         setServersMap(servers);
         setMcpJsonError(null);
       }
-    } catch (err: any) {
+    } catch {
       setMcpJsonError('JSON 格式尚未合法');
     }
   }, [mcpConfig, setMcpJsonError]);

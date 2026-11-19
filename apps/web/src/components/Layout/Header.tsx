@@ -8,12 +8,14 @@ import {
   Flame,
   FlaskConical,
   FolderGit2,
+  LayoutDashboard,
+  MessageSquare,
   Radio,
   Settings as SettingsIcon,
   Sparkles,
   Terminal,
 } from 'lucide-react';
-import type { AgentMode, LLMProviderType, ModelInfo, ThinkingDepth } from '@harni/types';
+import { USER_AGENT_MODES, type LLMProviderType, type ModelInfo, type ThinkingDepth } from '@harni/types';
 import { useAgentStore, useShallow } from '../../store/useAgentStore.js';
 import { resolveAllProviders } from '../Settings/Models/providerRegistry.js';
 import { cleanAntigravityDisplayName } from '../../utils/modelContext.js';
@@ -35,6 +37,10 @@ export const Header: React.FC = () => {
     activeFolderId,
     customProviderName,
     customProviders,
+    activeWorkspaceView,
+    sessions,
+    subagents,
+    setActiveWorkspaceView,
     setMode,
     setProvider,
     setModel,
@@ -56,6 +62,10 @@ export const Header: React.FC = () => {
       activeFolderId: s.activeFolderId,
       customProviderName: s.customProviderName,
       customProviders: s.customProviders,
+      activeWorkspaceView: s.activeWorkspaceView,
+      sessions: s.sessions,
+      subagents: s.subagents,
+      setActiveWorkspaceView: s.setActiveWorkspaceView,
       setMode: s.setMode,
       setProvider: s.setProvider,
       setModel: s.setModel,
@@ -123,6 +133,40 @@ export const Header: React.FC = () => {
   const activeFolder = folders.find((f) => f.id === activeFolderId);
   const currentPath = activeFolder?.path || workspaceInfo?.rootPath || '';
   const currentName = activeFolder?.name || currentPath.split(/[\\/]/).pop() || 'Workspace';
+
+  const { activeTaskCount, pendingActionCount } = React.useMemo(() => {
+    const safeSessions = sessions || [];
+    const safeSubagents = subagents || {};
+    let activeCount = 0;
+    let pendingCount = 0;
+
+    for (const s of safeSessions) {
+      const st = s.status || 'idle';
+      if (
+        st === 'planning' ||
+        st === 'thinking' ||
+        st === 'streaming' ||
+        st === 'tool_request' ||
+        st === 'executing_tool' ||
+        st === 'testing'
+      ) {
+        activeCount += 1;
+      }
+      if (s.pendingApproval || s.pendingQuestion) {
+        pendingCount += 1;
+      }
+    }
+
+    for (const list of Object.values(safeSubagents)) {
+      for (const sub of list) {
+        if (sub.status === 'pending' || sub.status === 'running' || sub.status === 'waiting_for_input') {
+          activeCount += 1;
+        }
+      }
+    }
+
+    return { activeTaskCount: activeCount, pendingActionCount: pendingCount };
+  }, [sessions, subagents]);
 
   const getStatusBeacon = () => {
     switch (status) {
@@ -224,17 +268,75 @@ export const Header: React.FC = () => {
         )}
       </div>
 
-      {/* Middle Status Beacon */}
-      <div className="flex items-center space-x-2">{getStatusBeacon()}</div>
+      {/* Middle Status Beacon & View Switcher */}
+      <div className="flex items-center space-x-2.5">
+        {getStatusBeacon()}
+
+        <div className="flex items-center space-x-1 rounded-xl border border-ag-border bg-ag-sidebar p-1 shadow-soft">
+          <button
+            type="button"
+            onClick={() => setActiveWorkspaceView('chat')}
+            className={`flex items-center space-x-1 rounded-lg px-2.5 py-1 text-xs font-medium transition-all duration-150 cursor-pointer ${
+              activeWorkspaceView !== 'orchestrator'
+                ? 'bg-ag-panel text-ag-textPrimary shadow-soft font-semibold'
+                : 'text-ag-textMuted hover:text-ag-textPrimary'
+            }`}
+          >
+            <MessageSquare className="h-3.5 w-3.5 text-ag-primary" />
+            <span>對話</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveWorkspaceView('orchestrator')}
+            data-testid="orchestrator-view-btn"
+            className={`flex items-center space-x-1.5 rounded-lg px-2.5 py-1 text-xs font-medium transition-all duration-150 cursor-pointer ${
+              activeWorkspaceView === 'orchestrator'
+                ? 'bg-ag-primary text-white shadow-soft font-semibold'
+                : 'text-ag-textMuted hover:bg-ag-panel hover:text-ag-textPrimary'
+            }`}
+            title="開啟跨 Session Orchestrator 調度中心 (Mission Control)"
+          >
+            <LayoutDashboard className="h-3.5 w-3.5" />
+            <span>調度中心</span>
+            {activeTaskCount > 0 && (
+              <span
+                className={`rounded-full px-1.5 py-0.2 text-[10px] font-mono font-bold ${
+                  activeWorkspaceView === 'orchestrator'
+                    ? 'bg-white/20 text-white'
+                    : 'bg-sky-500/20 text-sky-600 dark:text-sky-300'
+                }`}
+              >
+                {activeTaskCount}
+              </span>
+            )}
+            {pendingActionCount > 0 && (
+              <span
+                className={`rounded-full px-1.5 py-0.2 text-[10px] font-mono font-bold ${
+                  activeWorkspaceView === 'orchestrator'
+                    ? 'bg-amber-400 text-slate-900'
+                    : 'bg-amber-500/25 text-amber-700 dark:text-amber-300 animate-pulse'
+                }`}
+              >
+                {pendingActionCount}
+              </span>
+            )}
+          </button>
+        </div>
+      </div>
 
       {/* Controls: Mode Tabs, Provider, Dynamic Model Selector, Settings */}
       <div className="flex items-center space-x-2.5">
         {/* Antigravity Mode Pills */}
         <div className="flex items-center space-x-1 rounded-xl border border-ag-border bg-ag-sidebar p-1 shadow-soft">
-          {(['code', 'architect', 'ask', 'test'] as AgentMode[]).map((mode) => (
+          {USER_AGENT_MODES.map((mode) => (
             <button
               key={mode}
               onClick={() => setMode(mode)}
+              title={
+                mode === 'code'
+                  ? '全功能開發與多代理人調度模式（可讀寫檔案、執行指令）'
+                  : '純問答與架構解析模式（唯讀護欄：禁止改檔與執行寫入指令）'
+              }
               className={`rounded-lg px-2.5 py-1 text-xs font-medium capitalize transition-all duration-150 cursor-pointer ${
                 selectedMode === mode
                   ? 'bg-ag-primary text-white shadow-soft font-semibold'

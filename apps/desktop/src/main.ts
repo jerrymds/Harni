@@ -59,9 +59,16 @@ function createWindow(url: string): void {
   // 完全移除視窗頂部的應用程式選單列 (File, Edit, View, Window, Help)
   mainWindow.removeMenu();
 
-  // Open external links (OAuth flows, docs) in the default browser
+  // Open external links (OAuth flows, docs) in the default browser (http/https only)
   mainWindow.webContents.setWindowOpenHandler(({ url: target }: { url: string }) => {
-    void shell.openExternal(target);
+    try {
+      const parsed = new URL(target);
+      if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+        void shell.openExternal(parsed.toString());
+      }
+    } catch {
+      // Ignore invalid URLs
+    }
     return { action: 'deny' };
   });
 

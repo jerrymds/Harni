@@ -1,7 +1,7 @@
 import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { ChatMessageItem } from './ChatMessageItem.js';
+import { ChatMessageItem, safeUrlTransform } from './ChatMessageItem.js';
 import type { ChatMessage } from '@harni/types';
 import { useAgentStore } from '../../store/useAgentStore.js';
 
@@ -260,5 +260,18 @@ describe('ChatMessageItem Component', () => {
     expect(extLink).toHaveAttribute('href', 'https://github.com/example/repo');
     expect(extLink).toHaveAttribute('target', '_blank');
     expect(extLink).toHaveAttribute('rel', 'noopener noreferrer');
+  });
+
+  it('sanitizes dangerous URL schemes while preserving safe and relative links', () => {
+    expect(safeUrlTransform('javascript:alert(1)')).toBe('');
+    expect(safeUrlTransform('java\tscript:alert(1)')).toBe('');
+    expect(safeUrlTransform('vbscript:msgbox(1)')).toBe('');
+    expect(safeUrlTransform('data:text/html,<script>alert(1)</script>')).toBe('');
+    expect(safeUrlTransform('https://example.com/docs')).toBe('https://example.com/docs');
+    expect(safeUrlTransform('file:///D:/Work/Project/Harni/README.md')).toBe(
+      'file:///D:/Work/Project/Harni/README.md',
+    );
+    expect(safeUrlTransform('src/App.tsx')).toBe('src/App.tsx');
+    expect(safeUrlTransform('#section-1')).toBe('#section-1');
   });
 });

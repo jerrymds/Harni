@@ -9,6 +9,7 @@ describe('useAgentStore and Slices', () => {
 
     // Reset store state
     useAgentStore.setState({
+      ws: null,
       status: 'idle',
       messages: [],
       selectedMode: 'code',
@@ -24,8 +25,11 @@ describe('useAgentStore and Slices', () => {
   it('updates mode, provider, model and thinking depth', () => {
     const { setMode, setProvider, setModel, setThinkingDepth } = useAgentStore.getState();
 
-    setMode('architect');
-    expect(useAgentStore.getState().selectedMode).toBe('architect');
+    setMode('ask');
+    expect(useAgentStore.getState().selectedMode).toBe('ask');
+
+    setMode('architect' as any);
+    expect(useAgentStore.getState().selectedMode).toBe('code');
 
     setProvider('openai');
     expect(useAgentStore.getState().selectedProvider).toBe('openai');
@@ -171,9 +175,11 @@ describe('useAgentStore and Slices', () => {
     // Trigger connect with fake WebSocket
     const originalWS = globalThis.WebSocket;
     try {
-      globalThis.WebSocket = function () {
+      const MockWS = function () {
         return fakeWs as any;
       } as any;
+      MockWS.OPEN = 1;
+      globalThis.WebSocket = MockWS;
       useAgentStore.getState().connect();
 
       // Send error message
@@ -240,9 +246,11 @@ describe('useAgentStore and Slices', () => {
 
     const originalWS = globalThis.WebSocket;
     try {
-      globalThis.WebSocket = function () {
+      const MockWS = function () {
         return fakeWs as any;
       } as any;
+      MockWS.OPEN = 1;
+      globalThis.WebSocket = MockWS;
       useAgentStore.getState().connect();
 
       if (typeof messageHandler === 'function') {
@@ -306,9 +314,11 @@ describe('useAgentStore and Slices', () => {
 
     const originalWS = globalThis.WebSocket;
     try {
-      globalThis.WebSocket = function () {
+      const MockWS = function () {
         return fakeWs as any;
       } as any;
+      MockWS.OPEN = 1;
+      globalThis.WebSocket = MockWS;
       useAgentStore.getState().connect();
 
       // Send multiple rapid chat:thinking chunks
@@ -441,9 +451,11 @@ describe('useAgentStore and Slices', () => {
 
     const originalWS = globalThis.WebSocket;
     try {
-      globalThis.WebSocket = function () {
+      const MockWS = function () {
         return fakeWs as any;
       } as any;
+      MockWS.OPEN = 1;
+      globalThis.WebSocket = MockWS;
       useAgentStore.getState().connect();
 
       useAgentStore.setState({
@@ -504,9 +516,11 @@ describe('useAgentStore and Slices', () => {
 
     const originalWS = globalThis.WebSocket;
     try {
-      globalThis.WebSocket = function () {
+      const MockWS = function () {
         return fakeWs as any;
       } as any;
+      MockWS.OPEN = 1;
+      globalThis.WebSocket = MockWS;
       useAgentStore.getState().connect();
 
       useAgentStore.setState({
@@ -619,9 +633,12 @@ describe('useAgentStore and Slices', () => {
 
     const originalWS = globalThis.WebSocket;
     try {
-      globalThis.WebSocket = function () {
-        return fakeWs as any;
-      } as any;
+      globalThis.WebSocket = Object.assign(
+        function () {
+          return fakeWs as any;
+        },
+        { OPEN: 1 },
+      ) as any;
       useAgentStore.setState({ ws: null });
       useAgentStore.getState().connect();
 
@@ -697,9 +714,12 @@ describe('useAgentStore and Slices', () => {
 
     const originalWS = globalThis.WebSocket;
     try {
-      globalThis.WebSocket = function () {
-        return fakeWs as any;
-      } as any;
+      globalThis.WebSocket = Object.assign(
+        function () {
+          return fakeWs as any;
+        },
+        { OPEN: 1 },
+      ) as any;
       useAgentStore.setState({ ws: null, isDocumentViewerOpen: false, activeFile: null, activeDiff: null });
       useAgentStore.getState().connect();
 
@@ -830,6 +850,269 @@ describe('useAgentStore and Slices', () => {
     expect(useAgentStore.getState().workspaceInfo?.branch).toBeUndefined();
 
     fetchSpy.mockRestore();
+  });
+
+  it('isolates background file:diff focus while accumulating sessionChangedFiles and handles orchestrator WS events', () => {
+    const sentPayloads: any[] = [];
+    let messageHandler: any = null;
+    let openHandler: any = null;
+    const fakeWs = {
+      readyState: 1,
+      send: (raw: string) => sentPayloads.push(JSON.parse(raw)),
+      set onmessage(fn: any) {
+        messageHandler = fn;
+      },
+      get onmessage() {
+        return messageHandler;
+      },
+      set onopen(fn: any) {
+        openHandler = fn;
+      },
+      get onopen() {
+        return openHandler;
+      },
+    };
+
+    const sessionA = {
+      id: 'sess_fg',
+      title: 'Foreground Task',
+      status: 'thinking' as const,
+      messages: [],
+      messageCount: 0,
+      mode: 'code' as const,
+      createdAt: 1,
+      updatedAt: 1,
+      folderId: 'f_fg',
+    };
+    const sessionB = {
+      id: 'sess_bg',
+      title: 'Background Task',
+      status: 'thinking' as const,
+      messages: [],
+      messageCount: 0,
+      mode: 'code' as const,
+      createdAt: 2,
+      updatedAt: 2,
+      folderId: 'f_bg',
+    };
+
+    useAgentStore.setState({
+      ws: null,
+      currentSessionId: 'sess_fg',
+      sessions: [sessionA, sessionB],
+      folders: [
+        { id: 'f_fg', name: 'FG', path: '/repo/fg', createdAt: 1 },
+        { id: 'f_bg', name: 'BG', path: '/repo/bg', createdAt: 2 },
+      ],
+      activeDiff: null,
+      isDocumentViewerOpen: false,
+      sessionChangedFiles: {},
+      swarmBoards: {},
+      sessionSchedules: {},
+      wakeupLogs: {},
+    });
+
+    const originalWS = globalThis.WebSocket;
+    try {
+      const MockWS = function () {
+        return fakeWs as any;
+      } as any;
+      MockWS.OPEN = 1;
+      globalThis.WebSocket = MockWS;
+      useAgentStore.getState().connect();
+
+      // Trigger onopen -> subscribes to both sessions
+      openHandler?.();
+      const subscribedIds = sentPayloads
+        .filter((m) => m.type === 'session:subscribe')
+        .map((m) => m.payload.sessionId);
+      expect(subscribedIds).toEqual(expect.arrayContaining(['sess_fg', 'sess_bg']));
+
+      // 1. Background file:diff must NOT steal focus
+      messageHandler({
+        data: JSON.stringify({
+          type: 'file:diff',
+          payload: {
+            sessionId: 'sess_bg',
+            path: 'src/bg.ts',
+            originalContent: 'old',
+            newContent: 'new',
+          },
+        }),
+      });
+      expect(useAgentStore.getState().isDocumentViewerOpen).toBe(false);
+      expect(useAgentStore.getState().activeDiff).toBeNull();
+      expect(useAgentStore.getState().sessionChangedFiles['sess_bg']?.[0]?.path).toBe('src/bg.ts');
+
+      // 2. Background subagent:completed modifiedFiles merged
+      messageHandler({
+        data: JSON.stringify({
+          type: 'subagent:completed',
+          payload: {
+            sessionId: 'sess_bg',
+            subagentId: 'sub_1',
+            status: 'completed',
+            result: 'done',
+            durationMs: 100,
+            role: 'Coder',
+            structuredReport: {
+              modifiedFiles: ['src/worker.ts'],
+            },
+          },
+        }),
+      });
+      expect(useAgentStore.getState().sessionChangedFiles['sess_bg']?.map((f) => f.path)).toEqual(
+        expect.arrayContaining(['src/bg.ts', 'src/worker.ts']),
+      );
+
+      // 3. Schedule, wakeup, and swarm WS events
+      messageHandler({
+        data: JSON.stringify({
+          type: 'schedule:created',
+          payload: {
+            sessionId: 'sess_bg',
+            scheduleId: 'sch_1',
+            kind: 'cron',
+            prompt: 'check build',
+            cronExpression: '*/5 * * * *',
+            iterations: 1,
+          },
+        }),
+      });
+      messageHandler({
+        data: JSON.stringify({
+          type: 'schedule:created',
+          payload: {
+            sessionId: 'sess_bg',
+            scheduleId: 'sch_timer_1',
+            kind: 'timer',
+            prompt: 'one-shot reminder',
+            durationSeconds: 30,
+          },
+        }),
+      });
+      expect(useAgentStore.getState().sessionSchedules['sess_bg']).toHaveLength(2);
+      expect(
+        useAgentStore.getState().sessionSchedules['sess_bg']?.find((s) => s.id === 'sch_1')?.iterations,
+      ).toBe(1);
+
+      messageHandler({
+        data: JSON.stringify({
+          type: 'schedule:triggered',
+          payload: { sessionId: 'sess_bg', scheduleId: 'sch_timer_1', prompt: 'one-shot reminder', iteration: 1 },
+        }),
+      });
+      expect(
+        useAgentStore.getState().sessionSchedules['sess_bg']?.some((s) => s.id === 'sch_timer_1'),
+      ).toBe(false);
+
+      messageHandler({
+        data: JSON.stringify({
+          type: 'schedule:triggered',
+          payload: { sessionId: 'sess_bg', scheduleId: 'sch_1', prompt: 'check build', iteration: 2 },
+        }),
+      });
+      expect(
+        useAgentStore.getState().sessionSchedules['sess_bg']?.find((s) => s.id === 'sch_1')?.iterations,
+      ).toBe(2);
+
+      messageHandler({
+        data: JSON.stringify({
+          type: 'wakeup:queued',
+          payload: {
+            sessionId: 'sess_bg',
+            source: 'subagent',
+            sourceId: 'sub_1',
+            summary: 'Subagent Coder completed',
+          },
+        }),
+      });
+      expect(useAgentStore.getState().wakeupLogs['sess_bg']?.length).toBe(1);
+
+      messageHandler({
+        data: JSON.stringify({
+          type: 'swarm:updated',
+          payload: {
+            sessionId: 'sess_bg',
+            title: 'Refactor Swarm',
+            members: [],
+            messages: [],
+            updatedAt: Date.now(),
+          },
+        }),
+      });
+      messageHandler({
+        data: JSON.stringify({
+          type: 'swarm:message',
+          payload: {
+            id: 'msg_sw_1',
+            sessionId: 'sess_bg',
+            sender: 'worker-1',
+            content: '@coordinator finished',
+            mentions: ['coordinator'],
+            timestamp: Date.now(),
+          },
+        }),
+      });
+      expect(useAgentStore.getState().swarmBoards['sess_bg']?.messages.length).toBe(1);
+
+      // 4. openChangedFile opens diff directly when diff exists, and requests file:open with bg workspaceRoot otherwise
+      sentPayloads.length = 0;
+      useAgentStore.getState().openChangedFile('sess_bg', 'src/bg.ts');
+      expect(useAgentStore.getState().isDocumentViewerOpen).toBe(true);
+      expect(useAgentStore.getState().activeDiff?.path).toBe('src/bg.ts');
+
+      useAgentStore.getState().openChangedFile('sess_bg', 'src/worker.ts');
+      const openReq = sentPayloads.find((m) => m.type === 'file:open');
+      expect(openReq?.payload).toEqual({ path: 'src/worker.ts', workspaceRoot: '/repo/bg' });
+
+      // 5. Cross-session approval, question answer, cancel, and subagent kill
+      useAgentStore.setState({
+        sessions: [
+          sessionA,
+          {
+            ...sessionB,
+            pendingApproval: { id: 'tc_bg', name: 'run_command', arguments: { command: 'pnpm test' }, requiresApproval: true },
+            pendingQuestion: { toolCallId: 'q_bg', question: 'Proceed?', options: ['Yes'] },
+          },
+        ],
+        subagents: {
+          sess_bg: [
+            {
+              id: 'sub_bg_1',
+              parentId: 'main',
+              sessionId: 'sess_bg',
+              typeName: 'coder',
+              role: 'Coder',
+              prompt: 'fix',
+              status: 'running',
+              depth: 1,
+              createdAt: 1,
+              updatedAt: 1,
+            },
+          ],
+        },
+      });
+
+      sentPayloads.length = 0;
+      useAgentStore.getState().approveToolForSession('sess_bg', 'tc_bg', true);
+      expect(sentPayloads.some((m) => m.type === 'tool:approve' && m.payload.sessionId === 'sess_bg')).toBe(true);
+      expect(useAgentStore.getState().sessions.find((s) => s.id === 'sess_bg')?.pendingApproval).toBeNull();
+
+      useAgentStore.getState().answerQuestionForSession('sess_bg', 'q_bg', ['Yes']);
+      expect(sentPayloads.some((m) => m.type === 'question:answer' && m.payload.sessionId === 'sess_bg')).toBe(true);
+      expect(useAgentStore.getState().sessions.find((s) => s.id === 'sess_bg')?.pendingQuestion).toBeNull();
+
+      useAgentStore.getState().killSubagentForSession('sess_bg', 'sub_bg_1');
+      expect(sentPayloads.some((m) => m.type === 'subagent:kill' && m.payload.sessionId === 'sess_bg' && m.payload.subagentId === 'sub_bg_1')).toBe(true);
+      expect(useAgentStore.getState().subagents['sess_bg']?.[0]?.status).toBe('cancelled');
+
+      useAgentStore.getState().cancelTaskForSession('sess_bg');
+      expect(sentPayloads.some((m) => m.type === 'task:cancel' && m.payload.sessionId === 'sess_bg')).toBe(true);
+      expect(useAgentStore.getState().sessions.find((s) => s.id === 'sess_bg')?.status).toBe('cancelled');
+    } finally {
+      globalThis.WebSocket = originalWS;
+    }
   });
 });
 

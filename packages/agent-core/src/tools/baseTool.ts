@@ -1,5 +1,5 @@
-import * as path from 'node:path';
 import type { ToolDefinition, ToolParametersSchema, ToolResult, FileDiff } from '@harni/types';
+import { resolveSafePath } from '../utils/pathSecurity.js';
 
 export interface ToolExecutionContext {
   workspaceRoot: string;
@@ -62,22 +62,9 @@ export abstract class BaseTool<TParams = Record<string, unknown>> {
   }
 
   /**
-   * Safely resolves a path and prevents path traversal outside the workspaceRoot.
+   * Safely resolves a path and prevents path traversal (including via symlinks) outside the workspaceRoot.
    */
   protected resolveSafePath(filePath: string, workspaceRoot: string): string {
-    const normalizedRoot = path.resolve(workspaceRoot);
-    const resolved = path.isAbsolute(filePath)
-      ? path.resolve(filePath)
-      : path.resolve(normalizedRoot, filePath);
-
-    // Security check: ensure resolved path is inside normalizedRoot
-    const relative = path.relative(normalizedRoot, resolved);
-    if (relative.startsWith('..') || path.isAbsolute(relative)) {
-      throw new Error(
-        `Path traversal denied: '${filePath}' is outside workspace root '${workspaceRoot}'`,
-      );
-    }
-
-    return resolved;
+    return resolveSafePath(filePath, workspaceRoot);
   }
 }

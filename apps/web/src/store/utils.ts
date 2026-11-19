@@ -1,13 +1,22 @@
-import type {
-  AgentMode,
-  ChatMessage,
-  ChatSession,
-  GoogleAuthInfo,
-  LLMProviderConfig,
-  LLMProviderType,
-  SubagentInstanceInfo,
-  WorkspaceFolder,
+import {
+  normalizeAgentMode,
+  type AgentMode,
+  type AgentStatus,
+  type ChatMessage,
+  type ChatSession,
+  type GoogleAuthInfo,
+  type LLMProviderConfig,
+  type LLMProviderType,
+  type SubagentInstanceInfo,
+  type WorkspaceFolder,
 } from '@harni/types';
+
+const ACTIVE_TRANSIENT_STATUSES: ReadonlySet<AgentStatus> = new Set<AgentStatus>([
+  'thinking',
+  'executing_tool',
+  'streaming',
+  'testing',
+]);
 
 export const PROVIDER_DEFAULT_MODELS: Record<string, string> = {
   cline: 'cline-pass/deepseek-v4-pro',
@@ -94,7 +103,7 @@ export const apiFetch = async (urlOrPath: string, init: RequestInit = {}): Promi
 
 // --- SQLite Backend Sync Helpers ---
 
-let dbSyncSessionTimeout: any = null;
+let dbSyncSessionTimeout: ReturnType<typeof setTimeout> | null = null;
 export function syncSessionToDB(session: ChatSession, immediate = false): void {
   const doSync = async () => {
     try {
@@ -117,8 +126,8 @@ export function syncSessionToDB(session: ChatSession, immediate = false): void {
   }
 }
 
-let dbSyncFoldersTimeout: any = null;
-export function syncFoldersToDB(folders: WorkspaceFolder[], immediate = false): void {
+let dbSyncFoldersTimeout: ReturnType<typeof setTimeout> | null = null;
+export function syncFoldersToDB(folders: WorkspaceFolder[], immediate = false): Promise<void> {
   const doSync = async () => {
     try {
       await apiFetch('/api/db/folders', {
@@ -133,11 +142,14 @@ export function syncFoldersToDB(folders: WorkspaceFolder[], immediate = false): 
 
   if (immediate) {
     if (dbSyncFoldersTimeout) clearTimeout(dbSyncFoldersTimeout);
-    doSync();
-  } else {
-    if (dbSyncFoldersTimeout) clearTimeout(dbSyncFoldersTimeout);
-    dbSyncFoldersTimeout = setTimeout(doSync, 500);
+    return doSync();
   }
+  if (dbSyncFoldersTimeout) clearTimeout(dbSyncFoldersTimeout);
+  return new Promise<void>((resolve) => {
+    dbSyncFoldersTimeout = setTimeout(() => {
+      void doSync().finally(resolve);
+    }, 500);
+  });
 }
 
 export async function deleteSessionFromDB(sessionId: string): Promise<void> {
@@ -279,10 +291,10 @@ export function loadSavedSessions(
           createdAt: typeof s.createdAt === 'number' && !isNaN(s.createdAt) ? s.createdAt : Date.now(),
           updatedAt: typeof s.updatedAt === 'number' && !isNaN(s.updatedAt) ? s.updatedAt : Date.now(),
           messageCount: Array.isArray(s.messages) ? s.messages.length : (s.messageCount || 0),
-          mode: s.mode || defaultMode,
+          mode: normalizeAgentMode(s.mode || defaultMode),
           provider: s.provider || defaultProvider,
           model: s.model || defaultModel,
-          status: (['thinking', 'executing_tool', 'streaming', 'testing'] as any[]).includes(s.status)
+          status: s.status && ACTIVE_TRANSIENT_STATUSES.has(s.status)
             ? ('idle' as const)
             : (s.status || 'idle'),
           activeThinking: '',
@@ -341,7 +353,7 @@ export function loadSavedSessions(
 }
 
 // Helper to safely persist sessions to localStorage
-let saveSessionTimeout: any = null;
+let saveSessionTimeout: ReturnType<typeof setTimeout> | null = null;
 export function saveSessionsToStorage(sessions: ChatSession[], immediate = false): void {
   const executeSave = () => {
     try {
@@ -427,7 +439,7 @@ export function loadSavedSubagents(): Record<string, SubagentInstanceInfo[]> {
         const result: Record<string, SubagentInstanceInfo[]> = {};
         for (const [sessionId, list] of Object.entries(parsed)) {
           if (Array.isArray(list)) {
-            result[sessionId] = list.map((sub: any) => {
+            result[sessionId] = (list as SubagentInstanceInfo[]).map((sub) => {
               if (
                 sub.status === 'running' ||
                 sub.status === 'pending' ||
@@ -450,7 +462,7 @@ export function loadSavedSubagents(): Record<string, SubagentInstanceInfo[]> {
   return {};
 }
 
-let saveSubagentsTimeout: any = null;
+let saveSubagentsTimeout: ReturnType<typeof setTimeout> | null = null;
 export function saveSubagentsToStorage(subagents: Record<string, SubagentInstanceInfo[]>): void {
   if (typeof window === 'undefined' || !window.localStorage) {
     return;

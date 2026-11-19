@@ -49,8 +49,8 @@ export class Router {
     ctx: ServerContext,
     onNotFound?: () => Promise<boolean>,
   ): Promise<boolean> {
-    // 1. Enable basic CORS headers
-    setCorsHeaders(res);
+    // 1. Enable CORS headers for validated origins
+    setCorsHeaders(res, req);
 
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
@@ -58,7 +58,13 @@ export class Router {
       return true;
     }
 
-    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    let url: URL;
+    try {
+      url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+    } catch {
+      sendJsonResponse(res, 400, { error: 'Invalid request URL' });
+      return true;
+    }
     const method = (req.method || 'GET').toUpperCase();
 
     // 2. Public OAuth redirect callbacks from 3rd-party auth providers (Google OAuth callback browser redirect)
@@ -89,9 +95,14 @@ export class Router {
       const match = url.pathname.match(route.pattern);
       if (match) {
         const params: Record<string, string> = {};
-        route.paramNames.forEach((name, index) => {
-          params[name] = decodeURIComponent(match[index + 1] || '');
-        });
+        try {
+          route.paramNames.forEach((name, index) => {
+            params[name] = decodeURIComponent(match[index + 1] || '');
+          });
+        } catch {
+          sendJsonResponse(res, 400, { error: 'Invalid URL-encoded route parameter' });
+          return true;
+        }
 
         const rc: RequestContext = {
           req,

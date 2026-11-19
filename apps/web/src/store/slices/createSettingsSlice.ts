@@ -1,5 +1,10 @@
 import type { StateCreator } from 'zustand';
-import type { ThinkingDepth, WorkflowPluginMetadata } from '@harni/types';
+import {
+  normalizeAgentMode,
+  type LLMProviderType,
+  type ThinkingDepth,
+  type WorkflowPluginMetadata,
+} from '@harni/types';
 import type { AgentStoreState, SettingsSlice } from '../types.js';
 import {
   apiFetch,
@@ -12,13 +17,14 @@ import {
   syncSettingsToDB,
 } from '../utils.js';
 
-const savedProvider = (localStorage.getItem('harni_web_provider') as any) || 'cline';
+const savedProvider =
+  (localStorage.getItem('harni_web_provider') as LLMProviderType | null) || 'cline';
 const savedModel =
   localStorage.getItem('harni_web_model') ||
   localStorage.getItem(`harni_web_model_${savedProvider}`) ||
   PROVIDER_DEFAULT_MODELS[savedProvider as keyof typeof PROVIDER_DEFAULT_MODELS] ||
   '';
-const savedMode = (localStorage.getItem('harni_web_mode') as any) || 'code';
+const savedMode = normalizeAgentMode(localStorage.getItem('harni_web_mode'));
 const initialSessionsData = loadSavedSessions(savedMode, 'folder_default', savedProvider, savedModel);
 const initialProviderBaseUrls = loadSavedProviderBaseUrls();
 

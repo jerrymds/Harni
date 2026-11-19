@@ -1,5 +1,5 @@
-import React, { useState, memo } from 'react';
-import ReactMarkdown from 'react-markdown';
+import React, { useState, useRef, useEffect, memo } from 'react';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   AlertTriangle,
@@ -22,6 +22,9 @@ import type { ChatMessage } from '@harni/types';
 import { ThinkingAccordion } from './ThinkingAccordion.js';
 import { ToolAccordion } from './ToolAccordion.js';
 import { useAgentStore } from '../../store/useAgentStore.js';
+import { safeUrlTransform } from '../../utils/url.js';
+
+export { safeUrlTransform };
 
 export function isFileLink(href: string): boolean {
   if (!href || href.startsWith('#')) return false;
@@ -57,15 +60,17 @@ export function cleanFilePath(href: string): string {
   return p;
 }
 
-export function safeUrlTransform(url: string): string {
-  if (!url) return '';
-  if (/^javascript:/i.test(url.trim())) return '';
-  return url;
-}
-
-export const MarkdownCode: React.FC<any> = memo(({ className, children, ...props }) => {
+export const MarkdownCode: Components['code'] = memo(({ className, children, ...props }) => {
   const match = /language-(\w+)/.exec(className || '');
   const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
+
   const codeContent =
     typeof children === 'string'
       ? children
@@ -89,7 +94,8 @@ export const MarkdownCode: React.FC<any> = memo(({ className, children, ...props
             onClick={() => {
               navigator.clipboard.writeText(codeContent.replace(/\n$/, ''));
               setCopied(true);
-              setTimeout(() => setCopied(false), 1500);
+              if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+              copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
             }}
             className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg text-[10.5px] font-sans text-ag-textSecondary hover:text-ag-textPrimary hover:bg-ag-panel transition-all cursor-pointer border border-transparent hover:border-ag-border shadow-xs"
             title="複製程式碼"
@@ -126,13 +132,22 @@ export const MarkdownCode: React.FC<any> = memo(({ className, children, ...props
 
 export const CopyMessageButton: React.FC<{ content: string }> = memo(({ content }) => {
   const [copied, setCopied] = useState(false);
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    };
+  }, []);
+
   return (
     <button
       type="button"
       onClick={() => {
         navigator.clipboard.writeText(content);
         setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
+        if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+        copyTimerRef.current = setTimeout(() => setCopied(false), 1500);
       }}
       className="flex items-center space-x-1 text-[10.5px] text-ag-textMuted hover:text-ag-textPrimary transition-colors cursor-pointer px-1.5 py-0.5 rounded-md hover:bg-ag-sidebar/60 border border-transparent hover:border-ag-border"
       title="複製此回答內容"
@@ -152,24 +167,24 @@ export const CopyMessageButton: React.FC<{ content: string }> = memo(({ content 
   );
 });
 
-const markdownComponents = {
-  pre: ({ children }: any) => <>{children}</>,
+const markdownComponents: Components = {
+  pre: ({ children }) => <>{children}</>,
   code: MarkdownCode,
-  table: ({ children }: any) => (
+  table: ({ children }) => (
     <div className="overflow-x-auto my-3 rounded-xl border border-ag-border shadow-xs select-text">
       <table className="min-w-full text-xs divide-y divide-ag-border select-text">{children}</table>
     </div>
   ),
-  thead: ({ children }: any) => (
+  thead: ({ children }) => (
     <thead className="bg-ag-sidebar font-semibold text-ag-textPrimary select-text">{children}</thead>
   ),
-  th: ({ children }: any) => (
+  th: ({ children }) => (
     <th className="px-3 py-2 text-left border-r last:border-r-0 border-ag-border select-text">{children}</th>
   ),
-  td: ({ children }: any) => (
+  td: ({ children }) => (
     <td className="px-3 py-2 border-t border-r last:border-r-0 border-ag-border text-ag-textPrimary select-text">{children}</td>
   ),
-  a: ({ href, children }: any) => {
+  a: ({ href, children }) => {
     if (!href) {
       return <>{children}</>;
     }
@@ -205,17 +220,17 @@ const markdownComponents = {
       </a>
     );
   },
-  ul: ({ children }: any) => (
+  ul: ({ children }) => (
     <ul className="list-disc pl-5 my-2 space-y-1 text-ag-textPrimary select-text">{children}</ul>
   ),
-  ol: ({ children }: any) => (
+  ol: ({ children }) => (
     <ol className="list-decimal pl-5 my-2 space-y-1 text-ag-textPrimary select-text">{children}</ol>
   ),
-  li: ({ children }: any) => <li className="leading-relaxed select-text">{children}</li>,
-  p: ({ children }: any) => (
+  li: ({ children }) => <li className="leading-relaxed select-text">{children}</li>,
+  p: ({ children }) => (
     <p className="my-2 leading-relaxed text-ag-textPrimary select-text">{children}</p>
   ),
-  blockquote: ({ children }: any) => (
+  blockquote: ({ children }) => (
     <blockquote className="border-l-4 border-ag-primary bg-ag-primaryLight px-4 py-2.5 my-3 rounded-r-xl text-ag-textSecondary italic select-text">
       {children}
     </blockquote>

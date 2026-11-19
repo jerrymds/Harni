@@ -17,13 +17,14 @@ describe('SystemPromptBuilder', () => {
     expect(prompt).toContain('read_file');
   });
 
-  it('handles architect mode and empty custom instructions', () => {
+  it('handles ask mode as read-only and omits planning execution workflow', () => {
     const prompt = SystemPromptBuilder.build({
       workspaceRoot: '/test',
-      mode: 'architect',
+      mode: 'ask',
     });
 
-    expect(prompt).toContain('CURRENT MODE: ARCHITECT');
+    expect(prompt).toContain('CURRENT MODE: ASK (READ-ONLY)');
+    expect(prompt).not.toContain('==== PLANNING MODE & IMPLEMENTATION PLAN WORKFLOW ====');
     expect(prompt).toBeDefined();
   });
 

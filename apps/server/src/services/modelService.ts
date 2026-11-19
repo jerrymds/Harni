@@ -6,6 +6,63 @@ export interface FetchModelsOptions {
   baseURL?: string;
 }
 
+interface RawOpenAIModelItem {
+  id?: string;
+  name?: string;
+  display_name?: string;
+  description?: string;
+  owned_by?: string;
+  context_window?: number;
+  max_context_length?: number;
+  context_length?: number;
+  max_tokens?: number;
+  max_completion_tokens?: number;
+  pricing?: {
+    input?: number | string;
+    prompt?: number | string;
+    output?: number | string;
+    completion?: number | string;
+  };
+  top_provider?: {
+    context_length?: number;
+    max_completion_tokens?: number;
+  };
+}
+
+interface RawOpenAIModelsPayload {
+  data?: RawOpenAIModelItem[];
+  models?: RawOpenAIModelItem[];
+}
+
+interface RawGoogleGeminiModelItem {
+  name?: string;
+  displayName?: string;
+  description?: string;
+  supportedGenerationMethods?: string[];
+  inputTokenLimit?: number;
+  outputTokenLimit?: number;
+}
+
+interface RawGoogleGeminiModelsPayload {
+  models?: RawGoogleGeminiModelItem[];
+}
+
+interface RawAnthropicModelItem {
+  id: string;
+  display_name?: string;
+  created_at?: string;
+}
+
+interface RawOllamaModelItem {
+  name?: string;
+  model?: string;
+  size?: number;
+}
+
+function getErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 export const ANTIGRAVITY_OFFICIAL_MODELS: ModelInfo[] = [
   {
     id: 'gemini-3.8-flash',
@@ -171,7 +228,7 @@ export class ModelService {
             signal: AbortSignal.timeout(3000),
           });
           if (res.ok) {
-            const data = (await res.json()) as any;
+            const data = (await res.json()) as { models?: ModelInfo[] };
             if (Array.isArray(data.models) && data.models.length > 0) {
               return this.mergeAntigravityModels(data.models, ANTIGRAVITY_OFFICIAL_MODELS);
             }
@@ -188,14 +245,14 @@ export class ModelService {
               { signal: AbortSignal.timeout(4000) },
             );
             if (googleRes.ok) {
-              const googleData = (await googleRes.json()) as any;
+              const googleData = (await googleRes.json()) as RawGoogleGeminiModelsPayload;
               const liveModels = this.parseGoogleGeminiModelsResponse(googleData);
               if (liveModels.length > 0) {
                 return this.mergeAntigravityModels(liveModels, ANTIGRAVITY_OFFICIAL_MODELS);
               }
             }
-          } catch (err: any) {
-            console.info(`[ModelService] Live Google models discovery: ${err.message}`);
+          } catch (err: unknown) {
+            console.info(`[ModelService] Live Google models discovery: ${getErrorMessage(err)}`);
           }
         }
 
@@ -228,7 +285,7 @@ export class ModelService {
           });
 
           if (res.ok) {
-            const json = (await res.json()) as any;
+            const json = (await res.json()) as RawOpenAIModelsPayload | RawOpenAIModelItem[];
             apiModels = this.parseOpenAIModelsResponse(json);
           }
         } catch (err) {
@@ -275,9 +332,9 @@ export class ModelService {
           });
 
           if (res.ok) {
-            const data = (await res.json()) as any;
-            const items = data.data || [];
-            return items.map((m: any) => ({
+            const data = (await res.json()) as { data?: RawAnthropicModelItem[] };
+            const items = Array.isArray(data.data) ? data.data : [];
+            return items.map((m) => ({
               id: m.id,
               name: m.display_name || m.id,
               description: m.created_at
@@ -285,8 +342,8 @@ export class ModelService {
                 : undefined,
             }));
           }
-        } catch (err: any) {
-          console.info(`[ModelService] Anthropic /models query timed out or failed: ${err.message}`);
+        } catch (err: unknown) {
+          console.info(`[ModelService] Anthropic /models query timed out or failed: ${getErrorMessage(err)}`);
         }
         return [];
       }
@@ -307,7 +364,7 @@ export class ModelService {
             signal: AbortSignal.timeout(2500),
           });
           if (v1Res.ok) {
-            const json = (await v1Res.json()) as any;
+            const json = (await v1Res.json()) as RawOpenAIModelsPayload | RawOpenAIModelItem[];
             const parsed = this.parseOpenAIModelsResponse(json);
             if (parsed.length > 0) return parsed;
           }
@@ -318,15 +375,20 @@ export class ModelService {
             signal: AbortSignal.timeout(2500),
           });
           if (res.ok) {
-            const data = (await res.json()) as any;
-            const items = data.models || [];
-            return items.map((m: any) => ({
-              id: m.name || m.model,
-              name: m.name || m.model,
-              description: m.size
-                ? `Size: ${(m.size / (1024 * 1024 * 1024)).toFixed(1)} GB`
-                : undefined,
-            }));
+            const data = (await res.json()) as { models?: RawOllamaModelItem[] };
+            const items = Array.isArray(data.models) ? data.models : [];
+            return items
+              .filter((m) => Boolean(m.name || m.model))
+              .map((m) => {
+                const id = m.name || m.model || '';
+                return {
+                  id,
+                  name: id,
+                  description: m.size
+                    ? `Size: ${(m.size / (1024 * 1024 * 1024)).toFixed(1)} GB`
+                    : undefined,
+                };
+              });
           }
         } catch {}
         return [];
@@ -370,16 +432,17 @@ export class ModelService {
           return fallbackModels;
         }
 
-        const json = (await res.json()) as any;
+        const json = (await res.json()) as RawOpenAIModelsPayload | RawOpenAIModelItem[];
         const models = this.parseOpenAIModelsResponse(json);
         if (models.length > 0) return models;
         return fallbackModels;
-      } catch (fetchErr: any) {
-        console.info(`[ModelService] Unable to auto-discover /models from ${rawUrl} (${fetchErr.name || 'Timeout'}: ${fetchErr.message}). Manual Model ID input remains active.`);
+      } catch (fetchErr: unknown) {
+        const errName = fetchErr instanceof Error ? fetchErr.name : 'Timeout';
+        console.info(`[ModelService] Unable to auto-discover /models from ${rawUrl} (${errName}: ${getErrorMessage(fetchErr)}). Manual Model ID input remains active.`);
         return fallbackModels;
       }
-    } catch (err: any) {
-      console.info(`[ModelService] Failed to query /models for ${provider}: ${err.message}`);
+    } catch (err: unknown) {
+      console.info(`[ModelService] Failed to query /models for ${provider}: ${getErrorMessage(err)}`);
     }
 
     return [];
@@ -388,8 +451,10 @@ export class ModelService {
   /**
    * Helper to parse OpenAI-standard { object: 'list', data: [...] } structure
    */
-  private static parseOpenAIModelsResponse(json: any): ModelInfo[] {
-    const list = Array.isArray(json)
+  private static parseOpenAIModelsResponse(
+    json: RawOpenAIModelsPayload | RawOpenAIModelItem[] | null | undefined,
+  ): ModelInfo[] {
+    const list: RawOpenAIModelItem[] = Array.isArray(json)
       ? json
       : Array.isArray(json?.data)
         ? json.data
@@ -398,10 +463,12 @@ export class ModelService {
           : [];
 
     return list
-      .filter((item: any) => item && (item.id || item.name))
-      .map((item: any) => {
-        const id = item.id || item.name;
-        const name = item.display_name || item.name || item.id;
+      .filter((item): item is RawOpenAIModelItem & { id?: string; name?: string } =>
+        Boolean(item && (item.id || item.name)),
+      )
+      .map((item) => {
+        const id = item.id || item.name || '';
+        const name = item.display_name || item.name || item.id || '';
         let description: string | undefined = item.description;
 
         if (!description) {
@@ -432,16 +499,18 @@ export class ModelService {
   /**
    * Helper to parse Google Gemini /models response
    */
-  private static parseGoogleGeminiModelsResponse(json: any): ModelInfo[] {
+  private static parseGoogleGeminiModelsResponse(
+    json: RawGoogleGeminiModelsPayload | null | undefined,
+  ): ModelInfo[] {
     const list = Array.isArray(json?.models) ? json.models : [];
     return list
-      .filter((m: any) => {
+      .filter((m): m is RawGoogleGeminiModelItem & { name: string } => {
         if (!m || !m.name) return false;
         const id = m.name.replace(/^models\//, '');
         const methods = m.supportedGenerationMethods || [];
         return methods.includes('generateContent') || id.startsWith('gemini');
       })
-      .map((m: any) => {
+      .map((m) => {
         const id = m.name.replace(/^models\//, '');
         return {
           id,

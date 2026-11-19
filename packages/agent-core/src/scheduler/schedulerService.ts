@@ -1,21 +1,7 @@
 import { EventEmitter } from 'node:events';
+import type { ScheduleInfo } from '@harni/types';
 
-export type ScheduleKind = 'timer' | 'cron';
-
-export interface ScheduleInfo {
-  id: string;
-  sessionId: string;
-  kind: ScheduleKind;
-  prompt: string;
-  createdAt: number;
-  nextRunAt?: number;
-  durationSeconds?: number;
-  cronExpression?: string;
-  timerCondition?: string;
-  maxIterations?: number;
-  iterations: number;
-  isDaemon: boolean;
-}
+export type { ScheduleInfo, ScheduleKind } from '@harni/types';
 
 export interface CreateTimerParams {
   sessionId: string;
@@ -130,31 +116,46 @@ export function parseCronExpression(expr: string): ParsedCron {
   return { minutes, hours, daysOfMonth, months, daysOfWeek };
 }
 
+const MAX_DAYS_IN_MONTH = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
 export function getNextCronRunAt(parsed: ParsedCron, afterMs: number): number {
+  const minDom = Math.min(...parsed.daysOfMonth);
+  const hasReachableDay = Array.from(parsed.months).some(
+    (m) => minDom <= MAX_DAYS_IN_MONTH[m - 1],
+  );
+  if (!hasReachableDay) {
+    throw new Error('Impossible cron expression: day-of-month never occurs in specified month(s)');
+  }
+
   const date = new Date(afterMs);
   date.setSeconds(0, 0);
   date.setMinutes(date.getMinutes() + 1);
 
-  // Search up to 4 years (~2,103,840 minutes) to find next matching minute
-  const maxIterations = 366 * 24 * 60 * 4;
-  for (let i = 0; i < maxIterations; i++) {
+  const deadlineMs = afterMs + 366 * 4 * 24 * 60 * 60 * 1000;
+  while (date.getTime() <= deadlineMs) {
     const month = date.getMonth() + 1;
     const dom = date.getDate();
     const dow = date.getDay();
-    const hour = date.getHours();
-    const minute = date.getMinutes();
 
-    if (
-      parsed.months.has(month) &&
-      parsed.daysOfMonth.has(dom) &&
-      parsed.daysOfWeek.has(dow) &&
-      parsed.hours.has(hour) &&
-      parsed.minutes.has(minute)
-    ) {
-      return date.getTime();
+    if (!parsed.months.has(month) || !parsed.daysOfMonth.has(dom) || !parsed.daysOfWeek.has(dow)) {
+      date.setDate(date.getDate() + 1);
+      date.setHours(0, 0, 0, 0);
+      continue;
     }
 
-    date.setMinutes(date.getMinutes() + 1);
+    const hour = date.getHours();
+    if (!parsed.hours.has(hour)) {
+      date.setHours(hour + 1, 0, 0, 0);
+      continue;
+    }
+
+    const minute = date.getMinutes();
+    if (!parsed.minutes.has(minute)) {
+      date.setMinutes(minute + 1);
+      continue;
+    }
+
+    return date.getTime();
   }
 
   throw new Error('Could not find next cron occurrence within 4 years');
@@ -297,9 +298,16 @@ export class SchedulerService extends EventEmitter {
     return result;
   }
 
-  public cancelSchedule(scheduleId: string, reason = 'Cancelled'): boolean {
+  public cancelSchedule(
+    scheduleId: string,
+    reason = 'Cancelled',
+    expectedSessionId?: string,
+  ): boolean {
     const entry = this.entries.get(scheduleId);
     if (!entry) return false;
+    if (expectedSessionId && entry.sessionId !== expectedSessionId) {
+      return false;
+    }
 
     if (entry.timerHandle) {
       clearTimeout(entry.timerHandle);

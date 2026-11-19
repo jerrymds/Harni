@@ -279,21 +279,47 @@ export class SwarmTool extends BaseTool<SwarmToolParams> {
       }
     }
 
+    const MAX_SWARM_BATCH = 20;
     const workers: Array<{ workerName: string; prompt: string }> = [];
     if (params.tasks && params.tasks.length > 0) {
+      if (params.tasks.length > MAX_SWARM_BATCH) {
+        return {
+          toolCallId: '',
+          isError: true,
+          output: `Too many tasks (${params.tasks.length}); maximum allowed per batch is ${MAX_SWARM_BATCH}.`,
+        };
+      }
       params.tasks.forEach((slice, idx) => {
         workers.push({
           workerName: `${baseName}-${idx + 1}`,
           prompt: `${brief}\n\n[Assigned Slice ${idx + 1}/${params.tasks!.length}]:\n${slice}`,
         });
       });
-    } else if (params.n && params.n > 1) {
+    } else if (params.n !== undefined) {
+      if (!Number.isFinite(params.n) || params.n < 1) {
+        return {
+          toolCallId: '',
+          isError: true,
+          output: `Parameter "n" must be a positive number, got ${params.n}.`,
+        };
+      }
       const count = Math.floor(params.n);
-      for (let i = 1; i <= count; i++) {
-        workers.push({
-          workerName: `${baseName}-${i}`,
-          prompt: `${brief}\n\n[Worker Copy ${i}/${count}]`,
-        });
+      if (count > MAX_SWARM_BATCH) {
+        return {
+          toolCallId: '',
+          isError: true,
+          output: `Requested worker count (${count}) exceeds maximum allowed per batch (${MAX_SWARM_BATCH}).`,
+        };
+      }
+      if (count > 1) {
+        for (let i = 1; i <= count; i++) {
+          workers.push({
+            workerName: `${baseName}-${i}`,
+            prompt: `${brief}\n\n[Worker Copy ${i}/${count}]`,
+          });
+        }
+      } else {
+        workers.push({ workerName: baseName, prompt: brief });
       }
     } else {
       workers.push({ workerName: baseName, prompt: brief });
@@ -350,18 +376,27 @@ export class SwarmTool extends BaseTool<SwarmToolParams> {
     }));
 
     const results = await context.subagentManager.spawnSubagents(spawnParams);
+    const failedIndex = results.findIndex((res) => !res || res.id.startsWith('failed_'));
+    if (failedIndex !== -1) {
+      const failedWorker = workers[failedIndex];
+      const failedRes = results[failedIndex];
+      for (const res of results) {
+        if (res && !res.id.startsWith('failed_')) {
+          context.subagentManager.manageSubagents('kill', [res.id], sessionId);
+        }
+      }
+      return {
+        toolCallId: '',
+        isError: true,
+        output: `Failed to spawn swarm worker '${failedWorker.workerName}': ${failedRes?.error || failedRes?.result || 'Unknown error'}`,
+      };
+    }
+
     const registered: Array<{ name: string; subagentId: string; status: string }> = [];
 
     for (let i = 0; i < workers.length; i++) {
       const w = workers[i];
-      const res = results[i];
-      if (!res || res.id.startsWith('failed_')) {
-        return {
-          toolCallId: '',
-          isError: true,
-          output: `Failed to spawn swarm worker '${w.workerName}': ${res?.error || res?.result || 'Unknown error'}`,
-        };
-      }
+      const res = results[i]!;
       board.registerMember(sessionId, {
         name: w.workerName,
         subagentId: res.id,

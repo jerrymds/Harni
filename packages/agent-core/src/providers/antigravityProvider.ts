@@ -130,6 +130,14 @@ export class AntigravityProvider extends BaseLLMProvider {
           allow_tools: false,
         };
 
+    const acpSyncRule =
+      '\n\n[ACP_SYNC_EXECUTION_RULE] When using run_command for builds/tests/checks, set WaitMsBeforeAsync to 10000 to wait synchronously whenever possible. Never finish your turn after launching a command or build check with an interim status message; inspect background task output via manage_task and complete all requested edits before ending your turn.';
+    const baseSystemPrompt = systemPrompt || '';
+    const effectiveSystemPrompt =
+      isAcp && !baseSystemPrompt.includes('[ACP_SYNC_EXECUTION_RULE]')
+        ? `${baseSystemPrompt}${acpSyncRule}`
+        : systemPrompt;
+
     const payload = {
       messages: messages.map((m) => ({
         role: m.role,
@@ -140,7 +148,7 @@ export class AntigravityProvider extends BaseLLMProvider {
         toolCallId: m.toolCallId,
         toolResult: m.toolResult,
       })),
-      systemPrompt,
+      systemPrompt: effectiveSystemPrompt,
       tools: tools.map((t) => ({
         name: t.name,
         description: t.description,
@@ -533,5 +541,89 @@ export class AntigravityProvider extends BaseLLMProvider {
     }
 
     return results;
+  }
+
+  private static normalizeAcpToolTitle(title: string): string {
+    return title
+      .replace(/^File\s+/i, '')
+      .replace(/\\/g, '/')
+      .replace(/^\/+/, '')
+      .trim();
+  }
+
+  private static findMatchingAcpToolIndex(activeTools: string[], title: string): number {
+    const exactIdx = activeTools.lastIndexOf(title);
+    if (exactIdx !== -1) {
+      return exactIdx;
+    }
+
+    const normTarget = AntigravityProvider.normalizeAcpToolTitle(title);
+    if (normTarget) {
+      for (let i = activeTools.length - 1; i >= 0; i--) {
+        const normActive = AntigravityProvider.normalizeAcpToolTitle(activeTools[i]);
+        if (
+          normActive &&
+          (normActive === normTarget ||
+            normTarget.endsWith(`/${normActive}`) ||
+            normActive.endsWith(`/${normTarget}`))
+        ) {
+          return i;
+        }
+      }
+    }
+
+    if (title.trim().toLowerCase() === 'tool' && activeTools.length > 0) {
+      return activeTools.length - 1;
+    }
+
+    return -1;
+  }
+
+  /**
+   * 從 thinking 文字中解析並追蹤 ACP 工具的狀態更新，回傳結束時仍處於執行中（in_progress / pending / running）的工具名稱清單。
+   */
+  public static extractIncompleteAcpTools(thinking?: string): string[] {
+    if (!thinking) {
+      return [];
+    }
+
+    const activeTools: string[] = [];
+    const pattern = /\[ACP Tool\s+([a-zA-Z0-9_-]+):\s*([^\]]+)\]/g;
+    let match: RegExpExecArray | null;
+
+    while ((match = pattern.exec(thinking)) !== null) {
+      const status = match[1].trim().toLowerCase();
+      const title = match[2].trim();
+
+      if (status === 'in_progress' || status === 'pending' || status === 'running') {
+        if (!activeTools.includes(title)) {
+          activeTools.push(title);
+        }
+      } else if (
+        status === 'completed' ||
+        status === 'failed' ||
+        status === 'error' ||
+        status === 'cancelled' ||
+        status === 'canceled'
+      ) {
+        const idx = AntigravityProvider.findMatchingAcpToolIndex(activeTools, title);
+        if (idx !== -1) {
+          activeTools.splice(idx, 1);
+        }
+      } else if (status === 'auto_resumed') {
+        const parts = title
+          .split(',')
+          .map((part) => part.trim())
+          .filter((part) => part.length > 0);
+        for (const part of parts) {
+          const idx = AntigravityProvider.findMatchingAcpToolIndex(activeTools, part);
+          if (idx !== -1) {
+            activeTools.splice(idx, 1);
+          }
+        }
+      }
+    }
+
+    return activeTools;
   }
 }

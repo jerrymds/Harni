@@ -1,11 +1,12 @@
 import type { WebSocket } from 'ws';
+import * as fsSync from 'node:fs';
 import * as path from 'node:path';
-import * as fs from 'node:fs/promises';
-import { type AgentCoreEngine, composeAntigravityModel } from '@harni/agent-core';
-import type {
-  ClientMessage,
-  ServerMessage,
-  ServerToClientEvents,
+import { type AgentCoreEngine, composeAntigravityModel, isPathWithinRoot } from '@harni/agent-core';
+import {
+  normalizeAgentMode,
+  type ClientMessage,
+  type ServerMessage,
+  type ServerToClientEvents,
 } from '@harni/types';
 import type { FSService } from '../services/fsService.js';
 import type { PTYService } from '../services/ptyService.js';
@@ -13,6 +14,10 @@ import type { DBService } from '../services/dbService.js';
 import { AntigravityBridgeManager } from '../services/antigravityBridgeManager.js';
 import { AnthropicAuthPage } from '../services/anthropicAuthPage.js';
 import { OpenAIAuthPage } from '../services/openaiAuthPage.js';
+import {
+  getAllowedWorkspaceRoots as collectAllowedWorkspaceRoots,
+  resolveAuthorizedWorkspaceRoot,
+} from '../utils/workspaceSecurity.js';
 
 export class WebSocketHandler {
   private clients = new Set<WebSocket>();
@@ -21,6 +26,8 @@ export class WebSocketHandler {
   private sessionSubscribers = new Map<string, Set<WebSocket>>();
   private clientSubscriptions = new Map<WebSocket, Set<string>>();
   private defaultWorkspaceRoot: string;
+  private approvedWorkspaceRoots: Set<string>;
+  private configuredAllowedRoots: string[];
   private engine: AgentCoreEngine;
   private fsService: FSService;
   private ptyService: PTYService;
@@ -32,6 +39,10 @@ export class WebSocketHandler {
     ptyService: PTYService,
     dbService?: DBService,
     defaultWorkspaceRoot?: string,
+    options?: {
+      approvedWorkspaceRoots?: Set<string>;
+      configuredAllowedRoots?: string[];
+    },
   ) {
     this.engine = engine;
     this.fsService = fsService;
@@ -40,6 +51,8 @@ export class WebSocketHandler {
     this.defaultWorkspaceRoot = path.resolve(
       defaultWorkspaceRoot || fsService.getWorkspaceRoot() || process.cwd(),
     );
+    this.approvedWorkspaceRoots = options?.approvedWorkspaceRoots ?? new Set<string>();
+    this.configuredAllowedRoots = (options?.configuredAllowedRoots ?? []).map((r) => path.resolve(r));
 
     this.bindEngineEvents();
     this.bindServiceEvents();
@@ -141,6 +154,32 @@ export class WebSocketHandler {
     return this.clientWorkspaceRoots.get(ws) || this.defaultWorkspaceRoot;
   }
 
+  private getAllowedWorkspaceRoots(ws: WebSocket): string[] {
+    return collectAllowedWorkspaceRoots({
+      defaultWorkspaceRoot: this.defaultWorkspaceRoot,
+      dbService: this.dbService,
+      engine: this.engine,
+      approvedWorkspaceRoots: this.approvedWorkspaceRoots,
+      configuredAllowedRoots: this.configuredAllowedRoots,
+      extraRoots: [this.getClientWorkspaceRoot(ws), ...this.sessionWorkspaceRoots.values()],
+    });
+  }
+
+  private resolveValidatedWorkspaceRoot(ws: WebSocket, requestedRoot?: string): string {
+    const clientRoot = this.getClientWorkspaceRoot(ws);
+    if (!requestedRoot) {
+      return clientRoot;
+    }
+    const resolved = path.resolve(requestedRoot);
+    const allowedRoots = this.getAllowedWorkspaceRoots(ws);
+    if (!allowedRoots.some((allowed) => isPathWithinRoot(resolved, allowed))) {
+      throw new Error(
+        `Path traversal denied: workspaceRoot '${requestedRoot}' is outside allowed workspace roots`,
+      );
+    }
+    return resolved;
+  }
+
   private async sendInitialState(ws: WebSocket): Promise<void> {
     const root = this.getClientWorkspaceRoot(ws);
     const info = await this.fsService.getWorkspaceInfo(root);
@@ -168,6 +207,27 @@ export class WebSocketHandler {
           if (sessionTaskState) {
             this.send(ws, 'task:state', sessionTaskState);
           }
+          const swarmBoard = this.engine.getSwarmBoardService?.().getBoardState(sessionId);
+          if (
+            swarmBoard &&
+            (swarmBoard.title || swarmBoard.members.length > 0 || swarmBoard.messages.length > 0)
+          ) {
+            this.send(ws, 'swarm:updated', swarmBoard);
+          }
+          const schedules = this.engine.getSchedulerService?.().listSchedules(sessionId) || [];
+          for (const s of schedules) {
+            this.send(ws, 'schedule:created', {
+              sessionId,
+              scheduleId: s.id,
+              kind: s.kind,
+              prompt: s.prompt,
+              nextRunAt: s.nextRunAt,
+              cronExpression: s.cronExpression,
+              durationSeconds: s.durationSeconds,
+              isDaemon: s.isDaemon,
+              iterations: s.iterations,
+            });
+          }
         }
         break;
       }
@@ -182,19 +242,32 @@ export class WebSocketHandler {
 
       case 'workspace:set': {
         const targetPath = msg.payload.path;
-        const sessionId = ('sessionId' in msg.payload && (msg.payload as any).sessionId) || undefined;
+        const sessionId =
+          'sessionId' in msg.payload && typeof msg.payload.sessionId === 'string'
+            ? msg.payload.sessionId
+            : undefined;
         if (targetPath) {
           try {
-            const resolvedPath = path.resolve(targetPath);
+            const resolvedPath = resolveAuthorizedWorkspaceRoot(targetPath, {
+              defaultWorkspaceRoot: this.defaultWorkspaceRoot,
+              dbService: this.dbService,
+              engine: this.engine,
+              approvedWorkspaceRoots: this.approvedWorkspaceRoots,
+              configuredAllowedRoots: this.configuredAllowedRoots,
+            });
+            if (!fsSync.existsSync(resolvedPath) || !fsSync.statSync(resolvedPath).isDirectory()) {
+              throw new Error(`Workspace directory does not exist: ${targetPath}`);
+            }
+
+            const info = await this.fsService.getWorkspaceInfo(resolvedPath);
+            const tree = await this.fsService.getFileTree(1, resolvedPath);
+
             this.clientWorkspaceRoots.set(ws, resolvedPath);
             if (sessionId) {
               this.sessionWorkspaceRoots.set(sessionId, resolvedPath);
             }
 
-            const info = await this.fsService.getWorkspaceInfo(resolvedPath);
             this.send(ws, 'workspace:info', info);
-
-            const tree = await this.fsService.getFileTree(1, resolvedPath);
             this.send(ws, 'workspace:tree', { tree });
           } catch (err: unknown) {
             const errorMsg = err instanceof Error ? err.message : String(err);
@@ -236,16 +309,31 @@ export class WebSocketHandler {
           this.subscribeSession(ws, sessionId);
         }
 
+        let validatedRequestedRoot: string | undefined;
+        if (workspaceRoot) {
+          try {
+            validatedRequestedRoot = this.resolveValidatedWorkspaceRoot(ws, workspaceRoot);
+          } catch (err: unknown) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            this.send(ws, 'error', {
+              code: 'TASK_EXECUTION_ERROR',
+              message: errorMsg,
+              sessionId,
+            });
+            break;
+          }
+        }
+
         const effectiveWorkspaceRoot =
-          (workspaceRoot ? path.resolve(workspaceRoot) : undefined) ||
+          validatedRequestedRoot ||
           (sessionId ? this.sessionWorkspaceRoots.get(sessionId) : undefined) ||
           this.getClientWorkspaceRoot(ws);
 
         if (sessionId && effectiveWorkspaceRoot) {
           this.sessionWorkspaceRoots.set(sessionId, effectiveWorkspaceRoot);
         }
-        if (workspaceRoot) {
-          this.clientWorkspaceRoots.set(ws, path.resolve(workspaceRoot));
+        if (validatedRequestedRoot) {
+          this.clientWorkspaceRoots.set(ws, validatedRequestedRoot);
         }
 
         if (provider === 'antigravity') {
@@ -326,7 +414,7 @@ export class WebSocketHandler {
           .startTask(prompt, {
             sessionId,
             attachments,
-            mode,
+            mode: normalizeAgentMode(mode),
             provider,
             model: effectiveModel,
             apiKey: effectiveApiKey,
@@ -418,19 +506,29 @@ export class WebSocketHandler {
       }
 
       case 'checkpoint:prune': {
-        const workspace = msg.payload && 'workspaceRoot' in msg.payload && msg.payload.workspaceRoot
-          ? msg.payload.workspaceRoot
-          : this.getClientWorkspaceRoot(ws);
-        const maxRetained = msg.payload && 'maxRetained' in msg.payload ? msg.payload.maxRetained : undefined;
-        this.engine
-          .pruneCheckpointsAndBranches(workspace, maxRetained)
-          .catch((err: unknown) => {
-            const errorMsg = err instanceof Error ? err.message : String(err);
-            this.send(ws, 'error', {
-              code: 'CHECKPOINT_PRUNE_ERROR',
-              message: errorMsg,
+        try {
+          const requestedRoot =
+            msg.payload && 'workspaceRoot' in msg.payload && msg.payload.workspaceRoot
+              ? msg.payload.workspaceRoot
+              : undefined;
+          const workspace = this.resolveValidatedWorkspaceRoot(ws, requestedRoot);
+          const maxRetained = msg.payload && 'maxRetained' in msg.payload ? msg.payload.maxRetained : undefined;
+          this.engine
+            .pruneCheckpointsAndBranches(workspace, maxRetained)
+            .catch((err: unknown) => {
+              const errorMsg = err instanceof Error ? err.message : String(err);
+              this.send(ws, 'error', {
+                code: 'CHECKPOINT_PRUNE_ERROR',
+                message: errorMsg,
+              });
             });
+        } catch (err: unknown) {
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          this.send(ws, 'error', {
+            code: 'CHECKPOINT_PRUNE_ERROR',
+            message: errorMsg,
           });
+        }
         break;
       }
 
@@ -508,16 +606,26 @@ export class WebSocketHandler {
       }
 
       case 'terminal:create': {
-        const terminalId = ('terminalId' in msg.payload && msg.payload.terminalId) || `term_${Date.now()}`;
-        const root = ('workspaceRoot' in msg.payload && msg.payload.workspaceRoot)
-          ? path.resolve(msg.payload.workspaceRoot)
-          : this.getClientWorkspaceRoot(ws);
-        this.ptyService.createSession(terminalId, {
-          workspaceRoot: root,
-          cols: 'cols' in msg.payload ? msg.payload.cols : undefined,
-          rows: 'rows' in msg.payload ? msg.payload.rows : undefined,
-          shell: 'shell' in msg.payload ? msg.payload.shell : undefined,
-        });
+        try {
+          const terminalId = ('terminalId' in msg.payload && msg.payload.terminalId) || `term_${Date.now()}`;
+          const requestedRoot =
+            'workspaceRoot' in msg.payload && msg.payload.workspaceRoot
+              ? msg.payload.workspaceRoot
+              : undefined;
+          const root = this.resolveValidatedWorkspaceRoot(ws, requestedRoot);
+          this.ptyService.createSession(terminalId, {
+            workspaceRoot: root,
+            cols: 'cols' in msg.payload ? msg.payload.cols : undefined,
+            rows: 'rows' in msg.payload ? msg.payload.rows : undefined,
+            shell: 'shell' in msg.payload ? msg.payload.shell : undefined,
+          });
+        } catch (err: unknown) {
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          this.send(ws, 'error', {
+            code: 'TERMINAL_CREATE_ERROR',
+            message: errorMsg,
+          });
+        }
         break;
       }
 
@@ -530,18 +638,28 @@ export class WebSocketHandler {
 
       case 'file:open': {
         try {
-          const root = msg.payload.workspaceRoot
-            ? path.resolve(msg.payload.workspaceRoot)
-            : this.getClientWorkspaceRoot(ws);
-          let content: string;
-          try {
-            content = await this.fsService.readFile(msg.payload.path, root);
-          } catch (readErr: unknown) {
-            if (path.isAbsolute(msg.payload.path)) {
-              content = await fs.readFile(msg.payload.path, 'utf-8');
-            } else {
-              throw readErr;
+          const primaryRoot = this.resolveValidatedWorkspaceRoot(ws, msg.payload.workspaceRoot);
+          const candidateRoots = [
+            primaryRoot,
+            ...this.getAllowedWorkspaceRoots(ws).filter((r) => r !== primaryRoot),
+          ];
+
+          let content: string | undefined;
+          let lastErr: unknown;
+          for (const candidateRoot of candidateRoots) {
+            try {
+              content = await this.fsService.readFile(msg.payload.path, candidateRoot);
+              break;
+            } catch (readErr: unknown) {
+              lastErr = readErr;
+              // Relative paths only resolve against primaryRoot; only retry other trusted roots for absolute paths (e.g. worktrees)
+              if (!path.isAbsolute(msg.payload.path)) {
+                throw readErr;
+              }
             }
+          }
+          if (content === undefined) {
+            throw lastErr;
           }
           this.send(ws, 'file:content', { path: msg.payload.path, content });
         } catch (err: unknown) {
@@ -556,9 +674,7 @@ export class WebSocketHandler {
 
       case 'file:save': {
         try {
-          const root = msg.payload.workspaceRoot
-            ? path.resolve(msg.payload.workspaceRoot)
-            : this.getClientWorkspaceRoot(ws);
+          const root = this.resolveValidatedWorkspaceRoot(ws, msg.payload.workspaceRoot);
           await this.fsService.writeFile(msg.payload.path, msg.payload.content, root);
         } catch (err: unknown) {
           const errorMsg = err instanceof Error ? err.message : String(err);
@@ -571,28 +687,38 @@ export class WebSocketHandler {
       }
 
       case 'workspace:refresh': {
-        const root =
-          'workspaceRoot' in msg.payload && msg.payload.workspaceRoot
-            ? path.resolve(msg.payload.workspaceRoot)
-            : this.getClientWorkspaceRoot(ws);
+        try {
+          const requestedRoot =
+            'workspaceRoot' in msg.payload && msg.payload.workspaceRoot
+              ? msg.payload.workspaceRoot
+              : undefined;
+          const root = this.resolveValidatedWorkspaceRoot(ws, requestedRoot);
 
-        if ('workspaceRoot' in msg.payload && msg.payload.workspaceRoot) {
-          this.clientWorkspaceRoots.set(ws, root);
+          if (requestedRoot) {
+            this.clientWorkspaceRoots.set(ws, root);
+          }
+
+          const info = await this.fsService.getWorkspaceInfo(root);
+          this.send(ws, 'workspace:info', info);
+          const tree = await this.fsService.getFileTree(1, root);
+          this.send(ws, 'workspace:tree', { tree });
+        } catch (err: unknown) {
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          this.send(ws, 'error', {
+            code: 'WORKSPACE_REFRESH_ERROR',
+            message: errorMsg,
+          });
         }
-
-        const info = await this.fsService.getWorkspaceInfo(root);
-        this.send(ws, 'workspace:info', info);
-        const tree = await this.fsService.getFileTree(1, root);
-        this.send(ws, 'workspace:tree', { tree });
         break;
       }
 
       case 'workspace:getDir': {
         try {
-          const root =
+          const requestedRoot =
             msg.payload && 'workspaceRoot' in msg.payload && msg.payload.workspaceRoot
-              ? path.resolve(msg.payload.workspaceRoot)
-              : this.getClientWorkspaceRoot(ws);
+              ? msg.payload.workspaceRoot
+              : undefined;
+          const root = this.resolveValidatedWorkspaceRoot(ws, requestedRoot);
           const targetRelPath = (msg.payload && 'path' in msg.payload && msg.payload.path) || '';
           const children = await this.fsService.getDirectoryNodes(targetRelPath, root);
           this.send(ws, 'workspace:dir', { path: targetRelPath, children, workspaceRoot: root });
@@ -696,14 +822,24 @@ export class WebSocketHandler {
       'error',
     ];
 
-    for (const eventName of forwardEvents) {
-      this.engine.on(eventName, (payload: any) => {
-        if (payload && typeof payload === 'object' && payload.sessionId) {
+    const forwardEvent = <K extends keyof ServerToClientEvents>(eventName: K) => {
+      this.engine.on(eventName, (payload: ServerToClientEvents[K]) => {
+        if (
+          payload &&
+          typeof payload === 'object' &&
+          'sessionId' in payload &&
+          typeof payload.sessionId === 'string' &&
+          payload.sessionId
+        ) {
           this.broadcastToSession(payload.sessionId, eventName, payload);
         } else {
           this.broadcast(eventName, payload);
         }
       });
+    };
+
+    for (const eventName of forwardEvents) {
+      forwardEvent(eventName);
     }
   }
 

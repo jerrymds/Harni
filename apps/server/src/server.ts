@@ -10,10 +10,12 @@ import { DBService } from './services/dbService.js';
 import { WebSocketHandler } from './ws/wsHandler.js';
 import {
   extractAuthTokenFromRequest,
+  isAllowedOrigin,
   timingSafeCompare,
   validateHostBindingSecurity,
 } from './utils/security.js';
 import { DEFAULT_MAX_BODY_SIZE } from './utils/http.js';
+import { parseAllowedWorkspaceRootsEnv } from './utils/workspaceSecurity.js';
 import { Router } from './routes/router.js';
 import { sendJsonResponse } from './utils/http.js';
 import { registerHealthRoutes } from './routes/health.js';
@@ -49,6 +51,10 @@ export function createApp(config: ServerConfig = {}): AppInstance {
   const workspaceRoot = path.resolve(
     config.workspaceRoot || process.env.WORKSPACE_ROOT || process.cwd(),
   );
+  const configuredAllowedRoots = (
+    config.allowedWorkspaceRoots ?? parseAllowedWorkspaceRootsEnv(process.env.HARNI_ALLOWED_WORKSPACE_ROOTS)
+  ).map((r) => path.resolve(r));
+  const approvedWorkspaceRoots = new Set<string>();
 
   const fsService = new FSService(workspaceRoot);
   const ptyService = new PTYService({ workspaceRoot });
@@ -114,10 +120,15 @@ export function createApp(config: ServerConfig = {}): AppInstance {
     });
   }
 
-  const wsHandler = new WebSocketHandler(engine, fsService, ptyService, dbService, workspaceRoot);
+  const wsHandler = new WebSocketHandler(engine, fsService, ptyService, dbService, workspaceRoot, {
+    approvedWorkspaceRoots,
+    configuredAllowedRoots,
+  });
 
   const serverContext: ServerContext = {
     workspaceRoot,
+    approvedWorkspaceRoots,
+    configuredAllowedRoots,
     authToken,
     maxBodySize,
     readBodyOpts,
@@ -145,15 +156,22 @@ export function createApp(config: ServerConfig = {}): AppInstance {
     : null;
 
   const server = http.createServer(async (req, res) => {
-    const matched = await router.handle(req, res, serverContext, async () => {
-      if (staticService) {
-        return staticService.handle(req, res);
+    try {
+      const matched = await router.handle(req, res, serverContext, async () => {
+        if (staticService) {
+          return staticService.handle(req, res);
+        }
+        sendJsonResponse(res, 404, { error: 'Not Found' });
+        return true;
+      });
+      if (!matched && !res.headersSent && !res.writableEnded) {
+        sendJsonResponse(res, 404, { error: 'Not Found' });
       }
-      sendJsonResponse(res, 404, { error: 'Not Found' });
-      return true;
-    });
-    if (!matched && !res.headersSent && !res.writableEnded) {
-      sendJsonResponse(res, 404, { error: 'Not Found' });
+    } catch (err: unknown) {
+      console.error('[Server] Unhandled HTTP request error:', err);
+      if (!res.headersSent && !res.writableEnded) {
+        sendJsonResponse(res, 500, { error: 'Internal Server Error' });
+      }
     }
   });
 
@@ -161,11 +179,20 @@ export function createApp(config: ServerConfig = {}): AppInstance {
     server,
     path: '/ws',
     verifyClient: (info, callback) => {
+      const req = info.req;
+      const origin = req.headers.origin;
+      if (origin !== undefined && !isAllowedOrigin(origin, req.headers.host)) {
+        console.warn(
+          `[WS Security] WebSocket connection rejected due to disallowed Origin '${origin}' from ${req.socket.remoteAddress || 'unknown'}`,
+        );
+        callback(false, 403, 'Forbidden: Origin not allowed');
+        return;
+      }
+
       if (!authToken) {
         callback(true);
         return;
       }
-      const req = info.req;
       const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
       const token = extractAuthTokenFromRequest(req, url);
 
@@ -187,7 +214,8 @@ export function createApp(config: ServerConfig = {}): AppInstance {
   const start = async (): Promise<number> => {
     return new Promise((resolve) => {
       server.listen(port, host, () => {
-        const actualPort = (server.address() as any)?.port || port;
+        const addr = server.address();
+        const actualPort = typeof addr === 'object' && addr !== null ? addr.port : port;
         console.log(`⚡ Harni server listening on http://${host}:${actualPort} (WS path: /ws)`);
         console.log(`📁 Workspace Root: ${workspaceRoot}`);
         console.log(`💾 SQLite Database: ${dbService.getPath()}`);

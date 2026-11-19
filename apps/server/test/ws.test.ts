@@ -111,10 +111,11 @@ describe('Server WebSocket Protocol & Agent Flow', () => {
     expect(contentReceived).toBeDefined();
     expect((contentReceived?.payload as any).content).toBe('Created by WebSocket Client');
 
-    // Also verify file:open fallback with an external absolute file outside workspace
+    // Verify file:open denies reading an external absolute file outside allowed workspace roots
     const externalFile = path.resolve(tempDir, '..', `ext_file_${Date.now()}.txt`);
     await fs.writeFile(externalFile, 'External Absolute File Content', 'utf-8');
 
+    const errCountBefore = receivedMessages.filter((m) => m.type === 'error').length;
     ws.send(JSON.stringify({
       type: 'file:open',
       payload: { path: externalFile },
@@ -122,7 +123,7 @@ describe('Server WebSocket Protocol & Agent Flow', () => {
 
     const startExtOpen = Date.now();
     while (Date.now() - startExtOpen < 2000) {
-      if (receivedMessages.some((m) => m.type === 'file:content' && (m.payload as any).path === externalFile)) {
+      if (receivedMessages.filter((m) => m.type === 'error').length > errCountBefore) {
         break;
       }
       await new Promise((r) => setTimeout(r, 20));
@@ -131,8 +132,34 @@ describe('Server WebSocket Protocol & Agent Flow', () => {
     const extContentReceived = receivedMessages.find(
       (m) => m.type === 'file:content' && (m.payload as any).path === externalFile,
     );
-    expect(extContentReceived).toBeDefined();
-    expect((extContentReceived?.payload as any).content).toBe('External Absolute File Content');
+    expect(extContentReceived).toBeUndefined();
+    const readErrReceived = receivedMessages.filter((m) => m.type === 'error').slice(errCountBefore)[0];
+    expect(readErrReceived).toBeDefined();
+    expect((readErrReceived?.payload as any).code).toBe('FILE_READ_ERROR');
+    expect((readErrReceived?.payload as any).message).toMatch(/Path traversal denied/);
+
+    // Verify workspace:set rejects unauthorized external directories outside allowed workspace roots
+    const externalDir = path.resolve(tempDir, '..', `ext_ws_${Date.now()}`);
+    await fs.mkdir(externalDir, { recursive: true });
+    const wsErrBefore = receivedMessages.filter((m) => m.type === 'error').length;
+    ws.send(JSON.stringify({
+      type: 'workspace:set',
+      payload: { path: externalDir },
+    }));
+
+    const startWsSet = Date.now();
+    while (Date.now() - startWsSet < 2000) {
+      if (receivedMessages.filter((m) => m.type === 'error').length > wsErrBefore) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
+
+    const wsSetErr = receivedMessages.filter((m) => m.type === 'error').slice(wsErrBefore)[0];
+    expect(wsSetErr).toBeDefined();
+    expect((wsSetErr?.payload as any).code).toBe('WORKSPACE_SET_ERROR');
+    expect((wsSetErr?.payload as any).message).toMatch(/outside allowed workspace roots/i);
+    await fs.rm(externalDir, { recursive: true, force: true }).catch(() => {});
     await fs.unlink(externalFile).catch(() => {});
 
     ws.close();

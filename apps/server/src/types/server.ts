@@ -12,6 +12,7 @@ export interface ServerConfig {
   host?: string;
   authToken?: string;
   workspaceRoot?: string;
+  allowedWorkspaceRoots?: string[];
   defaultProvider?: LLMProviderType;
   defaultModel?: string;
   apiKey?: string;
@@ -41,6 +42,8 @@ export interface AppInstance {
 
 export interface ServerContext {
   workspaceRoot: string;
+  approvedWorkspaceRoots: Set<string>;
+  configuredAllowedRoots: string[];
   authToken?: string;
   maxBodySize: number;
   readBodyOpts: ReadBodyOptions;

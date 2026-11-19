@@ -1,5 +1,7 @@
+import type { ChatMessage, ChatSession, WorkspaceFolder } from '@harni/types';
 import type { Router } from './router.js';
 import { readJsonBody, sendJsonError, sendJsonResponse } from '../utils/http.js';
+import { assertValidFolderPath } from '../utils/workspaceSecurity.js';
 
 export function registerDbRoutes(router: Router): void {
   // --- SQLite Database REST Endpoints ---
@@ -30,10 +32,10 @@ export function registerDbRoutes(router: Router): void {
   // 3. Save/update session(s)
   router.post('/api/db/sessions', async ({ req, res, ctx }) => {
     try {
-      const body = await readJsonBody(req, ctx.readBodyOpts);
+      const body = await readJsonBody<ChatSession | ChatSession[]>(req, ctx.readBodyOpts);
       if (Array.isArray(body)) {
         ctx.dbService.saveSessions(body);
-      } else if (body && body.id) {
+      } else if (body && typeof body === 'object' && 'id' in body && body.id) {
         ctx.dbService.saveSession(body, true);
       }
       sendJsonResponse(res, 200, { success: true });
@@ -46,10 +48,10 @@ export function registerDbRoutes(router: Router): void {
   router.post('/api/db/sessions/:id/messages', async ({ req, res, params, ctx }) => {
     try {
       const sessionId = params.id;
-      const body = await readJsonBody(req, ctx.readBodyOpts);
+      const body = await readJsonBody<ChatMessage | ChatMessage[]>(req, ctx.readBodyOpts);
       if (Array.isArray(body)) {
         ctx.dbService.saveMessages(sessionId, body);
-      } else if (body && body.id) {
+      } else if (body && typeof body === 'object' && 'id' in body && body.id) {
         ctx.dbService.appendMessage(sessionId, body);
       }
       sendJsonResponse(res, 200, { success: true });
@@ -110,10 +112,25 @@ export function registerDbRoutes(router: Router): void {
   // 9. Save folder(s)
   router.post('/api/db/folders', async ({ req, res, ctx }) => {
     try {
-      const body = await readJsonBody(req, ctx.readBodyOpts);
+      const body = await readJsonBody<WorkspaceFolder | WorkspaceFolder[]>(req, ctx.readBodyOpts);
+      const validateFolder = (folder: unknown) => {
+        if (folder && typeof folder === 'object' && 'path' in folder) {
+          const record = folder as { path?: unknown };
+          if (typeof record.path === 'string' && record.path.trim()) {
+            record.path = assertValidFolderPath(record.path.trim(), {
+              defaultWorkspaceRoot: ctx.workspaceRoot,
+              configuredAllowedRoots: ctx.configuredAllowedRoots,
+            });
+          }
+        }
+      };
       if (Array.isArray(body)) {
+        for (const folder of body) {
+          validateFolder(folder);
+        }
         ctx.dbService.saveFolders(body);
-      } else if (body && body.id) {
+      } else if (body && typeof body === 'object' && 'id' in body && body.id) {
+        validateFolder(body);
         ctx.dbService.saveFolder(body);
       }
       sendJsonResponse(res, 200, { success: true });
@@ -145,8 +162,8 @@ export function registerDbRoutes(router: Router): void {
 
   router.post('/api/db/settings', async ({ req, res, ctx }) => {
     try {
-      const body = await readJsonBody(req, ctx.readBodyOpts);
-      if (body && typeof body === 'object') {
+      const body = await readJsonBody<Record<string, string>>(req, ctx.readBodyOpts);
+      if (body && typeof body === 'object' && !Array.isArray(body)) {
         ctx.dbService.saveSettings(body);
 
         // Hot-reload MCP configuration if mcp_enabled or mcp_config changed
@@ -193,7 +210,11 @@ export function registerDbRoutes(router: Router): void {
   // 12. Legacy Data Import (e.g. from localStorage)
   router.post('/api/db/import', async ({ req, res, ctx }) => {
     try {
-      const body = await readJsonBody(req, ctx.readBodyOpts);
+      const body = await readJsonBody<{
+        folders?: WorkspaceFolder[];
+        sessions?: ChatSession[];
+        settings?: Record<string, string>;
+      }>(req, ctx.readBodyOpts);
       const result = ctx.dbService.importLegacyData(body || {});
       sendJsonResponse(res, 200, { success: true, ...result });
     } catch (err: unknown) {

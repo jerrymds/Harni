@@ -103,7 +103,7 @@ export class AutoTestRepairPlugin implements WorkflowPlugin {
   public async onBeforeComplete(
     ctx: WorkflowPluginContext,
   ): Promise<CompletionGateResult> {
-    if (!this.enabled) {
+    if (!this.enabled || ctx.taskState?.mode === 'ask') {
       return { action: 'allow' };
     }
 

@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import { ContextManager } from './context/contextManager.js';
 import { SystemPromptBuilder } from './prompts/systemPrompt.js';
 import { BaseLLMProvider } from './providers/baseProvider.js';
+import { AntigravityProvider } from './providers/antigravityProvider.js';
 import { ProviderFactory } from './providers/providerFactory.js';
 import { ToolRegistry } from './tools/toolRegistry.js';
 import { SkillRegistry } from './skills/skillRegistry.js';
@@ -16,6 +17,7 @@ import { AutoTestRunner } from './testing/autoTestRunner.js';
 import { GitCheckpointService } from './git/gitCheckpointService.js';
 import { ExperienceManager } from './harness/experienceManager.js';
 import { ContrastiveProbeRunner } from './harness/contrastiveProbeRunner.js';
+import { normalizeAgentMode } from '@harni/types';
 import type { ToolExecutionContext } from './tools/baseTool.js';
 import type {
   AgentMode,
@@ -553,6 +555,22 @@ export class AgentCoreEngine extends EventEmitter {
         this.emitEvent('terminal:data', { data, sessionId: sessionTask.sessionId });
       },
       isSubagentsEnabled: () => sessionTask.subagentsEnabled !== false,
+      isMcpToolAllowedReadOnly: (toolName: string) =>
+        this.mcpManager.getTool(toolName)
+          ? this.mcpManager.isToolAllowedForReadOnly(toolName)
+          : true,
+      isReadOnlySubagentType: (typeName: string) => {
+        const def = this.subagentManager.getRegistry().get(typeName);
+        if (!def || def.enableWriteTools !== false) {
+          return false;
+        }
+        const allowed = def.allowedTools?.map((t) => this.toolRegistry.resolveToolName(t)) ?? [];
+        return (
+          !allowed.includes('run_command') &&
+          !allowed.includes('write_file') &&
+          !allowed.includes('edit_file')
+        );
+      },
       getAutoTestConfig: () => sessionTask.autoTestConfig,
     };
   }
@@ -592,6 +610,21 @@ export class AgentCoreEngine extends EventEmitter {
 
   public getSwarmBoardService(): SwarmBoardService {
     return this.swarmBoardService;
+  }
+
+  public getActiveWorktreePaths(): string[] {
+    const paths = new Set<string>();
+    for (const task of this.tasksBySession.values()) {
+      if (task.isWorktree && task.workspaceRoot) {
+        paths.add(path.resolve(task.workspaceRoot));
+      }
+    }
+    for (const inst of this.subagentManager.getAllInstances()) {
+      if (inst.worktreePath) {
+        paths.add(path.resolve(inst.worktreePath));
+      }
+    }
+    return Array.from(paths);
   }
 
   private bindSwarmEvents(): void {
@@ -970,7 +1003,7 @@ export class AgentCoreEngine extends EventEmitter {
       this.autoApprove = options.autoApprove;
     }
 
-    const mode = options.mode ?? (sessionTask?.taskState.mode || 'code');
+    const mode = normalizeAgentMode(options.mode ?? sessionTask?.taskState.mode);
     const providerType = options.provider ?? (sessionTask?.taskState.provider || this.defaultProvider);
     const model = options.model ?? (sessionTask?.taskState.model || this.defaultModel || '');
     const effectiveApiKey = options.apiKey || this.apiKey;
@@ -1224,38 +1257,7 @@ export class AgentCoreEngine extends EventEmitter {
 
     // 3. Main Agent Loop
     sessionTask.lastProvider = provider;
-    sessionTask.isLoopRunning = true;
-    try {
-      await this.runLoop(sessionTask, provider);
-    } catch (err: unknown) {
-      if (sessionTask.abortController?.signal.aborted) {
-        this.setStatus(sessionTask, 'cancelled');
-      } else {
-        const errorMsg = err instanceof Error ? err.message : String(err);
-        this.setStatus(sessionTask, 'error');
-
-        const errorResult = await this.pluginManager.runTaskError(pluginCtx, err);
-        if (errorResult && errorResult.handled && errorResult.customMessage) {
-          sessionTask.contextManager.addMessage(errorResult.customMessage);
-        } else {
-          const errChatMsg: ChatMessage = {
-            id: `msg_err_${Date.now()}`,
-            role: 'assistant',
-            content: `❌ **執行發生錯誤**:\n\n${errorMsg}`,
-            timestamp: Date.now(),
-          };
-          sessionTask.contextManager.addMessage(errChatMsg);
-          this.emitEvent('error', { code: 'TASK_ERROR', message: errorMsg, sessionId, taskId });
-        }
-      }
-    } finally {
-      if (sessionTask.abortController === abortController) {
-        sessionTask.isLoopRunning = false;
-        sessionTask.abortController = null;
-        sessionTask.pendingApproval = null;
-      }
-      this.syncTaskState(sessionTask);
-    }
+    await this.executeSessionLoop(sessionTask, provider, abortController, pluginCtx);
   }
 
   /**
@@ -1268,6 +1270,7 @@ export class AgentCoreEngine extends EventEmitter {
       sessionTask.abortController?.signal,
       provider,
     );
+    let acpIncompleteContinues = 0;
 
     while (
       sessionTask.taskState.currentTurn < sessionTask.taskState.maxTurns &&
@@ -1338,6 +1341,21 @@ export class AgentCoreEngine extends EventEmitter {
         if (this.drainWakeupQueue(sessionTask)) {
           continue;
         }
+        const incompleteAcpTools = AntigravityProvider.extractIncompleteAcpTools(result.thinking);
+        if (incompleteAcpTools.length > 0 && acpIncompleteContinues < 3) {
+          acpIncompleteContinues++;
+          sessionTask.contextManager.addMessage({
+            id: `msg_acp_cont_${Date.now()}`,
+            role: 'user',
+            content: `[SYSTEM_NOTIFICATION] 偵測到 ACP 工具 (${incompleteAcpTools.join(', ')}) 處於 in_progress 狀態但回合提前結束。請確認該指令的執行結果（必要時使用 manage_task 查詢狀態），並繼續完成使用者要求的後續修改步驟，請勿僅停留在進度回報。`,
+            timestamp: Date.now(),
+          });
+          this.syncTaskState(sessionTask);
+          continue;
+        }
+        if (incompleteAcpTools.length === 0) {
+          acpIncompleteContinues = 0;
+        }
         const gateResult = await this.pluginManager.runBeforeComplete(pluginCtx);
 
         if (gateResult.action === 'continue_loop') {
@@ -1382,11 +1400,16 @@ export class AgentCoreEngine extends EventEmitter {
         const requiresApproval =
           (mcpTool?.requiresApproval ?? tool?.requiresApproval ?? false) && !this.autoApprove;
 
+        const mcpToolAllowedReadOnly = mcpTool
+          ? this.mcpManager.isToolAllowedForReadOnly(toolCall.name)
+          : true;
+
         const toolCtx: ToolCallMiddlewareContext = {
           toolCall,
           canonicalToolName,
           requiresApproval,
           isMcpTool: Boolean(mcpTool),
+          mcpToolAllowedReadOnly,
           metadata: {},
         };
 
@@ -1816,13 +1839,24 @@ export class AgentCoreEngine extends EventEmitter {
     const abortController = new AbortController();
 
     sessionTask.abortController = abortController;
-    sessionTask.isLoopRunning = true;
     sessionTask.taskState.currentTurn = 0;
     this.setStatus(sessionTask, 'thinking');
     this.emitEvent('task:status', { status: 'thinking', taskId, sessionId });
 
     const pluginCtx = this.createPluginContext(sessionTask, abortController.signal, provider);
+    await this.executeSessionLoop(sessionTask, provider, abortController, pluginCtx);
+  }
 
+  private async executeSessionLoop(
+    sessionTask: SessionTask,
+    provider: BaseLLMProvider,
+    abortController: AbortController,
+    pluginCtx: WorkflowPluginContext,
+  ): Promise<void> {
+    const { sessionId } = sessionTask;
+    const taskId = sessionTask.taskState.id;
+
+    sessionTask.isLoopRunning = true;
     try {
       await this.runLoop(sessionTask, provider);
     } catch (err: unknown) {
@@ -1851,8 +1885,16 @@ export class AgentCoreEngine extends EventEmitter {
         sessionTask.isLoopRunning = false;
         sessionTask.abortController = null;
         sessionTask.pendingApproval = null;
+        sessionTask.pendingQuestion = null;
       }
       this.syncTaskState(sessionTask);
+      if (
+        !sessionTask.isLoopRunning &&
+        sessionTask.wakeupQueue.length > 0 &&
+        (sessionTask.taskState.status === 'completed' || sessionTask.taskState.status === 'idle')
+      ) {
+        void this.wakeSession(sessionTask);
+      }
     }
   }
 

@@ -59,7 +59,7 @@ export class SystemPromptBuilder {
     }
 
     // 6. Planning Mode & Implementation Plan Section
-    if (!isSubagent) {
+    if (!isSubagent && mode !== 'ask') {
       sections.push(this.getPlanningModeSection());
     }
 
@@ -162,19 +162,16 @@ export class SystemPromptBuilder {
 
   private static getModeInstructions(mode: AgentMode): string {
     switch (mode) {
-      case 'architect':
-        return `==== CURRENT MODE: ARCHITECT ====
-Focus on high-level system design, architecture review, technical research, and planning. Avoid making unnecessary file changes without first establishing a clear architectural strategy.`;
       case 'ask':
-        return `==== CURRENT MODE: ASK ====
-Focus on answering questions, explaining code logic, and providing insights without modifying files or running destructive commands.`;
-      case 'test':
-        return `==== CURRENT MODE: TEST ====
-Focus on writing comprehensive unit/integration tests, identifying edge cases, executing test suites, and fixing broken test cases.`;
+        return `==== CURRENT MODE: ASK (READ-ONLY) ====
+Focus on answering questions, explaining code logic, and analyzing architecture strictly in read-only mode. Do NOT modify files, run shell commands, or spawn mutating subagents.`;
+      case 'custom':
+        return `==== CURRENT MODE: CUSTOM ====
+Follow your specialized role instructions and delegated tool scope precisely.`;
       case 'code':
       default:
         return `==== CURRENT MODE: CODE ====
-Focus on full-stack implementation, bug fixing, refactoring, and feature development directly within the workspace.`;
+Focus on full-stack implementation, bug fixing, refactoring, testing, and feature development directly within the workspace.`;
     }
   }
 

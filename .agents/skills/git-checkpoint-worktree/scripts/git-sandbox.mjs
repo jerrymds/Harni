@@ -1,16 +1,21 @@
 #!/usr/bin/env node
+import { realpathSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
+const STATE_SCHEMA_VERSION = 1;
 const DEPENDENCY_DIRS = ['node_modules', '.venv', 'venv'];
 const EXCLUDE_PATTERNS = ['.harni-worktrees', '.harni-worktrees/**', '.harni/snapshots'];
 const DEFAULT_CREATE_MAX_CHECKPOINTS = 10;
 const DEFAULT_PRUNE_MAX_CHECKPOINTS = 5;
 const DEFAULT_WORKTREE_TIMEOUT_MS = 180000;
+const DEFAULT_LOCK_TIMEOUT_MS = 15000;
+const DEFAULT_LOCK_STALE_MS = 30000;
 
 const USAGE_TEXT = `git-sandbox.mjs - Cross-agent Git Checkpoint & Worktree Isolation CLI
 
@@ -33,13 +38,13 @@ Commands:
   checkpoint list [--session <id>]
       List stored checkpoints sorted by creation time descending.
 
-  checkpoint rollback [--id <ckptId>] [--session <id>]
+  checkpoint rollback [--id <ckptId>] [--session <id>] [--dry-run]
       Restore workspace to a checkpoint (or latest for session/workspace).
 
   checkpoint prune [--max <n>]
       Keep newest <n> checkpoints (default: 5) and delete older refs/records.
 
-  worktree create --session <id> [--base <ref>] [--timeout <ms>]
+  worktree create --session <id> [--base <ref>] [--timeout <ms>] [--replace]
       Create an isolated Git worktree with linked node_modules/.venv and copied .env.
 
   worktree list
@@ -56,7 +61,68 @@ Commands:
 `;
 
 function sanitizeSessionId(sessionId) {
-  return String(sessionId).replace(/[^a-zA-Z0-9_-]/g, '_');
+  const original = String(sessionId);
+  if (/^[a-zA-Z0-9_-]{1,48}$/.test(original)) {
+    return original;
+  }
+  const slug = original.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 48) || 'session';
+  const hash = createHash('sha256').update(original).digest('hex').slice(0, 8);
+  return `${slug}-${hash}`;
+}
+
+function canonicalizePath(targetPath) {
+  const resolved = path.resolve(targetPath);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function isSameWorkspacePath(a, b) {
+  if (!a || !b) return false;
+  const resolvedA = canonicalizePath(a);
+  const resolvedB = canonicalizePath(b);
+  if (process.platform === 'win32') {
+    return resolvedA.toLowerCase() === resolvedB.toLowerCase();
+  }
+  return resolvedA === resolvedB;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isProcessAlive(pid) {
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    if (err && err.code === 'EPERM') {
+      return true;
+    }
+    return false;
+  }
+}
+
+function isSensitiveFilePath(relPath) {
+  const base = path.posix.basename(relPath.replace(/\\/g, '/')).toLowerCase();
+  if (base === '.env') return true;
+  if (
+    base.startsWith('.env.') &&
+    base !== '.env.example' &&
+    base !== '.env.sample' &&
+    base !== '.env.template'
+  ) {
+    return true;
+  }
+  if (base.endsWith('.pem') || base.endsWith('.key')) return true;
+  if (base === 'credentials.json') return true;
+  if (base.startsWith('secrets.')) return true;
+  return false;
 }
 
 function unquoteGitPath(rawPath) {
@@ -115,7 +181,7 @@ async function detectGitRepo(workspaceRoot) {
   if (commonRes.exitCode !== 0 || !commonRes.stdout) {
     return { isGitRepo: false, gitCommonDir: null };
   }
-  const gitCommonDir = path.resolve(workspaceRoot, commonRes.stdout);
+  const gitCommonDir = canonicalizePath(path.resolve(workspaceRoot, commonRes.stdout));
   return { isGitRepo: true, gitCommonDir };
 }
 
@@ -123,30 +189,229 @@ function getStateFilePath(gitCommonDir) {
   return path.join(gitCommonDir, 'harni-sandbox-state.json');
 }
 
+async function acquireLockFile(
+  lockPath,
+  timeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
+  staleMs = DEFAULT_LOCK_STALE_MS,
+  label = 'sandbox state lock',
+) {
+  await fs.mkdir(path.dirname(lockPath), { recursive: true });
+  const deadline = Date.now() + timeoutMs;
+
+  while (true) {
+    try {
+      const handle = await fs.open(lockPath, 'wx');
+      try {
+        const payload = JSON.stringify({ pid: process.pid, createdAt: Date.now() });
+        await handle.writeFile(payload, 'utf-8');
+      } finally {
+        await handle.close();
+      }
+      return async () => {
+        try {
+          await fs.unlink(lockPath);
+        } catch (err) {
+          if (err?.code !== 'ENOENT') {
+            throw err;
+          }
+        }
+      };
+    } catch (err) {
+      if (err?.code !== 'EEXIST') {
+        throw err;
+      }
+
+      let shouldRetryImmediately = false;
+      try {
+        const stat = await fs.stat(lockPath);
+        const raw = await fs.readFile(lockPath, 'utf-8');
+        const trimmed = raw.trim();
+        const ageFromMtime = Date.now() - stat.mtimeMs;
+
+        if (!trimmed) {
+          if (ageFromMtime >= 1000 && ageFromMtime > staleMs) {
+            shouldRetryImmediately = true;
+          }
+        } else {
+          let parsedPid;
+          let parsedCreatedAt;
+          try {
+            const parsed = JSON.parse(trimmed);
+            if (parsed && typeof parsed === 'object') {
+              parsedPid = parsed.pid;
+              parsedCreatedAt = parsed.createdAt;
+            }
+          } catch {
+            // Corrupt lock file payload; fall back to mtime staleness check
+          }
+
+          const pidDead =
+            typeof parsedPid === 'number' && Number.isInteger(parsedPid) && parsedPid > 0
+              ? !isProcessAlive(parsedPid)
+              : false;
+          const age = Date.now() - (typeof parsedCreatedAt === 'number' ? parsedCreatedAt : stat.mtimeMs);
+          if (pidDead || age > staleMs) {
+            shouldRetryImmediately = true;
+          }
+        }
+
+        if (shouldRetryImmediately) {
+          try {
+            await fs.unlink(lockPath);
+          } catch (unlinkErr) {
+            if (unlinkErr?.code !== 'ENOENT') {
+              throw unlinkErr;
+            }
+          }
+          continue;
+        }
+      } catch (inspectErr) {
+        if (inspectErr?.code === 'ENOENT') {
+          continue;
+        }
+        throw inspectErr;
+      }
+
+      if (Date.now() >= deadline) {
+        throw new Error(`Timed out waiting for ${label}`);
+      }
+      const jitterMs = 20 + Math.floor(Math.random() * 101);
+      await sleep(Math.min(jitterMs, Math.max(1, deadline - Date.now())));
+    }
+  }
+}
+
+async function acquireStateLock(
+  gitCommonDir,
+  timeoutMs = DEFAULT_LOCK_TIMEOUT_MS,
+  staleMs = DEFAULT_LOCK_STALE_MS,
+) {
+  return acquireLockFile(
+    `${getStateFilePath(gitCommonDir)}.lock`,
+    timeoutMs,
+    staleMs,
+    'sandbox state lock',
+  );
+}
+
 async function loadState(gitCommonDir) {
   const statePath = getStateFilePath(gitCommonDir);
-  try {
-    const raw = await fs.readFile(statePath, 'utf-8');
-    const parsed = JSON.parse(raw);
-    return {
-      checkpoints:
-        parsed && typeof parsed.checkpoints === 'object' && parsed.checkpoints !== null
-          ? parsed.checkpoints
-          : {},
-      activeWorktrees:
-        parsed && typeof parsed.activeWorktrees === 'object' && parsed.activeWorktrees !== null
-          ? parsed.activeWorktrees
-          : {},
-    };
-  } catch {
-    return { checkpoints: {}, activeWorktrees: {} };
+  let raw;
+  const maxRetries = 5;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      raw = await fs.readFile(statePath, 'utf-8');
+      break;
+    } catch (err) {
+      if (err?.code === 'ENOENT') {
+        return { version: STATE_SCHEMA_VERSION, checkpoints: {}, activeWorktrees: {} };
+      }
+      const retryable =
+        err?.code === 'EPERM' || err?.code === 'EACCES' || err?.code === 'EBUSY';
+      if (retryable && attempt < maxRetries) {
+        await sleep(20 + Math.floor(Math.random() * 21));
+        continue;
+      }
+      throw new Error(`Failed to read sandbox state file (${statePath}): ${err?.message || String(err)}`);
+    }
   }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `Corrupted sandbox state file (${statePath}): ${err?.message || String(err)}`,
+    );
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`Invalid sandbox state structure in ${statePath}`);
+  }
+
+  return {
+    version: parsed.version || STATE_SCHEMA_VERSION,
+    checkpoints:
+      parsed.checkpoints && typeof parsed.checkpoints === 'object' && !Array.isArray(parsed.checkpoints)
+        ? parsed.checkpoints
+        : {},
+    activeWorktrees:
+      parsed.activeWorktrees &&
+      typeof parsed.activeWorktrees === 'object' &&
+      !Array.isArray(parsed.activeWorktrees)
+        ? parsed.activeWorktrees
+        : {},
+  };
 }
 
 async function saveState(gitCommonDir, state) {
   const statePath = getStateFilePath(gitCommonDir);
   await fs.mkdir(path.dirname(statePath), { recursive: true });
-  await fs.writeFile(statePath, JSON.stringify(state, null, 2), 'utf-8');
+  const stateToWrite = {
+    version: STATE_SCHEMA_VERSION,
+    checkpoints: state.checkpoints || {},
+    activeWorktrees: state.activeWorktrees || {},
+  };
+  const tmpPath = `${statePath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
+
+  try {
+    await fs.writeFile(tmpPath, JSON.stringify(stateToWrite, null, 2), 'utf-8');
+
+    const maxRetries = 5;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        await fs.rename(tmpPath, statePath);
+        return;
+      } catch (err) {
+        const retryable =
+          err?.code === 'EPERM' || err?.code === 'EACCES' || err?.code === 'EBUSY';
+        if (retryable && attempt < maxRetries) {
+          await sleep(20 + Math.floor(Math.random() * 31));
+          continue;
+        }
+        throw err;
+      }
+    }
+  } catch (err) {
+    try {
+      await fs.unlink(tmpPath);
+    } catch {
+      // Ignore temp file cleanup errors
+    }
+    throw err;
+  }
+}
+
+async function withStateLock(gitCommonDir, fn) {
+  const releaseLock = await acquireStateLock(gitCommonDir);
+  try {
+    const state = await loadState(gitCommonDir);
+    const result = await fn(state);
+    await saveState(gitCommonDir, state);
+    return result;
+  } finally {
+    await releaseLock();
+  }
+}
+
+async function getRepositoryIdentity(workspaceRoot, gitCommonDir) {
+  const rootsRes = await runGit(['rev-list', '--max-parents=0', 'HEAD'], workspaceRoot, 10000);
+  const roots =
+    rootsRes.exitCode === 0 && rootsRes.stdout
+      ? rootsRes.stdout
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .sort()
+          .join(',')
+      : '';
+  const resolvedCommonDir = canonicalizePath(gitCommonDir);
+  const normalizedCommonDir =
+    process.platform === 'win32' ? resolvedCommonDir.toLowerCase() : resolvedCommonDir;
+  return createHash('sha256')
+    .update(`${normalizedCommonDir}\n${roots}`)
+    .digest('hex')
+    .slice(0, 16);
 }
 
 async function ensureGitExclude(gitCommonDir) {
@@ -270,26 +535,94 @@ async function linkWorktreeDependencies(sourceRoot, worktreePath) {
     }
   }
 
-  const sourceEnv = path.join(sourceRoot, '.env');
-  const targetEnv = path.join(worktreePath, '.env');
-  try {
-    await fs.copyFile(sourceEnv, targetEnv);
-  } catch {
-    // .env does not exist
+  const envIgnoredRes = await runGit(['check-ignore', '-q', '.env'], sourceRoot, 10000);
+  if (envIgnoredRes.exitCode === 0) {
+    const sourceEnv = path.join(sourceRoot, '.env');
+    const targetEnv = path.join(worktreePath, '.env');
+    try {
+      await fs.copyFile(sourceEnv, targetEnv);
+    } catch {
+      // .env does not exist
+    }
   }
 }
 
 async function removeWorktreeDirAndBranch(workspaceRoot, worktreePath, branch) {
   await unlinkWorktreeDependencies(worktreePath);
-  await runGit(['worktree', 'remove', '--force', worktreePath], workspaceRoot, 60000);
-  try {
-    await fs.rm(worktreePath, { recursive: true, force: true });
-  } catch {
-    // Ignore cleanup errors
+
+  const listRes = await runGit(['worktree', 'list', '--porcelain'], workspaceRoot, 15000);
+  let isRegistered = false;
+  if (listRes.exitCode === 0 && listRes.stdout) {
+    for (const line of listRes.stdout.split(/\r?\n/)) {
+      if (line.startsWith('worktree ')) {
+        const wtEntryPath = line.slice('worktree '.length).trim();
+        if (isSameWorkspacePath(wtEntryPath, worktreePath)) {
+          isRegistered = true;
+          break;
+        }
+      }
+    }
   }
-  await runGit(['worktree', 'prune'], workspaceRoot, 15000);
+
+  if (isRegistered) {
+    const removeRes = await runGit(
+      ['worktree', 'remove', '--force', worktreePath],
+      workspaceRoot,
+      60000,
+    );
+    if (removeRes.exitCode !== 0) {
+      throw new Error(
+        `Failed to remove Git worktree (${worktreePath}): ${removeRes.stderr || removeRes.stdout}`,
+      );
+    }
+  }
+
+  let stillExists = false;
+  try {
+    await fs.lstat(worktreePath);
+    stillExists = true;
+  } catch (err) {
+    if (err?.code !== 'ENOENT') {
+      throw err;
+    }
+  }
+
+  if (stillExists) {
+    await unlinkWorktreeDependencies(worktreePath);
+    await fs.rm(worktreePath, { recursive: true, force: true });
+    let verifyExists = false;
+    try {
+      await fs.lstat(worktreePath);
+      verifyExists = true;
+    } catch (err) {
+      if (err?.code !== 'ENOENT') {
+        throw err;
+      }
+    }
+    if (verifyExists) {
+      throw new Error(`Worktree directory still exists after removal: ${worktreePath}`);
+    }
+  }
+
+  const pruneRes = await runGit(['worktree', 'prune'], workspaceRoot, 15000);
+  if (pruneRes.exitCode !== 0) {
+    throw new Error(`git worktree prune failed: ${pruneRes.stderr || pruneRes.stdout}`);
+  }
+
   if (branch) {
-    await runGit(['branch', '-D', branch], workspaceRoot, 15000);
+    const refCheck = await runGit(
+      ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`],
+      workspaceRoot,
+      10000,
+    );
+    if (refCheck.exitCode === 0) {
+      const delBranchRes = await runGit(['branch', '-D', branch], workspaceRoot, 15000);
+      if (delBranchRes.exitCode !== 0) {
+        throw new Error(
+          `Failed to delete branch ${branch}: ${delBranchRes.stderr || delBranchRes.stdout}`,
+        );
+      }
+    }
   }
 }
 
@@ -303,7 +636,16 @@ async function pruneCheckpointsInState(workspaceRoot, state, maxRetained) {
   let deletedCount = 0;
 
   for (const ckpt of stale) {
-    await runGit(['update-ref', '-d', `refs/harni/checkpoints/${ckpt.id}`], workspaceRoot, 15000);
+    const refName = `refs/harni/checkpoints/${ckpt.id}`;
+    const checkRes = await runGit(['show-ref', '--verify', '--quiet', refName], workspaceRoot, 10000);
+    if (checkRes.exitCode === 0) {
+      const delRes = await runGit(['update-ref', '-d', refName], workspaceRoot, 15000);
+      if (delRes.exitCode !== 0) {
+        throw new Error(
+          `Failed to delete checkpoint ref ${refName}: ${delRes.stderr || delRes.stdout}`,
+        );
+      }
+    }
     delete state.checkpoints[ckpt.id];
     deletedCount++;
   }
@@ -347,6 +689,34 @@ async function handleStatus(workspaceRoot) {
   };
 }
 
+function resolveWorkspaceChildPath(workspaceRoot, relPath) {
+  const resolvedWorkspace = path.resolve(workspaceRoot);
+  const absPath = path.resolve(resolvedWorkspace, relPath);
+  const relative = path.relative(resolvedWorkspace, absPath);
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new Error(`Refusing to access path outside workspace: ${relPath}`);
+  }
+  return absPath;
+}
+
+function assertCheckpointBelongsToWorkspace(checkpoint, resolvedRoot, gitCommonDir, repositoryId) {
+  if (checkpoint.gitCommonDir && !isSameWorkspacePath(checkpoint.gitCommonDir, gitCommonDir)) {
+    throw new Error(
+      `Checkpoint ${checkpoint.id} belongs to a different Git repository (${checkpoint.gitCommonDir}).`,
+    );
+  }
+  if (checkpoint.repositoryId && repositoryId && checkpoint.repositoryId !== repositoryId) {
+    throw new Error(
+      `Checkpoint ${checkpoint.id} belongs to a different repository identity (${checkpoint.repositoryId} !== ${repositoryId}).`,
+    );
+  }
+  if (!checkpoint.isWorktree && !isSameWorkspacePath(checkpoint.workspaceRoot, resolvedRoot)) {
+    throw new Error(
+      `Checkpoint ${checkpoint.id} belongs to a different workspace (${checkpoint.workspaceRoot} !== ${resolvedRoot}).`,
+    );
+  }
+}
+
 async function handleCheckpointCreate(workspaceRoot, opts) {
   const { isGitRepo, gitCommonDir } = await detectGitRepo(workspaceRoot);
   if (!isGitRepo || !gitCommonDir) {
@@ -362,54 +732,71 @@ async function handleCheckpointCreate(workspaceRoot, opts) {
     throw new Error('Cannot create checkpoint: repository has no commits (HEAD does not exist).');
   }
 
-  const state = await loadState(gitCommonDir);
-  let ts = Date.now();
-  while (state.checkpoints[`ckpt_${safeSessionId}_${ts}`]) {
-    ts += 1;
-  }
-  const id = `ckpt_${safeSessionId}_${ts}`;
-
-  const status = await getStatus(workspaceRoot);
-  const dirtyFilesBefore = status.files;
-  const untrackedFilesBefore = status.untracked;
-  let stashRef;
-
-  if (status.isDirty) {
-    const stashRes = await runGit(
-      ['stash', 'create', `harni-checkpoint-${id}`],
-      workspaceRoot,
-      60000,
-    );
-    if (stashRes.exitCode === 0 && stashRes.stdout) {
-      stashRef = stashRes.stdout;
-      await runGit(['update-ref', `refs/harni/checkpoints/${id}`, stashRef], workspaceRoot, 15000);
-    }
-  }
-
-  if (!stashRef) {
-    await runGit(['update-ref', `refs/harni/checkpoints/${id}`, headCommit], workspaceRoot, 15000);
-  }
-
-  const checkpoint = {
-    id,
-    sessionId,
-    createdAt: ts,
-    description: opts.desc || `Checkpoint (${new Date(ts).toISOString()})`,
-    commitHash: headCommit,
-    isWorktree: false,
-    ...(stashRef ? { stashRef } : {}),
-    workspaceRoot,
-    dirtyFilesBefore,
-    untrackedFilesBefore,
-    filesCount: dirtyFilesBefore.length + untrackedFilesBefore.length,
-  };
-
-  state.checkpoints[id] = checkpoint;
-
   const maxRetained =
     opts.max !== undefined ? parseIntFlag(opts.max, '--max', 0) : DEFAULT_CREATE_MAX_CHECKPOINTS;
-  await pruneCheckpointsInState(workspaceRoot, state, maxRetained);
-  await saveState(gitCommonDir, state);
+  const resolvedRoot = path.resolve(workspaceRoot);
+  const resolvedCommonDir = canonicalizePath(gitCommonDir);
+  const repositoryId = await getRepositoryIdentity(workspaceRoot, gitCommonDir);
+
+  const checkpoint = await withStateLock(gitCommonDir, async (state) => {
+    let ts = Date.now();
+    while (state.checkpoints[`ckpt_${safeSessionId}_${ts}`]) {
+      ts += 1;
+    }
+    const id = `ckpt_${safeSessionId}_${ts}`;
+
+    const status = await getStatus(workspaceRoot);
+    const dirtyFilesBefore = status.files;
+    const untrackedFilesBefore = status.untracked;
+    let stashRef;
+
+    if (dirtyFilesBefore.length > 0) {
+      const stashRes = await runGit(
+        ['stash', 'create', `harni-checkpoint-${id}`],
+        workspaceRoot,
+        60000,
+      );
+      if (stashRes.exitCode !== 0 || !stashRes.stdout) {
+        throw new Error(
+          `Failed to capture dirty tracked state with git stash create: ${stashRes.stderr || stashRes.stdout || 'empty stash ref'}`,
+        );
+      }
+      stashRef = stashRes.stdout;
+    }
+
+    const targetRef = stashRef || headCommit;
+    const refRes = await runGit(
+      ['update-ref', `refs/harni/checkpoints/${id}`, targetRef],
+      workspaceRoot,
+      15000,
+    );
+    if (refRes.exitCode !== 0) {
+      throw new Error(
+        `Failed to store checkpoint ref refs/harni/checkpoints/${id}: ${refRes.stderr || refRes.stdout}`,
+      );
+    }
+
+    const record = {
+      schemaVersion: STATE_SCHEMA_VERSION,
+      id,
+      sessionId,
+      createdAt: ts,
+      description: opts.desc || `Checkpoint (${new Date(ts).toISOString()})`,
+      commitHash: headCommit,
+      isWorktree: false,
+      ...(stashRef ? { stashRef } : {}),
+      workspaceRoot: resolvedRoot,
+      gitCommonDir: resolvedCommonDir,
+      repositoryId,
+      dirtyFilesBefore,
+      untrackedFilesBefore,
+      filesCount: dirtyFilesBefore.length + untrackedFilesBefore.length,
+    };
+
+    state.checkpoints[id] = record;
+    await pruneCheckpointsInState(workspaceRoot, state, maxRetained);
+    return record;
+  });
 
   return { success: true, checkpoint };
 }
@@ -438,25 +825,34 @@ async function handleCheckpointRollback(workspaceRoot, opts) {
     throw new Error(`Directory is not a Git repository: ${workspaceRoot}`);
   }
 
+  const resolvedRoot = path.resolve(workspaceRoot);
+  const repositoryId = await getRepositoryIdentity(workspaceRoot, gitCommonDir);
   const state = await loadState(gitCommonDir);
   let checkpoint;
 
   if (opts.id) {
     checkpoint = state.checkpoints[opts.id];
   } else {
-    let candidates = Object.values(state.checkpoints);
+    let candidates = Object.values(state.checkpoints).filter((c) => {
+      if (c.isWorktree) {
+        return isSameWorkspacePath(c.gitCommonDir || gitCommonDir, gitCommonDir);
+      }
+      const rootMatches = isSameWorkspacePath(c.workspaceRoot, resolvedRoot);
+      const commonMatches = c.gitCommonDir
+        ? isSameWorkspacePath(c.gitCommonDir, gitCommonDir)
+        : true;
+      const repoMatches =
+        c.repositoryId && repositoryId ? c.repositoryId === repositoryId : true;
+      return rootMatches && commonMatches && repoMatches;
+    });
+
     if (opts.session) {
       const safeSession = sanitizeSessionId(opts.session);
       candidates = candidates.filter(
         (c) => c.sessionId === opts.session || sanitizeSessionId(c.sessionId) === safeSession,
       );
-    } else {
-      const resolvedRoot = path.resolve(workspaceRoot);
-      const rootMatches = candidates.filter((c) => path.resolve(c.workspaceRoot) === resolvedRoot);
-      if (rootMatches.length > 0) {
-        candidates = rootMatches;
-      }
     }
+
     candidates.sort((a, b) => b.createdAt - a.createdAt);
     checkpoint = candidates[0];
   }
@@ -465,19 +861,96 @@ async function handleCheckpointRollback(workspaceRoot, opts) {
     throw new Error(`Checkpoint not found: ${opts.id || opts.session || 'latest'}`);
   }
 
+  assertCheckpointBelongsToWorkspace(checkpoint, resolvedRoot, gitCommonDir, repositoryId);
+
+  if (opts.dryRun) {
+    if (checkpoint.isWorktree && checkpoint.worktreePath) {
+      return {
+        success: true,
+        dryRun: true,
+        checkpointId: checkpoint.id,
+        wouldResetTo: checkpoint.commitHash,
+        wouldDiscardWorktree: checkpoint.worktreePath,
+        trackedFilesToRestore: [],
+        untrackedFilesToDelete: [],
+        untrackedFilesToRestore: [],
+        untrackedFilesPreserved: [],
+      };
+    }
+
+    const currentStatus = await getStatus(workspaceRoot);
+    const currentHead = await getHeadCommit(workspaceRoot);
+    let diffFiles = [];
+    if (currentHead && checkpoint.commitHash && currentHead !== checkpoint.commitHash) {
+      const diffRes = await runGit(
+        ['-c', 'core.quotepath=false', 'diff', '--name-only', currentHead, checkpoint.commitHash],
+        workspaceRoot,
+        30000,
+        { trimStdout: false },
+      );
+      if (diffRes.exitCode === 0 && diffRes.stdout) {
+        diffFiles = diffRes.stdout
+          .split(/\r?\n/)
+          .map((line) => unquoteGitPath(line))
+          .filter(Boolean);
+      }
+    }
+
+    const trackedFilesToRestore = [
+      ...new Set([...currentStatus.files, ...(checkpoint.dirtyFilesBefore || []), ...diffFiles]),
+    ].sort();
+    const untrackedBeforeSet = new Set(checkpoint.untrackedFilesBefore || []);
+    const untrackedFilesToDelete = currentStatus.untracked.filter(
+      (f) => !untrackedBeforeSet.has(f),
+    );
+    const untrackedFilesPreserved = currentStatus.untracked.filter((f) =>
+      untrackedBeforeSet.has(f),
+    );
+
+    return {
+      success: true,
+      dryRun: true,
+      checkpointId: checkpoint.id,
+      wouldResetTo: checkpoint.commitHash,
+      trackedFilesToRestore,
+      untrackedFilesToDelete,
+      untrackedFilesToRestore: [],
+      untrackedFilesPreserved,
+    };
+  }
+
   if (checkpoint.isWorktree && checkpoint.worktreePath) {
     const safeSession = sanitizeSessionId(checkpoint.sessionId);
     const branch = checkpoint.worktreeBranch || `harni/task-${safeSession}`;
     await removeWorktreeDirAndBranch(workspaceRoot, checkpoint.worktreePath, branch);
-    delete state.activeWorktrees[checkpoint.sessionId];
-    delete state.activeWorktrees[safeSession];
-    delete state.checkpoints[checkpoint.id];
-    await saveState(gitCommonDir, state);
+    await withStateLock(gitCommonDir, (lockedState) => {
+      delete lockedState.activeWorktrees[checkpoint.sessionId];
+      delete lockedState.activeWorktrees[safeSession];
+      delete lockedState.checkpoints[checkpoint.id];
+    });
     return {
       success: true,
       checkpointId: checkpoint.id,
       message: `Discarded isolated worktree and restored main workspace (${checkpoint.id})`,
     };
+  }
+
+  const untrackedBeforeList = checkpoint.untrackedFilesBefore || [];
+  if (untrackedBeforeList.length > 0) {
+    const CHUNK_SIZE = 100;
+    for (let i = 0; i < untrackedBeforeList.length; i += CHUNK_SIZE) {
+      const batch = untrackedBeforeList.slice(i, i + CHUNK_SIZE);
+      const rmCachedRes = await runGit(
+        ['rm', '-r', '--cached', '--ignore-unmatch', '--', ...batch],
+        workspaceRoot,
+        30000,
+      );
+      if (rmCachedRes.exitCode !== 0) {
+        throw new Error(
+          `Failed to unstage pre-existing untracked files before reset: ${rmCachedRes.stderr || rmCachedRes.stdout}`,
+        );
+      }
+    }
   }
 
   const resetRes = await runGit(['reset', '--hard', checkpoint.commitHash], workspaceRoot, 120000);
@@ -486,24 +959,71 @@ async function handleCheckpointRollback(workspaceRoot, opts) {
   }
 
   const currentStatus = await getStatus(workspaceRoot);
-  const untrackedBeforeSet = new Set(checkpoint.untrackedFilesBefore || []);
+  const untrackedBeforeSet = new Set(untrackedBeforeList);
   for (const untrackedFile of currentStatus.untracked) {
     if (!untrackedBeforeSet.has(untrackedFile)) {
-      const absPath = path.join(workspaceRoot, untrackedFile);
+      const absPath = resolveWorkspaceChildPath(workspaceRoot, untrackedFile);
       await fs.rm(absPath, { recursive: true, force: true });
     }
   }
 
   if (checkpoint.stashRef) {
-    const restoreRes = await runGit(
-      ['checkout', checkpoint.stashRef, '--', '.'],
+    const checkoutRes = await runGit(
+      ['checkout', '--no-overlay', checkpoint.stashRef, '--', '.'],
       workspaceRoot,
       60000,
     );
-    if (restoreRes.exitCode !== 0) {
-      const applyRes = await runGit(['stash', 'apply', checkpoint.stashRef], workspaceRoot, 60000);
-      if (applyRes.exitCode !== 0) {
-        throw new Error(`Failed to restore dirty state from stashRef: ${applyRes.stderr}`);
+    if (checkoutRes.exitCode !== 0) {
+      const stderrLower = (checkoutRes.stderr || '').toLowerCase();
+      if (stderrLower.includes('unknown option')) {
+        const fallbackRes = await runGit(
+          ['checkout', checkpoint.stashRef, '--', '.'],
+          workspaceRoot,
+          60000,
+        );
+        if (fallbackRes.exitCode !== 0) {
+          throw new Error(
+            `Failed to restore dirty state from stashRef: ${fallbackRes.stderr || fallbackRes.stdout}`,
+          );
+        }
+        const [treeRes, indexRes] = await Promise.all([
+          runGit(['ls-tree', '-r', '-z', '--name-only', checkpoint.stashRef], workspaceRoot, 30000, {
+            trimStdout: false,
+          }),
+          runGit(['ls-files', '-z'], workspaceRoot, 30000, { trimStdout: false }),
+        ]);
+        if (treeRes.exitCode === 0 && indexRes.exitCode === 0) {
+          const expectedFiles = new Set(treeRes.stdout.split('\0').filter(Boolean));
+          const currentFiles = indexRes.stdout.split('\0').filter(Boolean);
+          for (const trackedPath of currentFiles) {
+            if (!expectedFiles.has(trackedPath)) {
+              const absPath = resolveWorkspaceChildPath(workspaceRoot, trackedPath);
+              await fs.rm(absPath, { recursive: true, force: true });
+            }
+          }
+        }
+      } else {
+        throw new Error(
+          `Failed to restore dirty state from stashRef: ${checkoutRes.stderr || checkoutRes.stdout}`,
+        );
+      }
+    }
+
+    const parent2Res = await runGit(
+      ['rev-parse', '--verify', '--quiet', `${checkpoint.stashRef}^2`],
+      workspaceRoot,
+      10000,
+    );
+    if (parent2Res.exitCode === 0) {
+      const readTreeRes = await runGit(
+        ['read-tree', `${checkpoint.stashRef}^2`],
+        workspaceRoot,
+        30000,
+      );
+      if (readTreeRes.exitCode !== 0) {
+        throw new Error(
+          `Failed to restore index state from stashRef^2: ${readTreeRes.stderr || readTreeRes.stdout}`,
+        );
       }
     }
   }
@@ -523,9 +1043,10 @@ async function handleCheckpointPrune(workspaceRoot, opts) {
 
   const maxRetained =
     opts.max !== undefined ? parseIntFlag(opts.max, '--max', 0) : DEFAULT_PRUNE_MAX_CHECKPOINTS;
-  const state = await loadState(gitCommonDir);
-  const deletedCount = await pruneCheckpointsInState(workspaceRoot, state, maxRetained);
-  await saveState(gitCommonDir, state);
+
+  const deletedCount = await withStateLock(gitCommonDir, async (state) => {
+    return await pruneCheckpointsInState(workspaceRoot, state, maxRetained);
+  });
 
   return { success: true, deletedCount };
 }
@@ -545,54 +1066,104 @@ async function handleWorktreeCreate(workspaceRoot, opts) {
   const safeSessionId = sanitizeSessionId(sessionId);
   const branch = `harni/task-${safeSessionId}`;
   const worktreesDir = path.join(workspaceRoot, '.harni-worktrees');
-  await fs.mkdir(worktreesDir, { recursive: true });
   const worktreePath = path.join(worktreesDir, safeSessionId);
-
-  await runGit(['worktree', 'prune'], workspaceRoot, 15000);
-
-  try {
-    await fs.lstat(worktreePath);
-    await removeWorktreeDirAndBranch(workspaceRoot, worktreePath, branch);
-  } catch {
-    await runGit(['branch', '-D', branch], workspaceRoot, 15000);
-  }
-
   const commitTarget = opts.base || 'HEAD';
   const timeoutMs =
     opts.timeout !== undefined
       ? parseIntFlag(opts.timeout, '--timeout', 1000)
       : DEFAULT_WORKTREE_TIMEOUT_MS;
 
-  const addRes = await runGit(
-    ['worktree', 'add', '-b', branch, worktreePath, commitTarget],
-    workspaceRoot,
-    timeoutMs,
+  const sessionLockPath = path.join(gitCommonDir, 'harni-worktree-locks', `${safeSessionId}.lock`);
+  const releaseSessionLock = await acquireLockFile(
+    sessionLockPath,
+    Math.max(timeoutMs, DEFAULT_LOCK_TIMEOUT_MS),
+    DEFAULT_LOCK_STALE_MS,
+    `worktree session lock (${safeSessionId})`,
   );
 
-  if (addRes.exitCode !== 0) {
-    await removeWorktreeDirAndBranch(workspaceRoot, worktreePath, branch);
-    throw new Error(`git worktree add failed: ${addRes.stderr || addRes.stdout}`);
+  try {
+    const pruneRes = await runGit(['worktree', 'prune'], workspaceRoot, 15000);
+    if (pruneRes.exitCode !== 0) {
+      throw new Error(`git worktree prune failed: ${pruneRes.stderr || pruneRes.stdout}`);
+    }
+
+    const preState = await loadState(gitCommonDir);
+    const existsInState = Boolean(preState.activeWorktrees[safeSessionId]);
+    let existsOnDisk = false;
+    try {
+      await fs.lstat(worktreePath);
+      existsOnDisk = true;
+    } catch (err) {
+      if (err?.code !== 'ENOENT') {
+        throw err;
+      }
+    }
+    const branchRefCheck = await runGit(
+      ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`],
+      workspaceRoot,
+      10000,
+    );
+    const branchExists = branchRefCheck.exitCode === 0;
+    const existedBefore = existsInState || existsOnDisk || branchExists;
+
+    if (existedBefore && !opts.replace) {
+      throw new Error(
+        `Worktree or branch already exists for session "${sessionId}" (${branch}). Pass --replace to overwrite.`,
+      );
+    }
+
+    if (opts.replace && existedBefore) {
+      await removeWorktreeDirAndBranch(workspaceRoot, worktreePath, branch);
+    }
+
+    await fs.mkdir(worktreesDir, { recursive: true });
+
+    const addRes = await runGit(
+      ['worktree', 'add', '-b', branch, worktreePath, commitTarget],
+      workspaceRoot,
+      timeoutMs,
+    );
+
+    if (addRes.exitCode !== 0) {
+      const stderrLower = (addRes.stderr || '').toLowerCase();
+      const isAlreadyExistsCollision =
+        stderrLower.includes('already exists') || stderrLower.includes('already checked out');
+      if ((opts.replace || !existedBefore) && !isAlreadyExistsCollision) {
+        await removeWorktreeDirAndBranch(workspaceRoot, worktreePath, branch).catch(() => {});
+      }
+      throw new Error(`git worktree add failed: ${addRes.stderr || addRes.stdout}`);
+    }
+
+    await linkWorktreeDependencies(workspaceRoot, worktreePath);
+
+    const resolvedRoot = path.resolve(workspaceRoot);
+    await withStateLock(gitCommonDir, async (state) => {
+      if (!opts.replace && state.activeWorktrees[safeSessionId]) {
+        throw new Error(
+          `Worktree or branch already exists for session "${sessionId}" (${branch}). Pass --replace to overwrite.`,
+        );
+      }
+
+      state.activeWorktrees[safeSessionId] = {
+        schemaVersion: STATE_SCHEMA_VERSION,
+        sessionId,
+        safeSessionId,
+        workspaceRoot: resolvedRoot,
+        worktreePath,
+        branch,
+        createdAt: Date.now(),
+      };
+    });
+
+    return {
+      success: true,
+      sessionId,
+      worktreePath,
+      branch,
+    };
+  } finally {
+    await releaseSessionLock();
   }
-
-  await linkWorktreeDependencies(workspaceRoot, worktreePath);
-
-  const state = await loadState(gitCommonDir);
-  state.activeWorktrees[safeSessionId] = {
-    sessionId,
-    safeSessionId,
-    workspaceRoot,
-    worktreePath,
-    branch,
-    createdAt: Date.now(),
-  };
-  await saveState(gitCommonDir, state);
-
-  return {
-    success: true,
-    sessionId,
-    worktreePath,
-    branch,
-  };
 }
 
 async function handleWorktreeList(workspaceRoot) {
@@ -655,15 +1226,42 @@ async function handleWorktreeMerge(workspaceRoot, opts) {
     };
   }
 
+  const mainStatus = await getStatus(workspaceRoot);
+  if (mainStatus.isDirty) {
+    return {
+      success: false,
+      error: 'Main workspace must be clean before merge',
+      message: 'Main workspace must be clean before merge',
+      modified: mainStatus.files,
+      untracked: mainStatus.untracked,
+    };
+  }
+
   const wtStatus = await getStatus(worktreePath);
   if (wtStatus.isDirty) {
-    const addRes = await runGit(['add', '-A'], worktreePath, 120000);
-    if (addRes.exitCode !== 0) {
+    const candidates = [...new Set([...wtStatus.files, ...wtStatus.untracked])];
+    const sensitiveFiles = candidates.filter((filePath) => isSensitiveFilePath(filePath));
+    if (sensitiveFiles.length > 0) {
       return {
         success: false,
-        message: `Failed to stage changes in worktree: ${addRes.stderr || addRes.stdout}`,
+        error: 'Sensitive untracked files would be committed',
+        message: `Sensitive untracked files would be committed: ${sensitiveFiles.join(', ')}`,
+        files: sensitiveFiles,
       };
     }
+
+    const BATCH_SIZE = 200;
+    for (let i = 0; i < candidates.length; i += BATCH_SIZE) {
+      const batch = candidates.slice(i, i + BATCH_SIZE);
+      const addRes = await runGit(['add', '-A', '--', ...batch], worktreePath, 120000);
+      if (addRes.exitCode !== 0) {
+        return {
+          success: false,
+          message: `Failed to stage changes in worktree: ${addRes.stderr || addRes.stdout}`,
+        };
+      }
+    }
+
     const commitMsg = opts.message || `harni: completed task in session ${record.sessionId}`;
     const commitRes = await runGit(['commit', '-m', commitMsg], worktreePath, 60000);
     if (commitRes.exitCode !== 0) {
@@ -676,16 +1274,22 @@ async function handleWorktreeMerge(workspaceRoot, opts) {
 
   const mergeRes = await runGit(['merge', branch, '--no-edit'], workspaceRoot, 120000);
   if (mergeRes.exitCode !== 0) {
+    const abortRes = await runGit(['merge', '--abort'], workspaceRoot, 30000);
+    if (abortRes.exitCode !== 0) {
+      await runGit(['reset', '--merge'], workspaceRoot, 30000);
+    }
     return {
       success: false,
-      message: `Merge failed (worktree preserved): ${mergeRes.stderr || mergeRes.stdout}`,
+      error: 'Merge failed',
+      message: `Merge failed (main workspace restored; worktree preserved): ${mergeRes.stderr || mergeRes.stdout}`,
     };
   }
 
   await removeWorktreeDirAndBranch(workspaceRoot, worktreePath, branch);
-  delete state.activeWorktrees[key];
-  delete state.activeWorktrees[record.sessionId];
-  await saveState(gitCommonDir, state);
+  await withStateLock(gitCommonDir, (lockedState) => {
+    delete lockedState.activeWorktrees[key];
+    delete lockedState.activeWorktrees[record.sessionId];
+  });
 
   return {
     success: true,
@@ -708,9 +1312,10 @@ async function handleWorktreeDiscard(workspaceRoot, opts) {
   const { record, key } = findWorktreeRecord(state, workspaceRoot, opts.session);
 
   await removeWorktreeDirAndBranch(workspaceRoot, record.worktreePath, record.branch);
-  delete state.activeWorktrees[key];
-  delete state.activeWorktrees[record.sessionId];
-  await saveState(gitCommonDir, state);
+  await withStateLock(gitCommonDir, (lockedState) => {
+    delete lockedState.activeWorktrees[key];
+    delete lockedState.activeWorktrees[record.sessionId];
+  });
 
   return {
     success: true,
@@ -727,12 +1332,15 @@ async function handleWorktreePrune(workspaceRoot) {
   }
 
   const state = await loadState(gitCommonDir);
-  await runGit(['worktree', 'prune'], workspaceRoot, 15000);
+  const initialPruneRes = await runGit(['worktree', 'prune'], workspaceRoot, 15000);
+  if (initialPruneRes.exitCode !== 0) {
+    throw new Error(`git worktree prune failed: ${initialPruneRes.stderr || initialPruneRes.stdout}`);
+  }
 
-  const activeBranches = new Set(Object.values(state.activeWorktrees).map((w) => w.branch));
-  const activePaths = new Set(
-    Object.values(state.activeWorktrees).map((w) => path.resolve(w.worktreePath)),
-  );
+  const activeWorktreeList = Object.values(state.activeWorktrees);
+  const activeBranches = new Set(activeWorktreeList.map((w) => w.branch));
+  const isPathActive = (targetPath) =>
+    activeWorktreeList.some((w) => isSameWorkspacePath(w.worktreePath, targetPath));
 
   const prunedBranches = [];
   const branchRes = await runGit(['branch', '--list', 'harni/task-*'], workspaceRoot, 15000);
@@ -759,19 +1367,22 @@ async function handleWorktreePrune(workspaceRoot) {
     for (const entry of entries) {
       if (entry.isDirectory()) {
         const fullPath = path.resolve(worktreesDir, entry.name);
-        if (!activePaths.has(fullPath)) {
-          await unlinkWorktreeDependencies(fullPath);
-          await runGit(['worktree', 'remove', '--force', fullPath], workspaceRoot, 15000);
-          await fs.rm(fullPath, { recursive: true, force: true });
+        if (!isPathActive(fullPath)) {
+          await removeWorktreeDirAndBranch(workspaceRoot, fullPath, null);
           removedDirs.push(entry.name);
         }
       }
     }
-  } catch {
-    // .harni-worktrees directory does not exist
+  } catch (err) {
+    if (err?.code !== 'ENOENT') {
+      throw err;
+    }
   }
 
-  await runGit(['worktree', 'prune'], workspaceRoot, 15000);
+  const finalPruneRes = await runGit(['worktree', 'prune'], workspaceRoot, 15000);
+  if (finalPruneRes.exitCode !== 0) {
+    throw new Error(`git worktree prune failed: ${finalPruneRes.stderr || finalPruneRes.stdout}`);
+  }
   return { success: true, prunedBranches, removedDirs };
 }
 
@@ -788,6 +1399,8 @@ function parseCliArgs(argv) {
   const opts = {
     json: false,
     help: false,
+    dryRun: false,
+    replace: false,
     workspace: undefined,
     session: undefined,
     desc: undefined,
@@ -817,6 +1430,14 @@ function parseCliArgs(argv) {
     }
     if (arg === '--help' || arg === '-h') {
       opts.help = true;
+      continue;
+    }
+    if (arg === '--dry-run') {
+      opts.dryRun = true;
+      continue;
+    }
+    if (arg === '--replace') {
+      opts.replace = true;
       continue;
     }
 
@@ -889,8 +1510,9 @@ function formatHumanOutput(command, subcommand, result) {
 
 async function main() {
   let opts = { json: false, help: false };
+  const rawArgv = process.argv.slice(2);
   try {
-    const parsed = parseCliArgs(process.argv.slice(2));
+    const parsed = parseCliArgs(rawArgv);
     opts = parsed.opts;
     const { positionals } = parsed;
 
@@ -951,7 +1573,8 @@ async function main() {
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    if (opts.json) {
+    const wantsJson = opts.json || rawArgv.includes('--json');
+    if (wantsJson) {
       process.stdout.write(`${JSON.stringify({ success: false, error: message })}\n`);
     } else {
       process.stderr.write(`Error: ${message}\n\n${USAGE_TEXT}`);

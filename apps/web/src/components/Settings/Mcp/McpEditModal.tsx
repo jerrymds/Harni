@@ -117,7 +117,11 @@ export const McpEditModal: React.FC<McpEditModalProps> = ({
     setEnvList([...envList, { key: '', value: '', isSecret: true }]);
   };
 
-  const handleUpdateEnv = (index: number, field: 'key' | 'value' | 'isSecret', val: any) => {
+  const handleUpdateEnv = <K extends 'key' | 'value' | 'isSecret'>(
+    index: number,
+    field: K,
+    val: K extends 'isSecret' ? boolean : string,
+  ) => {
     const next = [...envList];
     next[index] = { ...next[index], [field]: val };
     setEnvList(next);

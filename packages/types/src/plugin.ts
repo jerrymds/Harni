@@ -87,6 +87,8 @@ export interface WorkflowPluginContext {
   notifyDiagnostics?(diag: FileDiagnosticsResult): void;
   notifyTerminalData?(data: string): void;
   isSubagentsEnabled?(): boolean;
+  isMcpToolAllowedReadOnly?(toolName: string): boolean;
+  isReadOnlySubagentType?(typeName: string): boolean;
   getAutoTestConfig?(): AutoTestConfig | undefined;
   recordToolStart?(): void;
 }

@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { createApp } from '../src/server.js';
+import { DBService } from '../src/services/dbService.js';
 
 describe('Server SQLite DB REST Endpoints', () => {
   const tempDir = path.resolve('temp_server_test_db');
@@ -149,6 +150,11 @@ describe('Server SQLite DB REST Endpoints', () => {
     expect(importRes.ok).toBe(true);
     expect(importJson.importedSessions).toBe(1);
     expect(importJson.importedFolders).toBe(1);
+
+    const migratedRes = await fetch(`http://localhost:${port}/api/db/sessions/session_migrated`);
+    const migratedJson = (await migratedRes.json()) as any;
+    expect(migratedRes.ok).toBe(true);
+    expect(migratedJson.mode).toBe('code');
   });
 
   it('defaults to .harni directory with harni.db and auto-creates directory on first launch', async () => {
@@ -221,6 +227,40 @@ describe('Server SQLite DB REST Endpoints', () => {
       const emptyWithMsgs = sessionsWithMsgs.find((s) => s.id === 'sess_empty');
       expect(emptyWithMsgs?.messageCount).toBe(0);
       expect(emptyWithMsgs?.messages).toEqual([]);
+    } finally {
+      svc.close();
+    }
+  });
+
+  it('rolls back saveMessages atomically when an error occurs mid-batch', () => {
+    const dbPath = path.join(tempDir, 'tx-rollback.db');
+    const svc = new DBService({ dbPath });
+    try {
+      svc.saveSession({
+        id: 'sess_tx',
+        title: 'Transactional Session',
+        mode: 'code',
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+      svc.saveMessages('sess_tx', [
+        { id: 'orig_1', role: 'user', content: 'Keep me safe', timestamp: 1010 },
+      ]);
+
+      const circular: any = {};
+      circular.self = circular;
+
+      expect(() =>
+        svc.saveMessages('sess_tx', [
+          { id: 'new_1', role: 'user', content: 'Replacement 1', timestamp: 2000 },
+          { id: 'new_2', role: 'assistant', content: 'Bad', toolCalls: [circular], timestamp: 2010 },
+        ]),
+      ).toThrow();
+
+      const persisted = svc.getMessages('sess_tx');
+      expect(persisted.length).toBe(1);
+      expect(persisted[0]?.id).toBe('orig_1');
+      expect(persisted[0]?.content).toBe('Keep me safe');
     } finally {
       svc.close();
     }

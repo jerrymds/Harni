@@ -1,5 +1,5 @@
 import type { StateCreator } from 'zustand';
-import type { AgentMode, AgentStatus, ChatMessage, ChatSession, LLMProviderType, ModelInfo } from '@harni/types';
+import { normalizeAgentMode, type AgentStatus, type ChatMessage, type ChatSession, type LLMProviderType, type ModelInfo } from '@harni/types';
 import type { AgentStoreState, ChatSlice } from '../types.js';
 import {
   apiFetch,
@@ -22,7 +22,7 @@ const savedModel =
   localStorage.getItem('harni_web_model') ||
   localStorage.getItem(`harni_web_model_${savedProvider}`) ||
   PROVIDER_DEFAULT_MODELS[savedProvider];
-const savedMode = (localStorage.getItem('harni_web_mode') as AgentMode) || 'code';
+const savedMode = normalizeAgentMode(localStorage.getItem('harni_web_mode'));
 const initialFolders = loadSavedFolders();
 const defaultFolderId = initialFolders[0]?.id || 'folder_default';
 const initialSessionsData = loadSavedSessions(savedMode, defaultFolderId, savedProvider, savedModel);
@@ -42,6 +42,11 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
   availableModels: {},
   isLoadingModels: false,
   subagents: loadSavedSubagents(),
+  activeWorkspaceView: 'chat',
+  sessionChangedFiles: {},
+  swarmBoards: {},
+  sessionSchedules: {},
+  wakeupLogs: {},
 
   sendPrompt: (prompt, contextFiles, attachments) => {
     const {
@@ -161,51 +166,75 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
   },
 
   cancelTask: () => {
+    get().cancelTaskForSession(get().currentSessionId);
+  },
+
+  cancelTaskForSession: (sessionId) => {
     const { ws, currentSessionId, sessions } = get();
     if (ws && ws.readyState === WebSocket.OPEN) {
       const msg = {
         type: 'task:cancel',
-        payload: { taskId: '', sessionId: currentSessionId },
+        payload: { taskId: '', sessionId },
       };
       ws.send(JSON.stringify(msg));
     }
 
     const updatedSessions = sessions.map((s) =>
-      s.id === currentSessionId
+      s.id === sessionId
         ? { ...s, status: 'cancelled' as AgentStatus, activeThinking: '', pendingApproval: null, pendingQuestion: null }
         : s,
     );
-    set({ status: 'cancelled', activeThinking: '', pendingApproval: null, pendingQuestion: null, sessions: updatedSessions });
+    if (sessionId === currentSessionId) {
+      set({ status: 'cancelled', activeThinking: '', pendingApproval: null, pendingQuestion: null, sessions: updatedSessions });
+    } else {
+      set({ sessions: updatedSessions });
+    }
     saveSessionsToStorage(updatedSessions);
   },
 
   approveTool: (toolCallId, approved, feedback) => {
+    get().approveToolForSession(get().currentSessionId, toolCallId, approved, feedback);
+  },
+
+  approveToolForSession: (sessionId, toolCallId, approved, feedback) => {
     const { ws, currentSessionId, sessions } = get();
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const msg = {
       type: 'tool:approve',
-      payload: { toolCallId, approved, feedback, sessionId: currentSessionId },
+      payload: { toolCallId, approved, feedback, sessionId },
     };
     ws.send(JSON.stringify(msg));
     const updatedSessions = sessions.map((s) =>
-      s.id === currentSessionId ? { ...s, pendingApproval: null } : s,
+      s.id === sessionId ? { ...s, pendingApproval: null } : s,
     );
-    set({ pendingApproval: null, sessions: updatedSessions });
+    if (sessionId === currentSessionId) {
+      set({ pendingApproval: null, sessions: updatedSessions });
+    } else {
+      set({ sessions: updatedSessions });
+    }
     saveSessionsToStorage(updatedSessions);
   },
 
   answerQuestion: (toolCallId, answers, customInput) => {
+    get().answerQuestionForSession(get().currentSessionId, toolCallId, answers, customInput);
+  },
+
+  answerQuestionForSession: (sessionId, toolCallId, answers, customInput) => {
     const { ws, currentSessionId, sessions } = get();
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const msg = {
       type: 'question:answer',
-      payload: { toolCallId, answers, customInput, sessionId: currentSessionId },
+      payload: { toolCallId, answers, customInput, sessionId },
     };
     ws.send(JSON.stringify(msg));
     const updatedSessions = sessions.map((s) =>
-      s.id === currentSessionId ? { ...s, pendingQuestion: null } : s,
+      s.id === sessionId ? { ...s, pendingQuestion: null } : s,
     );
-    set({ pendingQuestion: null, sessions: updatedSessions });
+    if (sessionId === currentSessionId) {
+      set({ pendingQuestion: null, sessions: updatedSessions });
+    } else {
+      set({ sessions: updatedSessions });
+    }
     saveSessionsToStorage(updatedSessions);
   },
 
@@ -256,6 +285,7 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
       folders: updatedFolders,
       currentSessionId: newId,
       activeFolderId: folderId,
+      activeWorkspaceView: 'chat',
       messages: [],
       activeThinking: '',
       pendingApproval: null,
@@ -297,7 +327,12 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
 
   switchSession: (sessionId) => {
     const { sessions, folders, ws, currentSessionId } = get();
-    if (currentSessionId === sessionId) return;
+    if (currentSessionId === sessionId) {
+      if (get().activeWorkspaceView !== 'chat') {
+        set({ activeWorkspaceView: 'chat' });
+      }
+      return;
+    }
 
     const target = sessions.find((s) => s.id === sessionId);
     if (target) {
@@ -320,8 +355,9 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
       set({
         currentSessionId: sessionId,
         activeFolderId: folderId,
+        activeWorkspaceView: 'chat',
         messages: Array.isArray(target.messages) ? target.messages : [],
-        selectedMode: target.mode || get().selectedMode,
+        selectedMode: normalizeAgentMode(target.mode || get().selectedMode),
         selectedProvider: targetProvider,
         selectedModel: targetModel,
         activeThinking: target.activeThinking || '',
@@ -367,8 +403,17 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
     const { ws, sessions, currentSessionId, folders, activeFolderId, selectedProvider, selectedModel, selectedMode } = get();
     const filtered = sessions.filter((s) => s.id !== sessionId);
 
-    const currentSubagents = { ...get().subagents };
-    delete currentSubagents[sessionId];
+    const omitSessionKey = <T,>(map: Record<string, T>): Record<string, T> => {
+      const next = { ...map };
+      delete next[sessionId];
+      return next;
+    };
+
+    const currentSubagents = omitSessionKey(get().subagents);
+    const nextChangedFiles = omitSessionKey(get().sessionChangedFiles);
+    const nextSwarmBoards = omitSessionKey(get().swarmBoards);
+    const nextSchedules = omitSessionKey(get().sessionSchedules);
+    const nextWakeupLogs = omitSessionKey(get().wakeupLogs);
 
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(
@@ -403,6 +448,10 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
         messages: [],
         status: 'idle',
         subagents: currentSubagents,
+        sessionChangedFiles: nextChangedFiles,
+        swarmBoards: nextSwarmBoards,
+        sessionSchedules: nextSchedules,
+        wakeupLogs: nextWakeupLogs,
       });
       saveSubagentsToStorage(currentSubagents);
       if (ws && ws.readyState === WebSocket.OPEN) {
@@ -439,6 +488,10 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
       selectedModel: nextModel,
       status: 'idle',
       subagents: currentSubagents,
+      sessionChangedFiles: nextChangedFiles,
+      swarmBoards: nextSwarmBoards,
+      sessionSchedules: nextSchedules,
+      wakeupLogs: nextWakeupLogs,
     });
     saveSubagentsToStorage(currentSubagents);
     if (ws && ws.readyState === WebSocket.OPEN && nextActiveId) {
@@ -473,8 +526,17 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
       ws.send(JSON.stringify({ type: 'task:new', payload: { sessionId: currentSessionId } }));
     }
 
-    const currentSubagents = { ...get().subagents };
-    delete currentSubagents[currentSessionId];
+    const omitCurrent = <T,>(map: Record<string, T>): Record<string, T> => {
+      const next = { ...map };
+      delete next[currentSessionId];
+      return next;
+    };
+
+    const currentSubagents = omitCurrent(get().subagents);
+    const nextChangedFiles = omitCurrent(get().sessionChangedFiles);
+    const nextSwarmBoards = omitCurrent(get().swarmBoards);
+    const nextSchedules = omitCurrent(get().sessionSchedules);
+    const nextWakeupLogs = omitCurrent(get().wakeupLogs);
 
     const updatedSessions = sessions.map((s) =>
       s.id === currentSessionId
@@ -499,6 +561,10 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
       pendingApproval: null,
       tokenUsage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
       subagents: currentSubagents,
+      sessionChangedFiles: nextChangedFiles,
+      swarmBoards: nextSwarmBoards,
+      sessionSchedules: nextSchedules,
+      wakeupLogs: nextWakeupLogs,
     });
     saveSubagentsToStorage(currentSubagents);
     saveSessionsToStorage(updatedSessions, true);
@@ -506,12 +572,13 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
   },
 
   setMode: (mode) => {
-    localStorage.setItem('harni_web_mode', mode);
+    const normalizedMode = normalizeAgentMode(mode);
+    localStorage.setItem('harni_web_mode', normalizedMode);
     const { sessions, currentSessionId } = get();
     const updatedSessions = sessions.map((s) =>
-      s.id === currentSessionId ? { ...s, mode, updatedAt: Date.now() } : s,
+      s.id === currentSessionId ? { ...s, mode: normalizedMode, updatedAt: Date.now() } : s,
     );
-    set({ selectedMode: mode, sessions: updatedSessions });
+    set({ selectedMode: normalizedMode, sessions: updatedSessions });
     saveSessionsToStorage(updatedSessions);
     const cur = updatedSessions.find((s) => s.id === currentSessionId);
     if (cur) syncSessionToDB(cur);
@@ -625,15 +692,19 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
   },
 
   killSubagent: (subagentId: string) => {
-    const { subagents, currentSessionId, ws } = get();
-    const sessionSubagents = subagents[currentSessionId] || [];
+    get().killSubagentForSession(get().currentSessionId, subagentId);
+  },
+
+  killSubagentForSession: (sessionId: string, subagentId: string) => {
+    const { subagents, ws } = get();
+    const sessionSubagents = subagents[sessionId] || [];
     const updated = sessionSubagents.map((s) =>
       s.id === subagentId ? { ...s, status: 'cancelled' as const } : s,
     );
     set({
       subagents: {
         ...subagents,
-        [currentSessionId]: updated,
+        [sessionId]: updated,
       },
     });
 
@@ -641,7 +712,39 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
       ws.send(
         JSON.stringify({
           type: 'subagent:kill',
-          payload: { subagentId, sessionId: currentSessionId },
+          payload: { subagentId, sessionId },
+        }),
+      );
+    }
+  },
+
+  setActiveWorkspaceView: (view) => {
+    set({ activeWorkspaceView: view });
+  },
+
+  openChangedFile: (sessionId, filePath) => {
+    const { sessionChangedFiles, subagents, sessions, folders, activeFolderId, workspaceInfo, ws } = get();
+    const entries = sessionChangedFiles[sessionId] || [];
+    const matched = entries.find((f) => f.path === filePath);
+
+    if (matched?.diff) {
+      set({ activeDiff: matched.diff, isDocumentViewerOpen: true });
+      return;
+    }
+
+    const matchedSubagent = matched?.subagentId
+      ? (subagents[sessionId] || []).find((sub) => sub.id === matched.subagentId)
+      : undefined;
+    const targetSession = sessions.find((s) => s.id === sessionId);
+    const targetFolder = folders.find((f) => f.id === (targetSession?.folderId || activeFolderId));
+    const workspaceRoot = matchedSubagent?.worktreePath || targetFolder?.path || workspaceInfo?.rootPath;
+
+    set({ activeDiff: null });
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({
+          type: 'file:open',
+          payload: { path: filePath, workspaceRoot },
         }),
       );
     }

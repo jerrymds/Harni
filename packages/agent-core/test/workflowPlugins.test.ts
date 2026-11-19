@@ -651,4 +651,143 @@ describe('Harni Core Workflow Plugin Architecture', () => {
       expect(nonSubagentPluginRan).toBe(false);
     });
   });
+
+  describe('4. Ask Mode Read-Only Guardrails (ToolGuardPlugin & GitWorkspacePlugin)', () => {
+    it('filters out mutating tools in ask mode and blocks direct write/command/coder subagent calls', async () => {
+      const engine = new AgentCoreEngine({
+        workspaceRoot: tempTestDir,
+        experienceLearningEnabled: false,
+        autoTestEnabled: false,
+        enableCheckpoint: true,
+      });
+
+      let resolvedToolNames: string[] = [];
+      let checkpointCreated = false;
+      engine.on('checkpoint:created', () => {
+        checkpointCreated = true;
+      });
+
+      const toolResults: ToolResult[] = [];
+      engine.on('tool:result', (ev) => {
+        toolResults.push(ev);
+      });
+
+      const mockProvider = new MockProvider({
+        script: [
+          {
+            thought: 'Attempting write, command, and coder subagent in ask mode',
+            text: 'Testing guardrails',
+            toolCalls: [
+              {
+                id: 'call_ask_write',
+                name: 'write_file',
+                arguments: { path: 'should_not_exist.txt', content: 'blocked' },
+              },
+              {
+                id: 'call_ask_cmd',
+                name: 'run_command',
+                arguments: { command: 'echo blocked' },
+              },
+              {
+                id: 'call_ask_coder',
+                name: 'invoke_subagent',
+                arguments: {
+                  subagents: [
+                    {
+                      typeName: 'coder',
+                      role: 'Blocked Coder',
+                      prompt: 'Edit file',
+                    },
+                  ],
+                },
+              },
+              {
+                id: 'call_ask_list',
+                name: 'list_files',
+                arguments: { path: '.' },
+              },
+            ],
+          },
+          {
+            thought: 'Done',
+            text: 'Completed ask mode checks.',
+          },
+        ],
+      });
+
+      const origStream = mockProvider.streamCompletion.bind(mockProvider);
+      mockProvider.streamCompletion = async (messages, systemPrompt, tools, onChunk, signal) => {
+        resolvedToolNames = tools.map((t) => t.name);
+        return origStream(messages, systemPrompt, tools, onChunk, signal);
+      };
+
+      await engine.startTask('Explain the codebase without modifying anything', {
+        mode: 'ask',
+        customProvider: mockProvider,
+      });
+
+      // Mutating tools should be stripped from resolved tools exposed to LLM
+      expect(resolvedToolNames).toContain('read_file');
+      expect(resolvedToolNames).toContain('list_files');
+      expect(resolvedToolNames).toContain('search_files');
+      expect(resolvedToolNames).toContain('invoke_subagent');
+      expect(resolvedToolNames).not.toContain('write_file');
+      expect(resolvedToolNames).not.toContain('edit_file');
+      expect(resolvedToolNames).not.toContain('run_command');
+      expect(resolvedToolNames).not.toContain('swarm');
+      expect(resolvedToolNames).not.toContain('schedule');
+      expect(resolvedToolNames).not.toContain('define_subagent');
+
+      // Git checkpoint should be skipped in ask mode
+      expect(checkpointCreated).toBe(false);
+
+      // Even if LLM forces blocked tool calls, ToolGuardPlugin must block them
+      const writeRes = toolResults.find((r) => r.toolCallId === 'call_ask_write');
+      const cmdRes = toolResults.find((r) => r.toolCallId === 'call_ask_cmd');
+      const coderRes = toolResults.find((r) => r.toolCallId === 'call_ask_coder');
+      const listRes = toolResults.find((r) => r.toolCallId === 'call_ask_list');
+
+      expect(writeRes?.isError).toBe(true);
+      expect(String(writeRes?.output)).toContain("disabled in 'ask' mode");
+      expect(cmdRes?.isError).toBe(true);
+      expect(String(cmdRes?.output)).toContain("disabled in 'ask' mode");
+      expect(coderRes?.isError).toBe(true);
+      expect(String(coderRes?.output)).toContain("not permitted in 'ask' mode");
+      expect(listRes?.isError).not.toBe(true);
+
+      // File must NOT have been created
+      const blockedFileExists = await fs
+        .access(path.join(tempTestDir, 'should_not_exist.txt'))
+        .then(() => true)
+        .catch(() => false);
+      expect(blockedFileExists).toBe(false);
+    });
+
+    it('normalizes legacy modes like architect/test to code mode', async () => {
+      const engine = new AgentCoreEngine({
+        workspaceRoot: tempTestDir,
+        experienceLearningEnabled: false,
+        autoTestEnabled: false,
+      });
+
+      let resolvedToolNames: string[] = [];
+      const mockProvider = new MockProvider({
+        script: [{ thought: 'Done', text: 'OK' }],
+      });
+      const origStream = mockProvider.streamCompletion.bind(mockProvider);
+      mockProvider.streamCompletion = async (messages, systemPrompt, tools, onChunk, signal) => {
+        resolvedToolNames = tools.map((t) => t.name);
+        return origStream(messages, systemPrompt, tools, onChunk, signal);
+      };
+
+      await engine.startTask('Legacy mode test', {
+        mode: 'architect' as any,
+        customProvider: mockProvider,
+      });
+
+      expect(engine.getTaskState()?.mode).toBe('code');
+      expect(resolvedToolNames).toContain('write_file');
+      expect(resolvedToolNames).toContain('run_command');
+    });
+  });
 });

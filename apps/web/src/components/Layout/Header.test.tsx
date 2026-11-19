@@ -35,14 +35,16 @@ describe('Header Component', () => {
     expect(screen.queryByText('Coding Agent')).toBeNull();
     expect(screen.getByText('Live WS')).toBeInTheDocument();
     expect(screen.getByText('code')).toBeInTheDocument();
-    expect(screen.getByText('architect')).toBeInTheDocument();
+    expect(screen.getByText('ask')).toBeInTheDocument();
+    expect(screen.queryByText('architect')).toBeNull();
+    expect(screen.queryByText('test')).toBeNull();
   });
 
   it('switches agent mode when clicking a mode pill', () => {
     render(<Header />);
-    const architectBtn = screen.getByText('architect');
-    fireEvent.click(architectBtn);
-    expect(useAgentStore.getState().selectedMode).toBe('architect');
+    const askBtn = screen.getByText('ask');
+    fireEvent.click(askBtn);
+    expect(useAgentStore.getState().selectedMode).toBe('ask');
   });
 
   it('displays status beacon when status changes', () => {
@@ -112,5 +114,58 @@ describe('Header Component', () => {
     render(<Header />);
 
     expect(useAgentStore.getState().selectedModel).toBe('gemini-3.8-flash');
+  });
+
+  it('switches between chat and orchestrator views and displays active/pending badges', () => {
+    act(() => {
+      useAgentStore.setState({
+        activeWorkspaceView: 'chat',
+        sessions: [
+          {
+            id: 's1',
+            title: 'Task 1',
+            createdAt: 1,
+            messageCount: 1,
+            mode: 'code',
+            status: 'thinking',
+            pendingApproval: {
+              id: 'tc1',
+              name: 'run_command',
+              arguments: { command: 'ls' },
+              requiresApproval: true,
+            },
+          },
+        ],
+        subagents: {
+          s1: [
+            {
+              id: 'sub1',
+              parentId: 'main',
+              sessionId: 's1',
+              typeName: 'coder',
+              role: 'Coder',
+              prompt: 'work',
+              status: 'running',
+              depth: 1,
+              createdAt: 1,
+              updatedAt: 1,
+            },
+          ],
+        },
+      });
+    });
+
+    render(<Header />);
+    const orchestratorBtn = screen.getByTestId('orchestrator-view-btn');
+    expect(orchestratorBtn).toHaveTextContent('調度中心');
+    // 1 active session + 1 running subagent = 2 active, 1 pending approval
+    expect(orchestratorBtn).toHaveTextContent('2');
+    expect(orchestratorBtn).toHaveTextContent('1');
+
+    fireEvent.click(orchestratorBtn);
+    expect(useAgentStore.getState().activeWorkspaceView).toBe('orchestrator');
+
+    fireEvent.click(screen.getByText('對話'));
+    expect(useAgentStore.getState().activeWorkspaceView).toBe('chat');
   });
 });

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import * as http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
@@ -11,6 +12,7 @@ import {
 } from '../src/services/securityService.js';
 import { DBService } from '../src/services/dbService.js';
 import { GoogleAuthPage, escapeHtml, serializeJsonForScript } from '../src/services/googleAuthPage.js';
+import { extractCookie } from '../src/utils/security.js';
 
 describe('SecurityService, Vault & Authentication', () => {
   const tempDir = path.resolve('temp_server_test_security');
@@ -199,10 +201,23 @@ describe('SecurityService, Vault & Authentication', () => {
     expect(location.includes(encodeURIComponent(customClientId))).toBe(true);
     expect(location.includes(customClientSecret)).toBe(false);
 
+    const oauthState = new URL(location).searchParams.get('state') || '';
+    expect(oauthState.length).toBeGreaterThan(10);
+
+    // Callback without valid CSRF state must be rejected
+    const badStateCallback = await fetch(`http://localhost:${port}/auth/google/callback?email=attacker@evil.com`, {
+      method: 'GET',
+    });
+    expect(badStateCallback.status).toBe(400);
+
     const googleCallbackRes = await fetch(`http://localhost:${port}/auth/google/callback`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'email=developer%40google.com&name=Google+Antigravity+Developer',
+      body: new URLSearchParams({
+        state: oauthState,
+        email: 'developer@google.com',
+        name: 'Google Antigravity Developer',
+      }).toString(),
     });
     const googleCallbackHtml = await googleCallbackRes.text();
     expect(googleCallbackRes.ok).toBe(true);
@@ -214,11 +229,23 @@ describe('SecurityService, Vault & Authentication', () => {
     expect(googleStatusRes.ok).toBe(true);
     expect(googleStatusJson.authenticated).toBe(true);
     expect(googleStatusJson.email).toBe('developer@google.com');
+    expect(googleStatusJson.clientSecret).toBeUndefined();
+    expect(googleStatusJson.accessToken).toBeUndefined();
+    expect(googleStatusJson.refreshToken).toBeUndefined();
+    expect(googleStatusJson.hasClientSecret).toBe(true);
 
     const deleteAuthRes = await fetch(`http://localhost:${port}/api/auth/google`, { method: 'DELETE' });
     const deleteAuthJson = (await deleteAuthRes.json()) as any;
     expect(deleteAuthRes.ok).toBe(true);
     expect(deleteAuthJson.authenticated).toBe(false);
+
+    // POST /api/auth/google without a valid OAuth state must be rejected
+    const forgedPostRes = await fetch(`http://localhost:${port}/api/auth/google`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'attacker@evil.com', name: 'Attacker' }),
+    });
+    expect(forgedPostRes.status).toBe(400);
   });
 
   it('protects against XSS injection in GoogleAuthPage and callback endpoints', async () => {
@@ -259,11 +286,17 @@ describe('SecurityService, Vault & Authentication', () => {
     expect(redirectHtml).not.toContain('"onload="alert(1)"');
     expect(redirectHtml).toContain('&quot;onload=&quot;alert(1)');
 
-    // 5. Test HTTP callback endpoint with malicious params
+    // 5. Test HTTP callback endpoint with malicious params (requires valid OAuth state)
+    const loginForXss = await fetch(`http://localhost:${port}/auth/google/login?format=json`);
+    const loginForXssJson = (await loginForXss.json()) as { state: string };
     const maliciousCallbackRes = await fetch(`http://localhost:${port}/auth/google/callback`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: 'email=%3Cimg+onerror%3Dalert(1)%3E&name=%3C%2Fscript%3E%3Cscript%3Ealert(2)%3C%2Fscript%3E',
+      body: new URLSearchParams({
+        state: loginForXssJson.state,
+        email: '<img onerror=alert(1)>',
+        name: '</script><script>alert(2)</script>',
+      }).toString(),
     });
     const maliciousHtml = await maliciousCallbackRes.text();
     expect(maliciousCallbackRes.ok).toBe(true);
@@ -342,5 +375,131 @@ describe('SecurityService, Vault & Authentication', () => {
     } finally {
       await authApp.stop();
     }
+  });
+
+  it('rejects disallowed Origins on HTTP CORS and WebSocket even without AUTH_TOKEN', async () => {
+    const evilCorsRes = await fetch(`http://localhost:${port}/health`, {
+      headers: { Origin: 'https://evil.example' },
+    });
+    expect(evilCorsRes.headers.get('access-control-allow-origin')).toBeNull();
+
+    const localCorsRes = await fetch(`http://localhost:${port}/health`, {
+      headers: { Origin: 'http://localhost:3000' },
+    });
+    expect(localCorsRes.headers.get('access-control-allow-origin')).toBe('http://localhost:3000');
+
+    await expect(
+      new Promise<void>((resolve, reject) => {
+        const evilWs = new WebSocket(`ws://127.0.0.1:${port}/ws`, {
+          headers: { Origin: 'https://evil.example' },
+        });
+        evilWs.on('open', () => {
+          evilWs.close();
+          resolve();
+        });
+        evilWs.on('unexpected-response', (_req, res) => {
+          reject(new Error(`WS rejected with status ${res.statusCode}`));
+        });
+        evilWs.on('error', (err) => reject(err));
+      }),
+    ).rejects.toThrow(/403|rejected/i);
+  });
+
+  it('rejects unauthorized workspaceRoot query/body parameters on REST endpoints and filesystem-root folders', async () => {
+    const outsideDir = path.resolve(tempDir, '..', `unauthorized_ws_${Date.now()}`);
+    await fs.mkdir(outsideDir, { recursive: true });
+
+    try {
+      const wsInfoRes = await fetch(
+        `http://localhost:${port}/api/workspace?workspaceRoot=${encodeURIComponent(outsideDir)}`,
+      );
+      expect(wsInfoRes.status).toBe(403);
+
+      const checkpointsRes = await fetch(
+        `http://localhost:${port}/api/checkpoints?workspaceRoot=${encodeURIComponent(outsideDir)}`,
+      );
+      expect(checkpointsRes.status).toBe(403);
+
+      const pruneRes = await fetch(`http://localhost:${port}/api/checkpoints/prune`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceRoot: outsideDir }),
+      });
+      expect(pruneRes.status).toBe(403);
+
+      const branchesRes = await fetch(
+        `http://localhost:${port}/api/git/branches?workspaceRoot=${encodeURIComponent(outsideDir)}`,
+      );
+      expect(branchesRes.status).toBe(403);
+
+      const switchRes = await fetch(`http://localhost:${port}/api/git/branches/switch`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceRoot: outsideDir, branch: 'main' }),
+      });
+      expect(switchRes.status).toBe(403);
+
+      const fsRoot = path.parse(tempDir).root;
+      const rootFolderRes = await fetch(`http://localhost:${port}/api/db/folders`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: 'evil-root', name: 'Root', path: fsRoot }),
+      });
+      expect(rootFolderRes.status).toBe(403);
+    } finally {
+      await fs.rm(outsideDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
+
+  it('handles malformed percent-encoding gracefully and rejects Google OAuth code callback without clientSecret or untrusted Host', async () => {
+    expect(extractCookie('auth_token=%ZZinvalid', 'auth_token')).toBeUndefined();
+
+    const badParamRes = await fetch(`http://localhost:${port}/api/db/folders/%ZZ`, {
+      method: 'DELETE',
+    });
+    expect(badParamRes.status).toBe(400);
+
+    // Ensure Google credentials and secret are cleared
+    await fetch(`http://localhost:${port}/api/auth/google`, { method: 'DELETE' });
+
+    // Host header injection check via raw http.request
+    const loginPayload = await new Promise<{ url: string; state: string }>((resolve, reject) => {
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path: '/auth/google/login?format=json',
+          method: 'GET',
+          headers: { Host: 'evil.example' },
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (c) => (data += c));
+          res.on('end', () => {
+            try {
+              resolve(JSON.parse(data));
+            } catch (e) {
+              reject(e);
+            }
+          });
+        },
+      );
+      req.on('error', reject);
+      req.end();
+    });
+
+    const redirectParam = new URL(loginPayload.url).searchParams.get('redirect_uri') || '';
+    expect(redirectParam).toBe('http://localhost:3001/auth/google/callback');
+    expect(redirectParam).not.toContain('evil.example');
+
+    // Callback with code but missing clientSecret must fail with 400 and NOT persist fake auth
+    const missingSecretRes = await fetch(
+      `http://localhost:${port}/auth/google/callback?code=auth_code_123&state=${encodeURIComponent(loginPayload.state)}`,
+    );
+    expect(missingSecretRes.status).toBe(400);
+
+    const statusAfterFailed = await fetch(`http://localhost:${port}/api/auth/google/status`);
+    const statusJson = (await statusAfterFailed.json()) as { authenticated: boolean };
+    expect(statusJson.authenticated).toBe(false);
   });
 });

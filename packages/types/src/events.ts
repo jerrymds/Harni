@@ -23,7 +23,7 @@ export interface ServerToClientEvents {
   'question:ask': QuestionPrompt & { sessionId?: string; taskId?: string; subagentId?: string; subagentRole?: string };
   'tool:request': ToolCallRequest & { sessionId?: string; taskId?: string };
   'tool:result': ToolResult & { sessionId?: string; taskId?: string };
-  'file:diff': FileDiff & { sessionId?: string; taskId?: string };
+  'file:diff': FileDiff & { sessionId?: string; taskId?: string; subagentId?: string; subagentRole?: string };
   'file:content': { path: string; content: string; sessionId?: string };
   'file:diagnostics': FileDiagnosticsResult & { sessionId?: string; taskId?: string };
   'terminal:data': { data: string; sessionId?: string; terminalId?: string };
@@ -64,6 +64,7 @@ export interface ServerToClientEvents {
     cronExpression?: string;
     durationSeconds?: number;
     isDaemon?: boolean;
+    iterations?: number;
   };
   'schedule:triggered': {
     sessionId: string;

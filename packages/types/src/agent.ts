@@ -78,7 +78,7 @@ export interface GoogleAuthInfo {
   picture?: string;
   authenticatedAt?: number;
   clientId?: string;
-  clientSecret?: string;
+  hasClientSecret?: boolean;
 }
 
 /**
@@ -102,8 +102,23 @@ export interface OpenAIAuthInfo {
 
 /**
  * Agent Mode
+ * - 'code': Full-capability development and multi-agent orchestration mode (default)
+ * - 'ask': Strictly read-only Q&A and codebase analysis mode
+ * - 'custom': Internal mode used by isolated subagent instances
  */
-export type AgentMode = 'code' | 'architect' | 'ask' | 'test' | 'custom';
+export type AgentMode = 'code' | 'ask' | 'custom';
+
+export type UserAgentMode = 'code' | 'ask';
+
+export const USER_AGENT_MODES: readonly UserAgentMode[] = ['code', 'ask'] as const;
+
+/**
+ * Normalizes any persisted or incoming mode value (including legacy 'architect' / 'test')
+ * into a supported user-facing mode ('code' | 'ask').
+ */
+export function normalizeAgentMode(mode?: string | null): UserAgentMode {
+  return mode === 'ask' ? 'ask' : 'code';
+}
 
 /**
  * Model reasoning / thinking depth level
@@ -216,6 +231,7 @@ export interface ChatMessage {
 }
 
 import type { ToolCallRequest } from './tools.js';
+import type { FileDiff } from './files.js';
 
 /**
  * Configuration for Auto Test-Driven Repair loop
@@ -411,6 +427,41 @@ export interface SwarmBoardState {
   members: SwarmMemberInfo[];
   messages: SwarmMessage[];
   updatedAt: number;
+}
+
+export type ScheduleKind = 'timer' | 'cron';
+
+export interface ScheduleInfo {
+  id: string;
+  sessionId: string;
+  kind: ScheduleKind;
+  prompt: string;
+  createdAt: number;
+  nextRunAt?: number;
+  durationSeconds?: number;
+  cronExpression?: string;
+  timerCondition?: string;
+  maxIterations?: number;
+  iterations: number;
+  isDaemon: boolean;
+}
+
+export interface WakeupEventInfo {
+  id?: string;
+  sessionId: string;
+  source: 'subagent' | 'schedule' | 'message';
+  sourceId?: string;
+  summary: string;
+  timestamp: number;
+}
+
+export interface SessionChangedFile {
+  path: string;
+  diff?: FileDiff;
+  updatedAt: number;
+  source: 'main' | 'subagent';
+  subagentId?: string;
+  subagentRole?: string;
 }
 
 

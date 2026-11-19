@@ -246,16 +246,18 @@ export const ProviderModal: React.FC<ProviderModalProps> = ({
                   />
                 </div>
                 <div className="flex items-center space-x-1 rounded-xl border border-ag-border bg-ag-sidebar/40 p-1">
-                  {[
-                    { id: 'all', label: '全部' },
-                    { id: 'cloud', label: '官方雲端' },
-                    { id: 'aggregator', label: '聚合平台' },
-                    { id: 'local', label: '本機/私有' },
-                  ].map((c) => (
+                  {(
+                    [
+                      { id: 'all', label: '全部' },
+                      { id: 'cloud', label: '官方雲端' },
+                      { id: 'aggregator', label: '聚合平台' },
+                      { id: 'local', label: '本機/私有' },
+                    ] as const
+                  ).map((c) => (
                     <button
                       key={c.id}
                       type="button"
-                      onClick={() => setCategoryFilter(c.id as any)}
+                      onClick={() => setCategoryFilter(c.id)}
                       className={`rounded-lg px-2.5 py-1 text-[11px] font-medium transition-all cursor-pointer ${
                         categoryFilter === c.id
                           ? 'bg-white text-slate-800 shadow-xs font-semibold'

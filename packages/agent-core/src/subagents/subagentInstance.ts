@@ -608,12 +608,34 @@ export class SubagentInstance extends EventEmitter {
     };
   }
 
-  public enqueueMessage(content: string): void {
+  public hasPendingInbox(): boolean {
+    return this.pendingInbox.length > 0;
+  }
+
+  public isRunning(): boolean {
+    return this.isLoopRunning;
+  }
+
+  public clearWorktreeInfo(): void {
+    this.worktreePath = undefined;
+    this.worktreeBranch = undefined;
+  }
+
+  public isTokenBudgetExhausted(): boolean {
+    return Boolean(
+      this.maxTokensBudget &&
+        this.maxTokensBudget > 0 &&
+        this.getUsage().totalTokens >= this.maxTokensBudget,
+    );
+  }
+
+  public enqueueMessage(content: string, autoRunIfIdle = false): boolean {
     if (this.status === 'cancelled') {
-      return;
+      return false;
     }
     this.pendingInbox.push(content);
     if (
+      autoRunIfIdle &&
       !this.isLoopRunning &&
       (this.status === 'completed' || this.status === 'idle')
     ) {
@@ -621,6 +643,7 @@ export class SubagentInstance extends EventEmitter {
         this.completionPromise = null;
       });
     }
+    return true;
   }
 
   private drainInbox(): boolean {

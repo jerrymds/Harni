@@ -2,12 +2,12 @@ import { DatabaseSync } from 'node:sqlite';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
-import type {
-  ChatSession,
-  ChatMessage,
-  WorkspaceFolder,
-  AgentMode,
-  LLMProviderType,
+import {
+  normalizeAgentMode,
+  type ChatSession,
+  type ChatMessage,
+  type WorkspaceFolder,
+  type LLMProviderType,
 } from '@harni/types';
 import { SecurityService } from './securityService.js';
 
@@ -32,6 +32,7 @@ export class DBService {
   private db: DatabaseSync;
   private dbPath: string;
   private security: SecurityService;
+  private transactionDepth = 0;
 
   constructor(options: DBServiceOptions = {}) {
     const harniDir = path.join(os.homedir(), '.harni');
@@ -159,26 +160,28 @@ export class DBService {
   }
 
   public saveFolders(folders: WorkspaceFolder[]): void {
-    const stmt = this.db.prepare(`
-      INSERT INTO folders (id, name, path, created_at, is_collapsed, sort_order)
-      VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        name = excluded.name,
-        path = excluded.path,
-        is_collapsed = excluded.is_collapsed,
-        sort_order = excluded.sort_order;
-    `);
+    this.runInTransaction(() => {
+      const stmt = this.db.prepare(`
+        INSERT INTO folders (id, name, path, created_at, is_collapsed, sort_order)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          path = excluded.path,
+          is_collapsed = excluded.is_collapsed,
+          sort_order = excluded.sort_order;
+      `);
 
-    for (const folder of folders) {
-      stmt.run(
-        folder.id,
-        folder.name,
-        folder.path || null,
-        folder.createdAt || Date.now(),
-        folder.isCollapsed ? 1 : 0,
-        folder.sortOrder || 0,
-      );
-    }
+      for (const folder of folders) {
+        stmt.run(
+          folder.id,
+          folder.name,
+          folder.path || null,
+          folder.createdAt || Date.now(),
+          folder.isCollapsed ? 1 : 0,
+          folder.sortOrder || 0,
+        );
+      }
+    });
   }
 
   public deleteFolder(folderId: string, fallbackFolderId?: string): void {
@@ -241,7 +244,7 @@ export class DBService {
         id: r.id,
         folderId: r.folder_id || undefined,
         title: r.title,
-        mode: (r.mode as AgentMode) || 'code',
+        mode: normalizeAgentMode(r.mode),
         provider: (r.provider as LLMProviderType) || undefined,
         model: r.model || undefined,
         createdAt: r.created_at,
@@ -277,7 +280,7 @@ export class DBService {
       id: row.id,
       folderId: row.folder_id || undefined,
       title: row.title,
-      mode: (row.mode as AgentMode) || 'code',
+      mode: normalizeAgentMode(row.mode),
       provider: (row.provider as LLMProviderType) || undefined,
       model: row.model || undefined,
       createdAt: row.created_at,
@@ -305,7 +308,7 @@ export class DBService {
       session.id,
       session.folderId || null,
       session.title || 'Conversation',
-      session.mode || 'code',
+      normalizeAgentMode(session.mode),
       session.provider || null,
       session.model || null,
       session.createdAt || now,
@@ -330,25 +333,32 @@ export class DBService {
     stmt.run(sessionId);
   }
 
+  private toChatRole(role: string): ChatMessage['role'] {
+    if (role === 'user' || role === 'assistant' || role === 'system' || role === 'tool') {
+      return role;
+    }
+    return 'user';
+  }
+
   private mapMessageRow(r: MessageRow): ChatMessage {
-    let toolCalls: any = undefined;
-    let toolResult: any = undefined;
+    let toolCalls: ChatMessage['toolCalls'] = undefined;
+    let toolResult: ChatMessage['toolResult'] = undefined;
 
     if (r.tool_calls) {
       try {
-        toolCalls = JSON.parse(r.tool_calls);
+        toolCalls = JSON.parse(r.tool_calls) as ChatMessage['toolCalls'];
       } catch {}
     }
 
     if (r.tool_result) {
       try {
-        toolResult = JSON.parse(r.tool_result);
+        toolResult = JSON.parse(r.tool_result) as ChatMessage['toolResult'];
       } catch {}
     }
 
     return {
       id: r.id,
-      role: r.role as any,
+      role: this.toChatRole(r.role),
       content: r.content,
       thinking: r.thinking || undefined,
       toolCalls,
@@ -366,34 +376,69 @@ export class DBService {
     return rows.map((r) => this.mapMessageRow(r));
   }
 
-  public saveMessages(sessionId: string, messages: ChatMessage[]): void {
-    // Delete existing messages and re-insert or upsert
-    this.clearSessionMessages(sessionId);
-
-    const stmt = this.db.prepare(`
-      INSERT INTO messages (id, session_id, role, content, thinking, tool_calls, tool_call_id, tool_result, timestamp)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    for (const msg of messages) {
-      stmt.run(
-        msg.id || `msg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-        sessionId,
-        msg.role || 'user',
-        msg.content || '',
-        msg.thinking || null,
-        msg.toolCalls ? JSON.stringify(msg.toolCalls) : null,
-        msg.toolCallId || null,
-        msg.toolResult ? JSON.stringify(msg.toolResult) : null,
-        msg.timestamp || Date.now(),
-      );
+  private runInTransaction<T>(fn: () => T): T {
+    const depth = this.transactionDepth;
+    if (depth === 0) {
+      this.db.exec('BEGIN IMMEDIATE');
+    } else {
+      this.db.exec(`SAVEPOINT harni_sp_${depth}`);
     }
+    this.transactionDepth++;
+    try {
+      const result = fn();
+      if (depth === 0) {
+        this.db.exec('COMMIT');
+      } else {
+        this.db.exec(`RELEASE harni_sp_${depth}`);
+      }
+      return result;
+    } catch (err) {
+      try {
+        if (depth === 0) {
+          this.db.exec('ROLLBACK');
+        } else {
+          this.db.exec(`ROLLBACK TO harni_sp_${depth}`);
+          this.db.exec(`RELEASE harni_sp_${depth}`);
+        }
+      } catch {
+        // Ignore rollback failure when transaction is already aborted
+      }
+      throw err;
+    } finally {
+      this.transactionDepth--;
+    }
+  }
 
-    // Update session updatedAt timestamp
-    const updateSessionStmt = this.db.prepare(
-      'UPDATE sessions SET updated_at = ? WHERE id = ?',
-    );
-    updateSessionStmt.run(Date.now(), sessionId);
+  public saveMessages(sessionId: string, messages: ChatMessage[]): void {
+    this.runInTransaction(() => {
+      // Delete existing messages and re-insert atomically
+      this.clearSessionMessages(sessionId);
+
+      const stmt = this.db.prepare(`
+        INSERT INTO messages (id, session_id, role, content, thinking, tool_calls, tool_call_id, tool_result, timestamp)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      for (const msg of messages) {
+        stmt.run(
+          msg.id || `msg_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          sessionId,
+          msg.role || 'user',
+          msg.content || '',
+          msg.thinking || null,
+          msg.toolCalls ? JSON.stringify(msg.toolCalls) : null,
+          msg.toolCallId || null,
+          msg.toolResult ? JSON.stringify(msg.toolResult) : null,
+          msg.timestamp || Date.now(),
+        );
+      }
+
+      // Update session updatedAt timestamp
+      const updateSessionStmt = this.db.prepare(
+        'UPDATE sessions SET updated_at = ? WHERE id = ?',
+      );
+      updateSessionStmt.run(Date.now(), sessionId);
+    });
   }
 
   public appendMessage(sessionId: string, msg: ChatMessage): void {
@@ -579,7 +624,17 @@ export class DBService {
    * Retrieves a stored OAuth payload (JSON blob) for a provider's `<provider>-oauth`
    * credential slot (e.g. `anthropic-oauth`). Returns null if absent or unparseable.
    */
-  public getOAuthPayload(provider: string): Record<string, any> | null {
+  public getOAuthPayload(provider: string): {
+    accessToken?: string;
+    refreshToken?: string;
+    email?: string;
+    organization?: string;
+    plan?: string;
+    expiresAt?: number;
+    authenticatedAt?: number;
+    accountId?: string;
+    [key: string]: unknown;
+  } | null {
     const credentialKey = `${provider}-oauth`;
     const stmt = this.db.prepare('SELECT encrypted_key FROM credentials WHERE provider = ?');
     const row = stmt.get(credentialKey) as { encrypted_key: string } | undefined;
@@ -711,34 +766,36 @@ export class DBService {
     importedSessions: number;
     importedMessages: number;
   } {
-    let importedFolders = 0;
-    let importedSessions = 0;
-    let importedMessages = 0;
+    return this.runInTransaction(() => {
+      let importedFolders = 0;
+      let importedSessions = 0;
+      let importedMessages = 0;
 
-    if (Array.isArray(data.folders) && data.folders.length > 0) {
-      this.saveFolders(data.folders);
-      importedFolders = data.folders.length;
-    }
+      if (Array.isArray(data.folders) && data.folders.length > 0) {
+        this.saveFolders(data.folders);
+        importedFolders = data.folders.length;
+      }
 
-    if (Array.isArray(data.sessions) && data.sessions.length > 0) {
-      for (const s of data.sessions) {
-        this.saveSession(s, true);
-        importedSessions++;
-        if (Array.isArray(s.messages)) {
-          importedMessages += s.messages.length;
+      if (Array.isArray(data.sessions) && data.sessions.length > 0) {
+        for (const s of data.sessions) {
+          this.saveSession(s, true);
+          importedSessions++;
+          if (Array.isArray(s.messages)) {
+            importedMessages += s.messages.length;
+          }
         }
       }
-    }
 
-    if (data.settings && typeof data.settings === 'object') {
-      this.saveSettings(data.settings);
-    }
+      if (data.settings && typeof data.settings === 'object') {
+        this.saveSettings(data.settings);
+      }
 
-    return {
-      importedFolders,
-      importedSessions,
-      importedMessages,
-    };
+      return {
+        importedFolders,
+        importedSessions,
+        importedMessages,
+      };
+    });
   }
 
   public close(): void {

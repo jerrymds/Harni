@@ -66,7 +66,7 @@ export const createAuthSlice: StateCreator<AgentStoreState, [], [], AuthSlice> =
         console.warn('[createAuthSlice] Popup open failed:', e);
       }
 
-      let pollTimer: any = null;
+      let pollTimer: ReturnType<typeof setInterval> | null = null;
 
       const cleanup = () => {
         window.removeEventListener('message', handleMessage);

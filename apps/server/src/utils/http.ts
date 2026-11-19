@@ -1,5 +1,6 @@
 import type * as http from 'node:http';
 import type { ReadBodyOptions } from '../types/server.js';
+import { isAllowedOrigin } from './security.js';
 
 /** Default maximum request body size (10MB) to protect against DoS / OOM attacks */
 export const DEFAULT_MAX_BODY_SIZE = 10 * 1024 * 1024;
@@ -14,8 +15,12 @@ export class PayloadTooLargeError extends Error {
   }
 }
 
-export function setCorsHeaders(res: http.ServerResponse): void {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+export function setCorsHeaders(res: http.ServerResponse, req?: http.IncomingMessage): void {
+  const origin = req?.headers.origin;
+  if (origin && isAllowedOrigin(origin, req?.headers.host)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-API-Key, X-Auth-Token');
 }
@@ -23,7 +28,7 @@ export function setCorsHeaders(res: http.ServerResponse): void {
 export function sendJsonResponse(
   res: http.ServerResponse,
   statusCode: number,
-  data: any,
+  data: unknown,
   contentType = 'application/json',
 ): void {
   if (res.headersSent || res.writableEnded) return;
@@ -35,15 +40,17 @@ export function sendJsonError(
   res: http.ServerResponse,
   err: unknown,
   defaultStatusCode = 500,
-  extraPayload?: Record<string, any>,
+  extraPayload?: Record<string, unknown>,
 ): void {
   if (res.headersSent || res.writableEnded) {
     return;
   }
+  const errRecord =
+    typeof err === 'object' && err !== null ? (err as { statusCode?: unknown; code?: unknown }) : undefined;
   const statusCode =
-    typeof (err as any)?.statusCode === 'number' ? (err as any).statusCode : defaultStatusCode;
+    typeof errRecord?.statusCode === 'number' ? errRecord.statusCode : defaultStatusCode;
   const errorCode =
-    typeof (err as any)?.code === 'string' ? (err as any).code : undefined;
+    typeof errRecord?.code === 'string' ? errRecord.code : undefined;
   const errorMsg = err instanceof Error ? err.message : String(err);
 
   if (statusCode === 413) {
@@ -144,7 +151,7 @@ export function readRequestBody(
   });
 }
 
-export function readJsonBody<T = any>(
+export function readJsonBody<T = unknown>(
   req: http.IncomingMessage,
   options?: ReadBodyOptions,
 ): Promise<T> {

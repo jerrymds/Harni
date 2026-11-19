@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import * as fs from 'node:fs';
 import type {
   AntigravityExecutionMode,
   ChatMessage,
@@ -84,7 +85,9 @@ export interface SubagentManagerConfig {
 export class SubagentManager extends EventEmitter {
   private registry: SubagentRegistry;
   private instances = new Map<string, SubagentInstance>();
+  private instanceParams = new Map<string, SpawnSubagentParams>();
   private executionPromises = new Map<string, Promise<SubagentExecutionResult>>();
+  private resumingIds = new Set<string>();
   private workspaceRoot: string;
   private defaultProvider: LLMProviderType;
   private defaultModel?: string;
@@ -301,9 +304,44 @@ export class SubagentManager extends EventEmitter {
 
   public deliverSwarmMessage(subagentId: string, content: string): boolean {
     const inst = this.instances.get(subagentId);
-    if (!inst) return false;
-    inst.enqueueMessage(content);
+    if (!inst || inst.getStatus() === 'cancelled') return false;
+    const queued = inst.enqueueMessage(content, false);
+    if (!queued) return false;
+
+    if (
+      !inst.isRunning() &&
+      !this.resumingIds.has(subagentId) &&
+      (inst.getStatus() === 'completed' || inst.getStatus() === 'idle')
+    ) {
+      void this.resumeSubagent(subagentId);
+    }
     return true;
+  }
+
+  private async resumeSubagent(subagentId: string): Promise<SubagentExecutionResult | undefined> {
+    const instance = this.instances.get(subagentId);
+    const storedParams = this.instanceParams.get(subagentId);
+    if (!instance || !storedParams) return undefined;
+    if (
+      instance.getStatus() === 'cancelled' ||
+      instance.isRunning() ||
+      this.resumingIds.has(subagentId)
+    ) {
+      return undefined;
+    }
+
+    this.resumingIds.add(subagentId);
+    const resumeParams: SpawnSubagentParams = {
+      ...storedParams,
+      background: true,
+    };
+    const resumePromise = this.executeManagedInstance(subagentId, instance, resumeParams).finally(
+      () => {
+        this.resumingIds.delete(subagentId);
+      },
+    );
+    this.executionPromises.set(subagentId, resumePromise);
+    return await resumePromise;
   }
 
   public getInstancesBySession(sessionId: string): SubagentInstanceInfo[] {
@@ -562,153 +600,9 @@ export class SubagentManager extends EventEmitter {
       }
 
       const { instance, params, subagentId } = item;
+      this.instanceParams.set(subagentId, params);
 
-      const execPromise = (async (): Promise<SubagentExecutionResult> => {
-        // Check if already cancelled before acquiring semaphore slot
-        if (instance.getStatus() === 'cancelled' || params.parentSignal?.aborted) {
-          if (instance.getStatus() !== 'cancelled') {
-            instance.abort('Parent task cancelled');
-          }
-          const cancelReason =
-            params.parentSignal?.aborted ? 'Parent task cancelled' : (instance.getInfo().error || 'Subagent execution cancelled');
-          const cancelledResult: SubagentExecutionResult = {
-            id: subagentId,
-            typeName: params.typeName,
-            role: params.role,
-            status: 'cancelled',
-            result: cancelReason,
-            error: cancelReason,
-            durationMs: 0,
-            toolCallCount: 0,
-            background: params.background,
-          };
-          this.emit('subagent:completed', {
-            sessionId: params.sessionId,
-            subagentId,
-            status: 'cancelled',
-            result: cancelledResult.result,
-            error: cancelledResult.error,
-            durationMs: 0,
-            background: params.background,
-            role: params.role,
-          });
-          return cancelledResult;
-        }
-
-        // Hook abort listener to wake queue if parentSignal or instance aborts while in queue
-        const queueAbort = new AbortController();
-        const onParentAbort = () => queueAbort.abort();
-        params.parentSignal?.addEventListener('abort', onParentAbort, { once: true });
-        const onInstanceStatus = (p: { status: import('@harni/types').SubagentStatus }) => {
-          if (p.status === 'cancelled') {
-            queueAbort.abort();
-          }
-        };
-        instance.on('status', onInstanceStatus);
-
-        let slotAcquired = false;
-        try {
-          slotAcquired = await this.acquireConcurrencySlot(queueAbort.signal);
-        } finally {
-          params.parentSignal?.removeEventListener('abort', onParentAbort);
-          instance.off('status', onInstanceStatus);
-        }
-
-        if (!slotAcquired || instance.getStatus() === 'cancelled' || params.parentSignal?.aborted) {
-          if (slotAcquired) {
-            this.releaseConcurrencySlot();
-          }
-          if (instance.getStatus() !== 'cancelled') {
-            instance.abort(
-              params.parentSignal?.aborted ? 'Parent task cancelled' : 'Subagent execution cancelled',
-            );
-          }
-          const cancelReason =
-            params.parentSignal?.aborted ? 'Parent task cancelled' : (instance.getInfo().error || 'Subagent execution cancelled');
-          const cancelledResult: SubagentExecutionResult = {
-            id: subagentId,
-            typeName: params.typeName,
-            role: params.role,
-            status: 'cancelled',
-            result: cancelReason,
-            error: cancelReason,
-            durationMs: 0,
-            toolCallCount: 0,
-            background: params.background,
-          };
-          this.emit('subagent:completed', {
-            sessionId: params.sessionId,
-            subagentId,
-            status: 'cancelled',
-            result: cancelledResult.result,
-            error: cancelledResult.error,
-            durationMs: 0,
-            background: params.background,
-            role: params.role,
-          });
-          return cancelledResult;
-        }
-
-        const baseWorkspace = params.workspaceRoot || this.workspaceRoot;
-        let createdWorktree: { worktreePath: string; branch: string } | null = null;
-
-        if (
-          params.isolation === 'worktree' &&
-          this.gitCheckpointService &&
-          (await this.gitCheckpointService.isGitRepo(baseWorkspace))
-        ) {
-          try {
-            const wt = await this.gitCheckpointService.createWorktree(baseWorkspace, subagentId);
-            createdWorktree = wt;
-            instance.setWorkspaceRoot(wt.worktreePath);
-            instance.setWorktreeInfo(wt.worktreePath, wt.branch);
-          } catch (wtErr) {
-            console.warn(`[SubagentManager] Failed to create worktree for ${subagentId}:`, wtErr);
-          }
-        }
-
-        try {
-          // Run instance loop
-          const result = await instance.run();
-
-          if (createdWorktree) {
-            result.worktreePath = createdWorktree.worktreePath;
-            result.worktreeBranch = createdWorktree.branch;
-
-            if (result.status === 'completed' && params.autoMergeWorktree !== false) {
-              const mergeRes = await this.gitCheckpointService!.mergeWorktree(
-                baseWorkspace,
-                subagentId,
-                `subagent(${params.role}): completed task ${subagentId}`,
-              );
-              result.worktreeMerged = mergeRes.success;
-            } else if (result.status === 'cancelled' && params.autoMergeWorktree !== false) {
-              await this.gitCheckpointService!.discardWorktree(baseWorkspace, subagentId);
-            }
-          }
-
-          // Emit completed event
-          this.emit('subagent:completed', {
-            sessionId: params.sessionId,
-            subagentId,
-            status: result.status,
-            result: result.result,
-            error: result.error,
-            durationMs: result.durationMs,
-            tokenUsage: result.tokenUsage,
-            codeModified: result.codeModified,
-            structuredReport: result.structuredReport,
-            worktreePath: result.worktreePath,
-            worktreeBranch: result.worktreeBranch,
-            background: params.background,
-            role: params.role,
-          });
-
-          return result;
-        } finally {
-          this.releaseConcurrencySlot();
-        }
-      })();
+      const execPromise = this.executeManagedInstance(subagentId, instance, params);
 
       this.executionPromises.set(subagentId, execPromise);
 
@@ -772,8 +666,9 @@ export class SubagentManager extends EventEmitter {
       const affected: SubagentInstanceInfo[] = [];
       for (const id of ids) {
         const inst = this.instances.get(id);
-        if (inst) {
+        if (inst && (!sessionId || inst.sessionId === sessionId)) {
           inst.abort('Terminated by manage_subagents request');
+          this.cleanupKilledInstanceWorktree(inst);
           affected.push(inst.getInfo());
         }
       }
@@ -785,6 +680,7 @@ export class SubagentManager extends EventEmitter {
       for (const inst of this.instances.values()) {
         if (!sessionId || inst.sessionId === sessionId) {
           inst.abort('Terminated by kill_all request');
+          this.cleanupKilledInstanceWorktree(inst);
           affected.push(inst.getInfo());
         }
       }
@@ -854,9 +750,25 @@ export class SubagentManager extends EventEmitter {
     for (const [id, inst] of this.instances.entries()) {
       if (!sessionId || inst.sessionId === sessionId) {
         inst.abort('Session cleared');
+        this.cleanupKilledInstanceWorktree(inst);
         this.instances.delete(id);
+        this.instanceParams.delete(id);
         this.executionPromises.delete(id);
+        this.resumingIds.delete(id);
       }
+    }
+  }
+
+  private cleanupKilledInstanceWorktree(inst: SubagentInstance): void {
+    const info = inst.getInfo();
+    if (!info.worktreePath) {
+      return;
+    }
+    const baseWorkspace = this.instanceParams.get(inst.id)?.workspaceRoot || this.workspaceRoot;
+    inst.clearWorktreeInfo();
+    inst.setWorkspaceRoot(baseWorkspace);
+    if (this.gitCheckpointService) {
+      void this.gitCheckpointService.discardWorktree(baseWorkspace, inst.id).catch(() => {});
     }
   }
 
@@ -866,6 +778,189 @@ export class SubagentManager extends EventEmitter {
         inst.abort('Session aborted');
       }
     }
+  }
+
+  private async executeManagedInstance(
+    subagentId: string,
+    instance: SubagentInstance,
+    params: SpawnSubagentParams,
+  ): Promise<SubagentExecutionResult> {
+    if (instance.getStatus() === 'cancelled' || params.parentSignal?.aborted) {
+      if (instance.getStatus() !== 'cancelled') {
+        instance.abort('Parent task cancelled');
+      }
+      const cancelReason =
+        params.parentSignal?.aborted
+          ? 'Parent task cancelled'
+          : instance.getInfo().error || 'Subagent execution cancelled';
+      const cancelledResult: SubagentExecutionResult = {
+        id: subagentId,
+        typeName: params.typeName,
+        role: params.role,
+        status: 'cancelled',
+        result: cancelReason,
+        error: cancelReason,
+        durationMs: 0,
+        toolCallCount: 0,
+        background: params.background,
+      };
+      this.emit('subagent:completed', {
+        sessionId: params.sessionId,
+        subagentId,
+        status: 'cancelled',
+        result: cancelledResult.result,
+        error: cancelledResult.error,
+        durationMs: 0,
+        background: params.background,
+        role: params.role,
+      });
+      return cancelledResult;
+    }
+
+    const queueAbort = new AbortController();
+    const onParentAbort = () => queueAbort.abort();
+    params.parentSignal?.addEventListener('abort', onParentAbort, { once: true });
+    const onInstanceStatus = (p: { status: import('@harni/types').SubagentStatus }) => {
+      if (p.status === 'cancelled') {
+        queueAbort.abort();
+      }
+    };
+    instance.on('status', onInstanceStatus);
+
+    let slotAcquired = false;
+    try {
+      slotAcquired = await this.acquireConcurrencySlot(queueAbort.signal);
+    } finally {
+      params.parentSignal?.removeEventListener('abort', onParentAbort);
+      instance.off('status', onInstanceStatus);
+    }
+
+    if (!slotAcquired || instance.getStatus() === 'cancelled' || params.parentSignal?.aborted) {
+      if (slotAcquired) {
+        this.releaseConcurrencySlot();
+      }
+      if (instance.getStatus() !== 'cancelled') {
+        instance.abort(
+          params.parentSignal?.aborted ? 'Parent task cancelled' : 'Subagent execution cancelled',
+        );
+      }
+      const cancelReason =
+        params.parentSignal?.aborted
+          ? 'Parent task cancelled'
+          : instance.getInfo().error || 'Subagent execution cancelled';
+      const cancelledResult: SubagentExecutionResult = {
+        id: subagentId,
+        typeName: params.typeName,
+        role: params.role,
+        status: 'cancelled',
+        result: cancelReason,
+        error: cancelReason,
+        durationMs: 0,
+        toolCallCount: 0,
+        background: params.background,
+      };
+      this.emit('subagent:completed', {
+        sessionId: params.sessionId,
+        subagentId,
+        status: 'cancelled',
+        result: cancelledResult.result,
+        error: cancelledResult.error,
+        durationMs: 0,
+        background: params.background,
+        role: params.role,
+      });
+      return cancelledResult;
+    }
+
+    const baseWorkspace = params.workspaceRoot || this.workspaceRoot;
+    let createdWorktree: { worktreePath: string; branch: string } | null = null;
+    const existingInfo = instance.getInfo();
+
+    if (
+      params.isolation === 'worktree' &&
+      this.gitCheckpointService &&
+      (await this.gitCheckpointService.isGitRepo(baseWorkspace))
+    ) {
+      if (
+        existingInfo.worktreePath &&
+        existingInfo.worktreeBranch &&
+        fs.existsSync(existingInfo.worktreePath)
+      ) {
+        createdWorktree = {
+          worktreePath: existingInfo.worktreePath,
+          branch: existingInfo.worktreeBranch,
+        };
+        instance.setWorkspaceRoot(existingInfo.worktreePath);
+      } else {
+        try {
+          const wt = await this.gitCheckpointService.createWorktree(baseWorkspace, subagentId);
+          createdWorktree = wt;
+          instance.setWorkspaceRoot(wt.worktreePath);
+          instance.setWorktreeInfo(wt.worktreePath, wt.branch);
+        } catch (wtErr) {
+          console.warn(`[SubagentManager] Failed to create worktree for ${subagentId}:`, wtErr);
+          instance.clearWorktreeInfo();
+          instance.setWorkspaceRoot(baseWorkspace);
+        }
+      }
+    }
+
+    let result: SubagentExecutionResult;
+    try {
+      result = await instance.run();
+
+      if (createdWorktree) {
+        result.worktreePath = createdWorktree.worktreePath;
+        result.worktreeBranch = createdWorktree.branch;
+
+        if (result.status === 'completed' && params.autoMergeWorktree !== false) {
+          const mergeRes = await this.gitCheckpointService!.mergeWorktree(
+            baseWorkspace,
+            subagentId,
+            `subagent(${params.role}): completed task ${subagentId}`,
+          );
+          result.worktreeMerged = mergeRes.success;
+          if (mergeRes.success) {
+            instance.clearWorktreeInfo();
+            instance.setWorkspaceRoot(baseWorkspace);
+          }
+        } else if (result.status === 'cancelled') {
+          await this.gitCheckpointService!.discardWorktree(baseWorkspace, subagentId);
+          instance.clearWorktreeInfo();
+          instance.setWorkspaceRoot(baseWorkspace);
+        }
+      }
+
+      this.emit('subagent:completed', {
+        sessionId: params.sessionId,
+        subagentId,
+        status: result.status,
+        result: result.result,
+        error: result.error,
+        durationMs: result.durationMs,
+        tokenUsage: result.tokenUsage,
+        codeModified: result.codeModified,
+        structuredReport: result.structuredReport,
+        worktreePath: result.worktreePath,
+        worktreeBranch: result.worktreeBranch,
+        background: params.background,
+        role: params.role,
+      });
+    } finally {
+      this.releaseConcurrencySlot();
+    }
+
+    if (
+      result.status === 'completed' &&
+      instance.hasPendingInbox() &&
+      !instance.isTokenBudgetExhausted()
+    ) {
+      queueMicrotask(() => {
+        void this.resumeSubagent(subagentId);
+      });
+    }
+
+    return result;
   }
 
   private createScopedToolRegistry(

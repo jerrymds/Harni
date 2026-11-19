@@ -426,8 +426,9 @@ export const SettingsModal: React.FC = () => {
       try {
         JSON.parse(mcpConfigInput);
         setMcpJsonError(null);
-      } catch (err: any) {
-        setMcpJsonError('MCP 配置 JSON 格式錯誤：' + err.message);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        setMcpJsonError('MCP 配置 JSON 格式錯誤：' + message);
         setActiveTab('mcp');
         return;
       }

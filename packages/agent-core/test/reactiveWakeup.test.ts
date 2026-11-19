@@ -129,6 +129,30 @@ describe('SchedulerService & ScheduleTool', () => {
     expect(resCancel.isError).toBe(false);
     expect(scheduler.listSchedules('sess_tool')).toHaveLength(0);
 
+    // Cancel from another session must be rejected
+    const created2 = JSON.parse(
+      (await tool.execute({ prompt: 'Owned by A', durationSeconds: 30 }, ctx)).output,
+    );
+    const crossCancel = await tool.execute(
+      { action: 'cancel', scheduleId: created2.id },
+      { ...ctx, sessionId: 'other_session' },
+    );
+    expect(crossCancel.isError).toBe(true);
+    expect(scheduler.listSchedules('sess_tool')).toHaveLength(1);
+
+    // Cancel from owning session succeeds
+    const ownCancel = await tool.execute({ action: 'cancel', scheduleId: created2.id }, ctx);
+    expect(ownCancel.isError).toBe(false);
+
+    // Impossible cron expression (Feb 31) fails immediately without blocking
+    expect(() =>
+      scheduler.createCron({
+        sessionId: 'sess_tool',
+        cronExpression: '0 0 31 2 *',
+        prompt: 'Never',
+      }),
+    ).toThrow(/Impossible cron expression/i);
+
     scheduler.dispose();
   });
 });

@@ -16,7 +16,7 @@ describe('ToolRegistry & Built-in File Operations', () => {
 
   it('registers all default tools', () => {
     const registry = new ToolRegistry(true);
-    expect(registry.getAllTools().length).toBe(12);
+    expect(registry.getAllTools().length).toBe(14);
     expect(registry.getTool('invoke_subagent')).toBeDefined();
     expect(registry.getTool('write_file')).toBeDefined();
     expect(registry.getTool('edit_file')).toBeDefined();
@@ -29,6 +29,8 @@ describe('ToolRegistry & Built-in File Operations', () => {
     expect(registry.getTool('define_subagent')).toBeDefined();
     expect(registry.getTool('ask_question')).toBeDefined();
     expect(registry.getTool('contrastive_probe')).toBeDefined();
+    expect(registry.getTool('schedule')).toBeDefined();
+    expect(registry.getTool('swarm')).toBeDefined();
   });
 
   it('resolves run_command and execute_command aliases with approval required', () => {
