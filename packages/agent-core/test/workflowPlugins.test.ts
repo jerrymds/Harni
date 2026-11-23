@@ -790,4 +790,180 @@ describe('Harni Core Workflow Plugin Architecture', () => {
       expect(resolvedToolNames).toContain('run_command');
     });
   });
+
+  describe('5. Strict Orchestration Mode Guardrails', () => {
+    it('removes and blocks direct read/write/command tools for coordinator while allowing subagents to execute them', async () => {
+      const engine = new AgentCoreEngine({
+        workspaceRoot: tempTestDir,
+        experienceLearningEnabled: false,
+        autoTestEnabled: false,
+        gitCheckpointEnabled: false,
+      });
+
+      let coordinatorToolNames: string[] = [];
+      let coordinatorSystemPrompt = '';
+      const toolResults: ToolResult[] = [];
+      engine.on('tool:result', (ev) => {
+        toolResults.push(ev);
+      });
+
+      const parentProvider = new MockProvider({
+        script: [
+          {
+            thought: 'Try direct tools first, then delegate to researcher and coder',
+            text: 'Checking strict orchestration guardrails',
+            toolCalls: [
+              {
+                id: 'call_strict_read',
+                name: 'read_file',
+                arguments: { path: 'sample.txt' },
+              },
+              {
+                id: 'call_strict_edit',
+                name: 'edit_file',
+                arguments: { path: 'sample.txt', targetContent: 'a', replacementContent: 'b' },
+              },
+              {
+                id: 'call_strict_cmd',
+                name: 'run_command',
+                arguments: { command: 'echo blocked' },
+              },
+              {
+                id: 'call_strict_delegate',
+                name: 'invoke_subagent',
+                arguments: {
+                  subagents: [
+                    {
+                      typeName: 'coder',
+                      role: 'Strict Coder',
+                      prompt: 'Create strict_created.txt with content "Created by coder"',
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            thought: 'Done',
+            text: 'Delegated work completed.',
+          },
+        ],
+      });
+
+      const origParentStream = parentProvider.streamCompletion.bind(parentProvider);
+      parentProvider.streamCompletion = async (messages, systemPrompt, tools, onChunk, signal) => {
+        if (coordinatorToolNames.length === 0) {
+          coordinatorToolNames = tools.map((t) => t.name);
+          coordinatorSystemPrompt = systemPrompt;
+        }
+        return origParentStream(messages, systemPrompt, tools, onChunk, signal);
+      };
+
+      const coderSubProvider = new MockProvider({
+        script: [
+          {
+            thought: 'Write the requested file inside subagent context',
+            text: 'Creating strict_created.txt',
+            toolCalls: [
+              {
+                id: 'call_sub_write',
+                name: 'write_file',
+                arguments: { path: 'strict_created.txt', content: 'Created by coder' },
+              },
+            ],
+          },
+          {
+            thought: 'Done',
+            text: 'Created strict_created.txt successfully.',
+          },
+        ],
+      });
+
+      const origSpawn = engine.getSubagentManager().spawnSubagents.bind(engine.getSubagentManager());
+      engine.getSubagentManager().spawnSubagents = async (paramsList) => {
+        return origSpawn(
+          paramsList.map((p) => ({
+            ...p,
+            customProvider: coderSubProvider,
+          })),
+        );
+      };
+
+      await engine.startTask('Implement feature using strict orchestration', {
+        mode: 'code',
+        subagentsEnabled: true,
+        strictOrchestration: true,
+        customProvider: parentProvider,
+      });
+
+      // Coordinator must NOT receive direct read/write/exec tools, but keeps orchestration tools
+      expect(coordinatorToolNames).toContain('invoke_subagent');
+      expect(coordinatorToolNames).toContain('manage_subagents');
+      expect(coordinatorToolNames).toContain('swarm');
+      expect(coordinatorToolNames).toContain('ask_question');
+      expect(coordinatorToolNames).not.toContain('read_file');
+      expect(coordinatorToolNames).not.toContain('list_files');
+      expect(coordinatorToolNames).not.toContain('search_files');
+      expect(coordinatorToolNames).not.toContain('write_file');
+      expect(coordinatorToolNames).not.toContain('edit_file');
+      expect(coordinatorToolNames).not.toContain('run_command');
+
+      // System prompt must contain mandatory delegation instructions
+      expect(coordinatorSystemPrompt).toContain('STRICT ORCHESTRATION MODE');
+      expect(coordinatorSystemPrompt).toContain('Delegate codebase exploration and file inspection to `researcher`');
+
+      // Direct tool calls forced by coordinator must be blocked with delegation hints
+      const readRes = toolResults.find((r) => r.toolCallId === 'call_strict_read');
+      const editRes = toolResults.find((r) => r.toolCallId === 'call_strict_edit');
+      const cmdRes = toolResults.find((r) => r.toolCallId === 'call_strict_cmd');
+      const delegateRes = toolResults.find((r) => r.toolCallId === 'call_strict_delegate');
+
+      expect(readRes?.isError).toBe(true);
+      expect(String(readRes?.output)).toContain('researcher');
+      expect(editRes?.isError).toBe(true);
+      expect(String(editRes?.output)).toContain('coder');
+      expect(cmdRes?.isError).toBe(true);
+      expect(String(cmdRes?.output)).toContain('reviewer');
+
+      // Subagent must NOT be blocked by strict orchestration and actually creates the file
+      expect(delegateRes?.isError).not.toBe(true);
+      const createdContent = await fs.readFile(path.join(tempTestDir, 'strict_created.txt'), 'utf-8');
+      expect(createdContent).toBe('Created by coder');
+    });
+
+    it('keeps direct tools available when subagentsEnabled is false even if strictOrchestration is true', async () => {
+      const engine = new AgentCoreEngine({
+        workspaceRoot: tempTestDir,
+        experienceLearningEnabled: false,
+        autoTestEnabled: false,
+        gitCheckpointEnabled: false,
+      });
+
+      let resolvedToolNames: string[] = [];
+      let capturedPrompt = '';
+      const mockProvider = new MockProvider({
+        script: [{ thought: 'Done', text: 'OK' }],
+      });
+      const origStream = mockProvider.streamCompletion.bind(mockProvider);
+      mockProvider.streamCompletion = async (messages, systemPrompt, tools, onChunk, signal) => {
+        resolvedToolNames = tools.map((t) => t.name);
+        capturedPrompt = systemPrompt;
+        return origStream(messages, systemPrompt, tools, onChunk, signal);
+      };
+
+      await engine.startTask('Single agent fallback', {
+        mode: 'code',
+        subagentsEnabled: false,
+        strictOrchestration: true,
+        customProvider: mockProvider,
+      });
+
+      expect(resolvedToolNames).toContain('read_file');
+      expect(resolvedToolNames).toContain('write_file');
+      expect(resolvedToolNames).toContain('edit_file');
+      expect(resolvedToolNames).toContain('run_command');
+      expect(resolvedToolNames).not.toContain('invoke_subagent');
+      expect(capturedPrompt).not.toContain('STRICT ORCHESTRATION MODE');
+    });
+  });
 });

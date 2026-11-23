@@ -90,8 +90,12 @@ export const Header: React.FC = () => {
       for (const m of rawLiveModels) {
         if (!m || !m.id) continue;
         const base = m.id.replace(/:acp$/i, '');
-        // 去除 ID 帶有 -(low|medium|high) 的多餘選項 (保留 gpt-oss-120b-medium)
-        if (base.toLowerCase() !== 'gpt-oss-120b-medium' && /-(low|medium|high)$/i.test(base)) {
+        // 去除 ID 帶有 -(low|medium|high|xhigh) 的多餘選項 (保留 gpt-oss-120b-medium 與 gemini-pro-orchestrator-*)
+        if (
+          base.toLowerCase() !== 'gpt-oss-120b-medium' &&
+          !/^gemini-pro-orchestrator-/i.test(base) &&
+          /-(low|medium|high|xhigh)$/i.test(base)
+        ) {
           continue;
         }
 
@@ -108,13 +112,17 @@ export const Header: React.FC = () => {
     return rawLiveModels;
   }, [selectedProvider, rawLiveModels]);
 
-  // 若當前 selectedModel 帶有 -(low|medium|high)（例如歷史 localStorage 殘留的 gemini-3.8-flash-medium），自動校正為基礎模型
+  // 若當前 selectedModel 帶有 -(low|medium|high|xhigh)（例如歷史 localStorage 殘留的 gemini-3.8-flash-medium），自動校正為基礎模型
   React.useEffect(() => {
     if (selectedProvider === 'antigravity' && selectedModel) {
       const hasAcp = selectedModel.toLowerCase().endsWith(':acp');
       const base = hasAcp ? selectedModel.slice(0, -4) : selectedModel;
-      if (base.toLowerCase() !== 'gpt-oss-120b-medium' && /-(low|medium|high)$/i.test(base)) {
-        const cleanBase = base.replace(/-(low|medium|high)$/i, '');
+      if (
+        base.toLowerCase() !== 'gpt-oss-120b-medium' &&
+        !/^gemini-pro-orchestrator-/i.test(base) &&
+        /-(low|medium|high|xhigh)$/i.test(base)
+      ) {
+        const cleanBase = base.replace(/-(low|medium|high|xhigh)$/i, '');
         const acpCandidate = `${cleanBase}:acp`;
         const corrected = hasAcp
           ? acpCandidate

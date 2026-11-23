@@ -5,6 +5,7 @@ import type {
   LLMProviderType,
   QuestionPrompt,
   SubagentInstanceInfo,
+  SubagentModelTier,
   SubagentStatus,
   TaskState,
   ThinkingDepth,
@@ -122,6 +123,8 @@ export interface ClientToServerEvents {
     enableWorktree?: boolean;
     enableCheckpoint?: boolean;
     subagentsEnabled?: boolean;
+    modelTierMap?: Partial<Record<SubagentModelTier, string>>;
+    strictOrchestration?: boolean;
     antigravityMode?: AntigravityExecutionMode;
     thinkingDepth?: ThinkingDepth;
     contextFiles?: string[];

@@ -13,7 +13,9 @@ import {
   loadSavedCustomProviders,
   loadSavedProviderBaseUrls,
   loadSavedSessions,
+  loadSavedSubagentModelTierMaps,
   PROVIDER_DEFAULT_MODELS,
+  sanitizeSubagentTierMap,
   syncSettingsToDB,
 } from '../utils.js';
 
@@ -72,6 +74,8 @@ export const createSettingsSlice: StateCreator<AgentStoreState, [], [], Settings
   gitCheckpointEnabled: localStorage.getItem('harni_web_git_checkpoint_enabled') !== 'false',
   worktreeIsolationEnabled: localStorage.getItem('harni_web_worktree_isolation_enabled') === 'true',
   subagentsEnabled: localStorage.getItem('harni_web_subagents_enabled') !== 'false',
+  subagentModelTierMaps: loadSavedSubagentModelTierMaps(),
+  strictOrchestration: localStorage.getItem('harni_web_strict_orchestration') === 'true',
   contextWindow: savedContextWindow,
   modelContextWindows: loadSavedModelContextWindows(),
   quotaInfo: null,
@@ -232,6 +236,26 @@ export const createSettingsSlice: StateCreator<AgentStoreState, [], [], Settings
     localStorage.setItem('harni_web_subagents_enabled', String(enabled));
     set({ subagentsEnabled: enabled });
     syncSettingsToDB({ subagents_enabled: String(enabled) });
+  },
+
+  setSubagentModelTierMap: (provider, tierMap) => {
+    const clean = sanitizeSubagentTierMap(tierMap);
+    const next = { ...(get().subagentModelTierMaps || {}) };
+    if (Object.keys(clean).length > 0) {
+      next[provider] = clean;
+    } else {
+      delete next[provider];
+    }
+    const serialized = JSON.stringify(next);
+    localStorage.setItem('harni_web_subagent_model_tier_maps', serialized);
+    set({ subagentModelTierMaps: next });
+    syncSettingsToDB({ subagent_model_tier_maps: serialized });
+  },
+
+  setStrictOrchestration: (enabled) => {
+    localStorage.setItem('harni_web_strict_orchestration', String(enabled));
+    set({ strictOrchestration: enabled });
+    syncSettingsToDB({ strict_orchestration: String(enabled) });
   },
 
   setContextWindow: (contextWindow) => {

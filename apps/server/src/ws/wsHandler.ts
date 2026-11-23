@@ -7,17 +7,39 @@ import {
   type ClientMessage,
   type ServerMessage,
   type ServerToClientEvents,
+  type SubagentModelTier,
 } from '@harni/types';
 import type { FSService } from '../services/fsService.js';
 import type { PTYService } from '../services/ptyService.js';
 import type { DBService } from '../services/dbService.js';
-import { AntigravityBridgeManager } from '../services/antigravityBridgeManager.js';
 import { AnthropicAuthPage } from '../services/anthropicAuthPage.js';
 import { OpenAIAuthPage } from '../services/openaiAuthPage.js';
 import {
   getAllowedWorkspaceRoots as collectAllowedWorkspaceRoots,
   resolveAuthorizedWorkspaceRoot,
 } from '../utils/workspaceSecurity.js';
+
+const ALLOWED_SUBAGENT_TIERS: ReadonlyArray<SubagentModelTier> = ['fast', 'reasoning', 'inherit'];
+
+function sanitizeModelTierMap(
+  raw: unknown,
+): Partial<Record<SubagentModelTier, string>> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return undefined;
+  }
+  const record = raw as Record<string, unknown>;
+  const sanitized: Partial<Record<SubagentModelTier, string>> = {};
+  for (const tier of ALLOWED_SUBAGENT_TIERS) {
+    const value = record[tier];
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed.length > 0) {
+        sanitized[tier] = trimmed;
+      }
+    }
+  }
+  return sanitized;
+}
 
 export class WebSocketHandler {
   private clients = new Set<WebSocket>();
@@ -302,6 +324,8 @@ export class WebSocketHandler {
           enableWorktree,
           enableCheckpoint,
           subagentsEnabled,
+          modelTierMap,
+          strictOrchestration,
           contextWindow,
         } = msg.payload;
 
@@ -334,20 +358,6 @@ export class WebSocketHandler {
         }
         if (validatedRequestedRoot) {
           this.clientWorkspaceRoots.set(ws, validatedRequestedRoot);
-        }
-
-        if (provider === 'antigravity') {
-          try {
-            const manager = AntigravityBridgeManager.getInstance();
-            const bridgeReady = await manager.checkHealth();
-            if (!bridgeReady) {
-              console.warn(
-                `[WS] ⚠️ External Antigravity Bridge is offline on ${manager.getBaseURL()}. Please ensure the external bridge is running.`,
-              );
-            }
-          } catch (err) {
-            console.warn('[WS] Failed to probe external Antigravity Bridge:', err);
-          }
         }
 
         const dbApiKey = provider && this.dbService
@@ -410,6 +420,27 @@ export class WebSocketHandler {
         const rawAgyMode = String(msg.payload.antigravityMode || dbAgyMode || envAgyMode || 'acp').toLowerCase();
         const antigravityMode: 'acp' | 'direct' = rawAgyMode === 'direct' ? 'direct' : 'acp';
 
+        let effectiveModelTierMap = sanitizeModelTierMap(modelTierMap);
+        if (effectiveModelTierMap === undefined && provider && this.dbService) {
+          const dbTierMapsRaw = this.dbService.getSetting('subagent_model_tier_maps');
+          if (dbTierMapsRaw) {
+            try {
+              const parsed = JSON.parse(dbTierMapsRaw) as unknown;
+              if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                const providerMap = (parsed as Record<string, unknown>)[provider];
+                effectiveModelTierMap = sanitizeModelTierMap(providerMap);
+              }
+            } catch {
+              // Ignore malformed DB setting
+            }
+          }
+        }
+
+        const effectiveStrictOrchestration =
+          typeof strictOrchestration === 'boolean'
+            ? strictOrchestration
+            : this.dbService?.getSetting('strict_orchestration') === 'true';
+
         this.engine
           .startTask(prompt, {
             sessionId,
@@ -434,6 +465,8 @@ export class WebSocketHandler {
             enableWorktree,
             enableCheckpoint,
             subagentsEnabled,
+            modelTierMap: effectiveModelTierMap,
+            strictOrchestration: effectiveStrictOrchestration,
             contextWindow,
           })
           .catch((err: unknown) => {

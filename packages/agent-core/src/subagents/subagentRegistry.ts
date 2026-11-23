@@ -39,8 +39,9 @@ export class SubagentRegistry {
       ? explicitModel
       : (definition?.modelTier || (isTierKeyword(definition?.model) ? definition.model : undefined) || 'inherit');
 
-    if (customTierMap?.[tier]) {
-      return customTierMap[tier];
+    const mappedTierModel = customTierMap?.[tier]?.trim();
+    if (mappedTierModel) {
+      return mappedTierModel;
     }
 
     if (tier === 'fast') {
@@ -85,18 +86,20 @@ export class SubagentRegistry {
 
   public normalizeArchetypeName(name: string): string {
     const lower = name.toLowerCase();
-    if (lower === 'agy-researcher') return 'researcher';
+    if (lower === 'research' || lower === 'agy-researcher') return 'researcher';
     if (lower === 'agy-worker' || lower === 'agy') return 'coder';
     if (lower === 'agy-tester') return 'reviewer';
     return lower;
   }
 
   public get(name: string): SubagentDefinition | undefined {
-    return this.definitions.get(this.normalizeArchetypeName(name));
+    const lower = name.toLowerCase();
+    return this.definitions.get(lower) ?? this.definitions.get(this.normalizeArchetypeName(name));
   }
 
   public has(name: string): boolean {
-    return this.definitions.has(this.normalizeArchetypeName(name));
+    const lower = name.toLowerCase();
+    return this.definitions.has(lower) || this.definitions.has(this.normalizeArchetypeName(name));
   }
 
   public getAll(): SubagentDefinition[] {
@@ -104,7 +107,12 @@ export class SubagentRegistry {
   }
 
   public remove(name: string): boolean {
-    return this.definitions.delete(this.normalizeArchetypeName(name));
+    const lower = name.toLowerCase();
+    if (this.definitions.delete(lower)) {
+      return true;
+    }
+    const normalized = this.normalizeArchetypeName(name);
+    return normalized !== lower ? this.definitions.delete(normalized) : false;
   }
 
   /**

@@ -4,6 +4,7 @@ import type {
   FileDiagnosticsResult,
   LLMProviderType,
   SubagentInstanceInfo,
+  SubagentModelTier,
   SubagentStatus,
   SubagentStructuredReport,
   ThinkingDepth,
@@ -21,6 +22,7 @@ export interface SpawnSubagentParams {
   depth?: number;
   model?: string;
   parentModel?: string;
+  modelTierMap?: Partial<Record<SubagentModelTier, string>>;
   provider?: LLMProviderType;
   workspaceRoot?: string;
   customProvider?: BaseLLMProvider;

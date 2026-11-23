@@ -20,6 +20,7 @@ import type {
   ScheduleInfo,
   SessionChangedFile,
   SubagentInstanceInfo,
+  SubagentModelTier,
   SwarmBoardState,
   SwarmMessage,
   ThinkingDepth,
@@ -50,6 +51,7 @@ export type {
   ScheduleInfo,
   SessionChangedFile,
   SubagentInstanceInfo,
+  SubagentModelTier,
   SwarmBoardState,
   SwarmMessage,
   ThinkingDepth,
@@ -188,6 +190,8 @@ export interface SettingsSliceState {
   gitCheckpointEnabled: boolean;
   worktreeIsolationEnabled: boolean;
   subagentsEnabled: boolean;
+  subagentModelTierMaps: Record<string, Partial<Record<SubagentModelTier, string>>>;
+  strictOrchestration: boolean;
   contextWindow: number | null;
   modelContextWindows: Record<string, number>;
   quotaInfo: ModelQuotaResponse | null;
@@ -220,6 +224,11 @@ export interface SettingsSliceActions {
   setGitCheckpointEnabled: (enabled: boolean) => void;
   setWorktreeIsolationEnabled: (enabled: boolean) => void;
   setSubagentsEnabled: (enabled: boolean) => void;
+  setSubagentModelTierMap: (
+    provider: string,
+    tierMap: Partial<Record<SubagentModelTier, string>>,
+  ) => void;
+  setStrictOrchestration: (enabled: boolean) => void;
   setContextWindow: (contextWindow: number | null) => void;
   setModelContextWindow: (modelId: string, contextWindow: number | null) => void;
   setSettingsOpen: (open: boolean) => void;

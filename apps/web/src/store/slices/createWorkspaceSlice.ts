@@ -13,6 +13,7 @@ import {
 import type { AgentStoreState, WorkspaceSlice } from '../types.js';
 import {
   apiFetch,
+  cleanChangedFilePath,
   deleteFolderFromDB,
   getServerAuthToken,
   loadSavedFolders,
@@ -590,7 +591,15 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
           }
 
           case 'subagent:completed': {
-            const { subagents, currentSessionId, sessionChangedFiles } = get();
+            const {
+              subagents,
+              currentSessionId,
+              sessionChangedFiles,
+              sessions,
+              folders,
+              activeFolderId,
+              workspaceInfo,
+            } = get();
             const sid = msg.payload.sessionId || currentSessionId;
             const existing = subagents[sid] || [];
             const updated = existing.map((s) =>
@@ -619,23 +628,45 @@ export const createWorkspaceSlice: StateCreator<AgentStoreState, [], [], Workspa
 
             const reportedFiles = msg.payload.structuredReport?.modifiedFiles;
             if (Array.isArray(reportedFiles) && reportedFiles.length > 0) {
-              const now = Date.now();
-              const incomingFiles: SessionChangedFile[] = reportedFiles
-                .filter((p): p is string => typeof p === 'string' && p.trim().length > 0)
-                .map((filePath) => ({
+              const matchedSubagent = updated.find((s) => s.id === msg.payload.subagentId);
+              const targetSession = sessions.find((s) => s.id === sid);
+              const targetFolder = folders.find(
+                (f) => f.id === (targetSession?.folderId || activeFolderId),
+              );
+              const workspaceRoot =
+                msg.payload.worktreePath ||
+                matchedSubagent?.worktreePath ||
+                targetFolder?.path ||
+                workspaceInfo?.rootPath;
+
+              const cleanedPaths = Array.from(
+                new Set(
+                  reportedFiles
+                    .filter((p): p is string => typeof p === 'string')
+                    .map((p) => cleanChangedFilePath(p, workspaceRoot))
+                    .filter((p): p is string => p !== null),
+                ),
+              );
+
+              if (cleanedPaths.length > 0) {
+                const now = Date.now();
+                const incomingFiles: SessionChangedFile[] = cleanedPaths.map((filePath) => ({
                   path: filePath,
                   updatedAt: now,
                   source: 'subagent' as const,
                   subagentId: msg.payload.subagentId,
                   subagentRole: msg.payload.role,
                 }));
-              set({
-                subagents: updatedSubagents,
-                sessionChangedFiles: {
-                  ...sessionChangedFiles,
-                  [sid]: upsertChangedFiles(sessionChangedFiles[sid] || [], incomingFiles),
-                },
-              });
+                set({
+                  subagents: updatedSubagents,
+                  sessionChangedFiles: {
+                    ...sessionChangedFiles,
+                    [sid]: upsertChangedFiles(sessionChangedFiles[sid] || [], incomingFiles),
+                  },
+                });
+              } else {
+                set({ subagents: updatedSubagents });
+              }
             } else {
               set({ subagents: updatedSubagents });
             }

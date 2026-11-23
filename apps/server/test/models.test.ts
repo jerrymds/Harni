@@ -95,44 +95,44 @@ describe('ModelService & /api/models API Endpoint', () => {
     }
   });
 
-  it('ModelService.fetchModels normalizes Antigravity bridge models and strips thinking level annotations and badges', async () => {
-    const originalFetch = globalThis.fetch;
-    try {
-      globalThis.fetch = vi.fn().mockImplementation(async (url: any) => {
-        const urlStr = String(url);
-        if (urlStr.includes('/api/models')) {
-          return {
-            ok: true,
-            json: async () => ({
-              models: [
-                { id: 'gemini-3.8-flash-high', name: 'Gemini 3.8 Flash (High)' },
-                { id: 'gemini-3.8-flash-low', name: 'Gemini 3.8 Flash (Low)' },
-                { id: 'gemini-4-argon-medium', name: 'Gemini 4 Argon (Medium) (Antigravity)' },
-                { id: 'claude-opus-5-5-high', name: 'Claude Opus 5.5 (High)' },
-                { id: 'claude-sonnet-5-5-low', name: 'Claude Sonnet 5.5 (Low) (Antigravity)' },
-                { id: 'gpt-oss-120b-medium-high', name: 'GPT-OSS 120B (High) (ACP Mode)' },
-              ],
-            }),
-          };
-        }
-        return originalFetch(url);
-      }) as any;
+  it('ModelService.parseAgyModelsOutput & mergeAntigravityModels normalize agy models output and strip thinking level annotations and badges', async () => {
+    const rawCliOutput = [
+      'Fetching available models...',
+      '---',
+      'gemini-3.8-flash-high\tGemini 3.8 Flash (High)',
+      'gemini-3.8-flash-low\tGemini 3.8 Flash (Low)',
+      'gemini-4-argon-medium\tGemini 4 Argon (Medium) (Antigravity)',
+      'gemini-4-pro-xhigh\tGemini 4 Pro (XHigh)',
+      'gemini-pro-orchestrator-v1\tGemini Pro Orchestrator V1',
+      'claude-opus-5-5-high\tClaude Opus 5.5 (High)',
+      'claude-sonnet-5-5-low\tClaude Sonnet 5.5 (Low) (Antigravity)',
+      'gpt-oss-120b-medium-high\tGPT-OSS 120B (High) (ACP Mode)',
+    ].join('\n');
 
+    const cliModels = ModelService.parseAgyModelsOutput(rawCliOutput);
+    expect(cliModels.some((m) => m.id.includes('Fetching'))).toBe(false);
+    const spy = vi.spyOn(ModelService, 'fetchAgyCliModels').mockResolvedValue(cliModels);
+
+    try {
       const models = await ModelService.fetchModels({ provider: 'antigravity' });
 
-      // 1. 絕無任何包含 -low、-high，或思考等級 -medium 的 ID (除 gpt-oss-120b-medium 外)
-      const idsWithoutGptOss = models.map((m) => m.id).filter((id) => !id.startsWith('gpt-oss-120b-medium'));
+      // 1. 絕無任何包含 -low、-high、-xhigh，或思考等級 -medium 的 ID (除 gpt-oss-120b-medium 外)
+      const idsWithoutGptOss = models
+        .map((m) => m.id)
+        .filter((id) => !id.startsWith('gpt-oss-120b-medium'));
       for (const id of idsWithoutGptOss) {
         expect(id).not.toContain('-low');
         expect(id).not.toContain('-medium');
         expect(id).not.toContain('-high');
+        expect(id).not.toContain('-xhigh');
       }
 
-      // 2. 絕無任何名稱包含 (Low)、(Medium)、(High)、(Antigravity) 的項目
+      // 2. 絕無任何名稱包含 (Low)、(Medium)、(High)、(XHigh)、(Antigravity) 的項目
       for (const m of models) {
         expect(m.name).not.toContain('(Low)');
         expect(m.name).not.toContain('(Medium)');
         expect(m.name).not.toContain('(High)');
+        expect(m.name).not.toContain('(XHigh)');
         expect(m.name).not.toContain('(Antigravity)');
       }
 
@@ -140,25 +140,34 @@ describe('ModelService & /api/models API Endpoint', () => {
       const flashModels = models.filter((m) => m.id === 'gemini-3.8-flash');
       expect(flashModels.length).toBe(1);
 
-      // 4. 新模型 gemini-4-argon 僅保留一筆純淨的模型
+      // 4. 新模型 gemini-4-argon、gemini-4-pro、gemini-pro-orchestrator-v1 僅保留純淨模型
       const argonModels = models.filter((m) => m.id === 'gemini-4-argon');
       expect(argonModels.length).toBe(1);
-      expect(argonModels[0].name).toBe('Gemini 4 Argon');
+      expect(argonModels[0]!.name).toBe('Gemini 4 Argon');
+
+      const pro4Models = models.filter((m) => m.id === 'gemini-4-pro');
+      expect(pro4Models.length).toBe(1);
+      expect(pro4Models[0]!.name).toBe('Gemini 4 Pro');
+      expect(pro4Models[0]!.contextWindow).toBe(2097152);
+
+      const orchestratorModels = models.filter((m) => m.id === 'gemini-pro-orchestrator-v1');
+      expect(orchestratorModels.length).toBe(1);
 
       // 5. 官方 ACP 模型直接採用官方定義
       const opusModels = models.filter((m) => m.id === 'claude-opus-5-5:acp');
       expect(opusModels.length).toBe(1);
-      expect(opusModels[0].name).toBe('Claude 3.5 Opus (ACP)');
+      expect(opusModels[0]!.name).toBe('Claude 3.5 Opus (ACP)');
 
       const sonnetModels = models.filter((m) => m.id === 'claude-sonnet-5-5:acp');
       expect(sonnetModels.length).toBe(1);
-      expect(sonnetModels[0].name).toBe('Claude 3.5 Sonnet (ACP)');
+      expect(sonnetModels[0]!.name).toBe('Claude 3.5 Sonnet (ACP)');
 
       const gptOssModels = models.filter((m) => m.id === 'gpt-oss-120b-medium:acp');
       expect(gptOssModels.length).toBe(1);
-      expect(gptOssModels[0].name).toBe('GPT-OSS 120B (ACP)');
+      expect(gptOssModels[0]!.name).toBe('GPT-OSS 120B (ACP)');
     } finally {
-      globalThis.fetch = originalFetch;
+      spy.mockRestore();
+      ModelService.clearAgyCliModelsCache();
     }
   });
 });

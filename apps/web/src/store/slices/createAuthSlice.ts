@@ -1,11 +1,12 @@
 import type { StateCreator } from 'zustand';
-import type { ChatSession, LLMProviderType, WorkspaceFolder } from '@harni/types';
+import type { ChatSession, LLMProviderType, SubagentModelTier, WorkspaceFolder } from '@harni/types';
 import type { AgentStoreState, AuthSlice } from '../types.js';
 import {
   apiFetch,
   getApiBase,
   loadGoogleAuthMetadata,
   persistGoogleAuthMetadata,
+  sanitizeSubagentModelTierMaps,
 } from '../utils.js';
 
 export const createAuthSlice: StateCreator<AgentStoreState, [], [], AuthSlice> = (set, get) => ({
@@ -342,6 +343,12 @@ export const createAuthSlice: StateCreator<AgentStoreState, [], [], AuthSlice> =
         let loadedContextWindows: Record<string, number> = { ...get().modelContextWindows };
         let loadedGlobalContextWindow: number | null = get().contextWindow;
         let loadedCustomProviders = get().customProviders;
+        let loadedSubagentModelTierMaps: Record<
+          string,
+          Partial<Record<SubagentModelTier, string>>
+        > = { ...(get().subagentModelTierMaps || {}) };
+        let loadedStrictOrchestration: boolean = Boolean(get().strictOrchestration);
+        let loadedSubagentsEnabled: boolean = get().subagentsEnabled ?? true;
 
         if (settings && typeof settings === 'object') {
           for (const [k, v] of Object.entries(settings)) {
@@ -370,6 +377,30 @@ export const createAuthSlice: StateCreator<AgentStoreState, [], [], AuthSlice> =
             } else if (k === 'antigravity_bridge_mode' && (v === 'acp' || v === 'direct')) {
               set({ antigravityMode: v });
               localStorage.setItem('harni_web_antigravity_mode', v);
+            } else if (k === 'subagent_model_tier_maps' && typeof v === 'string') {
+              try {
+                const parsed = JSON.parse(v) as unknown;
+                if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+                  const sanitized = sanitizeSubagentModelTierMaps(parsed);
+                  loadedSubagentModelTierMaps = sanitized;
+                  localStorage.setItem(
+                    'harni_web_subagent_model_tier_maps',
+                    JSON.stringify(sanitized),
+                  );
+                }
+              } catch {}
+            } else if (k === 'strict_orchestration' && typeof v === 'string') {
+              loadedStrictOrchestration = v === 'true';
+              localStorage.setItem(
+                'harni_web_strict_orchestration',
+                String(loadedStrictOrchestration),
+              );
+            } else if (k === 'subagents_enabled' && typeof v === 'string') {
+              loadedSubagentsEnabled = v !== 'false';
+              localStorage.setItem(
+                'harni_web_subagents_enabled',
+                String(loadedSubagentsEnabled),
+              );
             }
           }
         }
@@ -381,6 +412,9 @@ export const createAuthSlice: StateCreator<AgentStoreState, [], [], AuthSlice> =
             customProviders: loadedCustomProviders,
             contextWindow: loadedGlobalContextWindow,
             modelContextWindows: loadedContextWindows,
+            subagentModelTierMaps: loadedSubagentModelTierMaps,
+            strictOrchestration: loadedStrictOrchestration,
+            subagentsEnabled: loadedSubagentsEnabled,
           });
         } else {
           set({
@@ -388,6 +422,9 @@ export const createAuthSlice: StateCreator<AgentStoreState, [], [], AuthSlice> =
             customProviders: loadedCustomProviders,
             contextWindow: loadedGlobalContextWindow,
             modelContextWindows: loadedContextWindows,
+            subagentModelTierMaps: loadedSubagentModelTierMaps,
+            strictOrchestration: loadedStrictOrchestration,
+            subagentsEnabled: loadedSubagentsEnabled,
           });
         }
 

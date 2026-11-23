@@ -34,6 +34,9 @@ const originalActions = {
   setWorktreeIsolationEnabled: useAgentStore.getState().setWorktreeIsolationEnabled,
   setAutoTestEnabled: useAgentStore.getState().setAutoTestEnabled,
   setAutoTestCommand: useAgentStore.getState().setAutoTestCommand,
+  setSubagentsEnabled: useAgentStore.getState().setSubagentsEnabled,
+  setSubagentModelTierMap: useAgentStore.getState().setSubagentModelTierMap,
+  setStrictOrchestration: useAgentStore.getState().setStrictOrchestration,
   fetchCredentials: useAgentStore.getState().fetchCredentials,
   fetchAnthropicAuthStatus: useAgentStore.getState().fetchAnthropicAuthStatus,
   fetchOpenAIAuthStatus: useAgentStore.getState().fetchOpenAIAuthStatus,
@@ -56,6 +59,8 @@ describe('SettingsModal Tools Tab & Workflow Plugin Convergence', () => {
       selectedModel: 'test-model',
       autoApprove: false,
       subagentsEnabled: true,
+      subagentModelTierMaps: {},
+      strictOrchestration: false,
       autoTestEnabled: true,
       autoTestCommand: '',
       gitCheckpointEnabled: true,
@@ -312,5 +317,132 @@ describe('SettingsModal Tools Tab & Workflow Plugin Convergence', () => {
     expect(promptCall2.payload.autoTest).toBe(true);
     expect(promptCall2.payload.enableWorktree).toBe(false);
     expect(promptCall2.payload.enableCheckpoint).toBe(true);
+  });
+
+  it('configures per-provider modelTierMap and strictOrchestration in Tools tab, persists them, and sends them in sendPrompt', () => {
+    useAgentStore.setState({
+      fetchWorkflowPlugins: vi.fn().mockResolvedValue(undefined),
+      fetchCredentials: vi.fn().mockResolvedValue(undefined),
+      fetchAnthropicAuthStatus: vi.fn().mockResolvedValue(undefined),
+      fetchOpenAIAuthStatus: vi.fn().mockResolvedValue(undefined),
+      fetchModels: vi.fn().mockResolvedValue(undefined),
+      fetchSkills: vi.fn().mockResolvedValue(undefined),
+      selectedProvider: 'openrouter',
+      selectedModel: 'anthropic/claude-3.5-sonnet',
+      subagentsEnabled: true,
+      subagentModelTierMaps: {},
+      strictOrchestration: false,
+      availableModels: {
+        openrouter: [
+          { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+          { id: 'openai/o3-mini', name: 'o3-mini' },
+        ],
+      },
+    });
+
+    render(<SettingsModal />);
+    fireEvent.click(screen.getByText('工具 (Tools)'));
+
+    const strictToggle = screen.getByRole('button', { name: '切換 強制調度模式' });
+    const fastInput = screen.getByLabelText('快速層模型 (fast)') as HTMLInputElement;
+    const reasoningInput = screen.getByLabelText('推理層模型 (reasoning)') as HTMLInputElement;
+
+    expect(strictToggle).toBeInTheDocument();
+    expect(fastInput).toBeInTheDocument();
+    expect(reasoningInput).toBeInTheDocument();
+
+    fireEvent.click(strictToggle);
+    fireEvent.change(fastInput, { target: { value: 'google/gemini-2.5-flash' } });
+    fireEvent.change(reasoningInput, { target: { value: 'openai/o3-mini' } });
+    fireEvent.click(screen.getByRole('button', { name: /儲存設定/ }));
+
+    expect(useAgentStore.getState().strictOrchestration).toBe(true);
+    expect(useAgentStore.getState().subagentModelTierMaps.openrouter).toEqual({
+      fast: 'google/gemini-2.5-flash',
+      reasoning: 'openai/o3-mini',
+    });
+    expect(localStorage.getItem('harni_web_strict_orchestration')).toBe('true');
+    expect(JSON.parse(localStorage.getItem('harni_web_subagent_model_tier_maps') || '{}')).toEqual({
+      openrouter: {
+        fast: 'google/gemini-2.5-flash',
+        reasoning: 'openai/o3-mini',
+      },
+    });
+
+    // Verify sendPrompt transmits modelTierMap for current provider and strictOrchestration
+    const wsSendSpy = vi.fn();
+    useAgentStore.setState({
+      ws: { readyState: 1, send: wsSendSpy } as unknown as WebSocket,
+      currentSessionId: 'session_tier_send',
+      sessions: [
+        {
+          id: 'session_tier_send',
+          title: 'Tier Test',
+          messageCount: 0,
+          mode: 'code',
+          provider: 'openrouter',
+          model: 'anthropic/claude-3.5-sonnet',
+          status: 'idle',
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          messages: [],
+        },
+      ],
+      messages: [],
+      folders: [],
+      activeFolderId: 'folder_default',
+      selectedMode: 'code',
+      selectedProvider: 'openrouter',
+      selectedModel: 'anthropic/claude-3.5-sonnet',
+    });
+
+    useAgentStore.getState().sendPrompt('delegate with tier map');
+
+    const promptCall = wsSendSpy.mock.calls
+      .map((c) => JSON.parse(c[0] as string))
+      .find((m) => m.type === 'user:prompt');
+
+    expect(promptCall).toBeDefined();
+    expect(promptCall.payload.strictOrchestration).toBe(true);
+    expect(promptCall.payload.modelTierMap).toEqual({
+      fast: 'google/gemini-2.5-flash',
+      reasoning: 'openai/o3-mini',
+    });
+
+    // When disabling Hierarchical Subagents toggle, sub-controls should hide
+    fireEvent.click(screen.getByRole('button', { name: '切換 多子代理人協同' }));
+    expect(screen.queryByRole('button', { name: '切換 強制調度模式' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('快速層模型 (fast)')).not.toBeInTheDocument();
+  });
+
+  it('keeps modelTierMap isolated per provider when switching providers in Models tab', () => {
+    useAgentStore.setState({
+      fetchWorkflowPlugins: vi.fn().mockResolvedValue(undefined),
+      fetchCredentials: vi.fn().mockResolvedValue(undefined),
+      fetchAnthropicAuthStatus: vi.fn().mockResolvedValue(undefined),
+      fetchOpenAIAuthStatus: vi.fn().mockResolvedValue(undefined),
+      fetchModels: vi.fn().mockResolvedValue(undefined),
+      fetchSkills: vi.fn().mockResolvedValue(undefined),
+      selectedProvider: 'cline',
+      selectedModel: 'cline-pass/deepseek-v4-pro',
+      subagentsEnabled: true,
+      subagentModelTierMaps: {
+        cline: { fast: 'cline-fast-model' },
+        openai: { fast: 'gpt-4o-mini-custom', reasoning: 'o3-mini-custom' },
+      },
+    });
+
+    render(<SettingsModal />);
+    fireEvent.click(screen.getByText('工具 (Tools)'));
+    expect((screen.getByLabelText('快速層模型 (fast)') as HTMLInputElement).value).toBe('cline-fast-model');
+    expect((screen.getByLabelText('推理層模型 (reasoning)') as HTMLInputElement).value).toBe('');
+
+    // Switch back to Models tab, change provider to OpenAI, then check Tools tab
+    fireEvent.click(screen.getByText('模型 (Models)'));
+    fireEvent.click(screen.getByText('OpenAI GPT'));
+    fireEvent.click(screen.getByText('工具 (Tools)'));
+
+    expect((screen.getByLabelText('快速層模型 (fast)') as HTMLInputElement).value).toBe('gpt-4o-mini-custom');
+    expect((screen.getByLabelText('推理層模型 (reasoning)') as HTMLInputElement).value).toBe('o3-mini-custom');
   });
 });

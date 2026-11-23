@@ -2,7 +2,6 @@ import type * as http from 'node:http';
 import type { LLMProviderType } from '@harni/types';
 import type { Router } from './router.js';
 import { sendJsonResponse } from '../utils/http.js';
-import { AntigravityBridgeManager } from '../services/antigravityBridgeManager.js';
 import { OpenAIAuthPage } from '../services/openaiAuthPage.js';
 
 export function registerModelRoutes(router: Router): void {
@@ -24,13 +23,6 @@ export function registerModelRoutes(router: Router): void {
         explicitBaseURL && explicitBaseURL.trim()
           ? explicitBaseURL.trim()
           : (dbBaseURL || undefined);
-
-      if (provider === 'antigravity') {
-        const manager = AntigravityBridgeManager.getInstance();
-        if (baseURL) {
-          manager.setBaseURL(baseURL);
-        }
-      }
 
       // Claude subscription login: /v1/models doesn't accept OAuth tokens cleanly,
       // so serve the curated subscription model list.

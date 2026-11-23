@@ -4,6 +4,11 @@ import {
   ArrowLeft,
   ArrowUpRight,
   Bot,
+  ChevronDown,
+  ChevronRight,
+  ChevronsDownUp,
+  ChevronsUpDown,
+  Cpu,
   FileCode,
   Flame,
   FolderGit2,
@@ -165,10 +170,18 @@ export const OrchestratorPanel: React.FC = () => {
 
   const [filter, setFilter] = useState<SessionFilter>('all');
   const [inspectedSessionId, setInspectedSessionId] = useState<string | null>(null);
+  const [collapsedSessions, setCollapsedSessions] = useState<Record<string, boolean>>({});
 
   const safeSessions = sessions || [];
   const safeSubagents = subagents || {};
   const safeChangedFiles = sessionChangedFiles || {};
+
+  const toggleSessionCollapse = (sessionId: string) => {
+    setCollapsedSessions((prev) => ({
+      ...prev,
+      [sessionId]: !prev[sessionId],
+    }));
+  };
 
   const isSessionActive = (session: ChatSession): boolean => {
     const status = session.status || 'idle';
@@ -239,6 +252,21 @@ export const OrchestratorPanel: React.FC = () => {
         return sorted;
     }
   }, [safeSessions, safeSubagents, filter]);
+
+  const allFilteredCollapsed =
+    filteredSessions.length > 0 &&
+    filteredSessions.every((s) => Boolean(collapsedSessions[s.id]));
+
+  const toggleCollapseAll = () => {
+    setCollapsedSessions((prev) => {
+      const next = { ...prev };
+      const targetState = !allFilteredCollapsed;
+      for (const s of filteredSessions) {
+        next[s.id] = targetState;
+      }
+      return next;
+    });
+  };
 
   const getFolderName = (folderId?: string) =>
     (folders || []).find((f) => f.id === folderId)?.name || '預設工作區';
@@ -364,21 +392,43 @@ export const OrchestratorPanel: React.FC = () => {
             <h2 className="text-sm font-bold text-ag-textPrimary">
               多任務與子代理人執行矩陣
             </h2>
-            <div className="flex items-center gap-1 rounded-xl border border-ag-border bg-ag-panel p-1 shadow-soft">
-              {filterTabs.map((tab) => (
+            <div className="flex flex-wrap items-center gap-2">
+              {filteredSessions.length > 0 && (
                 <button
-                  key={tab.id}
                   type="button"
-                  onClick={() => setFilter(tab.id)}
-                  className={`rounded-lg px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer ${
-                    filter === tab.id
-                      ? 'bg-ag-primary text-white font-semibold'
-                      : 'text-ag-textMuted hover:text-ag-textPrimary'
-                  }`}
+                  data-testid="toggle-collapse-all-sessions"
+                  onClick={toggleCollapseAll}
+                  className="inline-flex items-center gap-1 rounded-xl border border-ag-border bg-ag-panel px-2.5 py-1.5 text-xs font-medium text-ag-textSecondary hover:text-ag-textPrimary hover:bg-ag-sidebar shadow-soft cursor-pointer"
                 >
-                  {tab.label} ({tab.count})
+                  {allFilteredCollapsed ? (
+                    <>
+                      <ChevronsUpDown className="h-3.5 w-3.5" />
+                      <span>全部展開</span>
+                    </>
+                  ) : (
+                    <>
+                      <ChevronsDownUp className="h-3.5 w-3.5" />
+                      <span>全部摺疊</span>
+                    </>
+                  )}
                 </button>
-              ))}
+              )}
+              <div className="flex items-center gap-1 rounded-xl border border-ag-border bg-ag-panel p-1 shadow-soft">
+                {filterTabs.map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setFilter(tab.id)}
+                    className={`rounded-lg px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer ${
+                      filter === tab.id
+                        ? 'bg-ag-primary text-white font-semibold'
+                        : 'text-ag-textMuted hover:text-ag-textPrimary'
+                    }`}
+                  >
+                    {tab.label} ({tab.count})
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
@@ -396,6 +446,7 @@ export const OrchestratorPanel: React.FC = () => {
                 const isSelected = inspectedSessionId === session.id;
                 const isCurrent = currentSessionId === session.id;
                 const busy = isSessionActive(session);
+                const isCollapsed = Boolean(collapsedSessions[session.id]);
 
                 return (
                   <div
@@ -406,49 +457,80 @@ export const OrchestratorPanel: React.FC = () => {
                         prev === session.id ? null : session.id,
                       )
                     }
-                    className={`rounded-2xl border p-4 shadow-soft transition-all cursor-pointer ${
+                    className={`rounded-2xl border shadow-soft transition-all cursor-pointer ${
+                      isCollapsed ? 'p-3.5' : 'p-4'
+                    } ${
                       isSelected
                         ? 'border-ag-primary bg-ag-primaryLight/20'
                         : 'border-ag-border bg-ag-panel hover:border-ag-primary/40'
                     }`}
                   >
                     <div className="flex flex-wrap items-start justify-between gap-2">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-sm font-bold text-ag-textPrimary truncate">
-                            {session.title}
-                          </span>
-                          <span
-                            className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${statusMeta.badgeClass}`}
-                          >
-                            {statusMeta.label}
-                          </span>
-                          {isCurrent && (
-                            <span className="rounded-full bg-ag-primary/15 px-2 py-0.5 text-[10px] font-semibold text-ag-primary">
-                              當前聚焦
-                            </span>
+                      <div className="flex items-start gap-2 min-w-0 flex-1">
+                        <button
+                          type="button"
+                          data-testid={`toggle-session-collapse-${session.id}`}
+                          aria-expanded={!isCollapsed}
+                          aria-label={`${isCollapsed ? '展開' : '摺疊'}對話卡片 ${session.title}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleSessionCollapse(session.id);
+                          }}
+                          className="mt-0.5 rounded-lg p-1 text-ag-textMuted hover:bg-ag-sidebar hover:text-ag-textPrimary transition-colors cursor-pointer shrink-0"
+                          title={isCollapsed ? '展開對話詳情' : '摺疊對話詳情'}
+                        >
+                          {isCollapsed ? (
+                            <ChevronRight className="h-4 w-4" />
+                          ) : (
+                            <ChevronDown className="h-4 w-4" />
                           )}
-                        </div>
+                        </button>
 
-                        <div className="mt-1.5 flex flex-wrap items-center gap-2.5 text-[11px] text-ag-textMuted">
-                          <span className="inline-flex items-center gap-1">
-                            <FolderGit2 className="h-3 w-3 text-ag-primary" />
-                            {getFolderName(session.folderId)}
-                          </span>
-                          <span className="font-mono">
-                            {session.provider || 'default'} / {session.model || 'auto'}
-                          </span>
-                          <span className="uppercase font-mono">{session.mode}</span>
-                          <span>{session.messageCount} 則訊息</span>
-                          {sessionFiles.length > 0 && (
-                            <span className="text-emerald-600 dark:text-emerald-400 font-medium">
-                              {sessionFiles.length} 檔案異動
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-bold text-ag-textPrimary truncate">
+                              {session.title}
                             </span>
-                          )}
-                          {(session.tokenUsage?.totalTokens || 0) > 0 && (
-                            <span className="font-mono">
-                              {session.tokenUsage?.totalTokens.toLocaleString()} tokens
+                            <span
+                              className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${statusMeta.badgeClass}`}
+                            >
+                              {statusMeta.label}
                             </span>
+                            {isCurrent && (
+                              <span className="rounded-full bg-ag-primary/15 px-2 py-0.5 text-[10px] font-semibold text-ag-primary">
+                                當前聚焦
+                              </span>
+                            )}
+                            {isCollapsed && sessionSubs.length > 0 && (
+                              <span className="inline-flex items-center gap-1 rounded-full border border-indigo-500/25 bg-indigo-500/10 px-2 py-0.5 text-[10px] font-medium text-indigo-600 dark:text-indigo-300">
+                                <Bot className="h-3 w-3" />
+                                <span>子代理人 ({sessionSubs.length})</span>
+                              </span>
+                            )}
+                          </div>
+
+                          {!isCollapsed && (
+                            <div className="mt-1.5 flex flex-wrap items-center gap-2.5 text-[11px] text-ag-textMuted">
+                              <span className="inline-flex items-center gap-1">
+                                <FolderGit2 className="h-3 w-3 text-ag-primary" />
+                                {getFolderName(session.folderId)}
+                              </span>
+                              <span className="font-mono">
+                                {session.provider || 'default'} / {session.model || 'auto'}
+                              </span>
+                              <span className="uppercase font-mono">{session.mode}</span>
+                              <span>{session.messageCount} 則訊息</span>
+                              {sessionFiles.length > 0 && (
+                                <span className="text-emerald-600 dark:text-emerald-400 font-medium">
+                                  {sessionFiles.length} 檔案異動
+                                </span>
+                              )}
+                              {(session.tokenUsage?.totalTokens || 0) > 0 && (
+                                <span className="font-mono">
+                                  {session.tokenUsage?.totalTokens.toLocaleString()} tokens
+                                </span>
+                              )}
+                            </div>
                           )}
                         </div>
                       </div>
@@ -480,7 +562,7 @@ export const OrchestratorPanel: React.FC = () => {
                     </div>
 
                     {/* Nested Subagents */}
-                    {sessionSubs.length > 0 && (
+                    {!isCollapsed && sessionSubs.length > 0 && (
                       <div
                         className="mt-3 pt-3 border-t border-ag-border/70 space-y-1.5"
                         onClick={(e) => e.stopPropagation()}
@@ -506,6 +588,16 @@ export const OrchestratorPanel: React.FC = () => {
                                   <span className="rounded bg-ag-sidebar px-1.5 py-0.5 font-mono text-[10px] text-ag-textMuted border border-ag-border">
                                     {sub.typeName}
                                   </span>
+                                  {sub.model && (
+                                    <span
+                                      data-testid={`subagent-model-${sub.id}`}
+                                      className="inline-flex items-center gap-1 rounded bg-indigo-500/10 px-1.5 py-0.5 font-mono text-[10px] text-indigo-600 dark:text-indigo-300 border border-indigo-500/25 max-w-[200px]"
+                                      title={`執行模型: ${sub.model}`}
+                                    >
+                                      <Cpu className="h-2.5 w-2.5 shrink-0" />
+                                      <span className="truncate">{sub.model}</span>
+                                    </span>
+                                  )}
                                   {sub.worktreeBranch && (
                                     <span className="text-[10px] font-mono text-emerald-500 truncate">
                                       {sub.worktreeBranch}

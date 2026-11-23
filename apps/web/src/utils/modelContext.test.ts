@@ -95,11 +95,14 @@ describe('Model Context Window Resolver & Formatting', () => {
     expect(normalizeAntigravityModelId('gpt-oss-120b-medium:acp')).toBe('gpt-oss-120b-medium:acp');
     expect(normalizeAntigravityModelId('gpt-oss-120b-medium')).toBe('gpt-oss-120b-medium');
     expect(normalizeAntigravityModelId('gpt-oss-120b-medium-high')).toBe('gpt-oss-120b-medium');
+    expect(normalizeAntigravityModelId('gemini-3.8-pro-xhigh')).toBe('gemini-3.8-pro');
+    expect(normalizeAntigravityModelId('gemini-pro-orchestrator-v1')).toBe('gemini-pro-orchestrator-v1');
 
     // Display Name cleaning
     expect(cleanAntigravityDisplayName('Gemini 3.8 Flash (High)')).toBe('Gemini 3.8 Flash');
     expect(cleanAntigravityDisplayName('Gemini 3.8 Flash (Low)')).toBe('Gemini 3.8 Flash');
     expect(cleanAntigravityDisplayName('Gemini 3.8 Flash (Medium)')).toBe('Gemini 3.8 Flash');
+    expect(cleanAntigravityDisplayName('Gemini 3.8 Pro (XHigh)')).toBe('Gemini 3.8 Pro');
     expect(cleanAntigravityDisplayName('Gemini 4 Argon (Medium) (Antigravity)')).toBe('Gemini 4 Argon');
     expect(cleanAntigravityDisplayName('Claude Sonnet 5.5 (High)', 'claude-sonnet-5-5:acp')).toBe('Claude Sonnet 5.5 (ACP)');
     expect(cleanAntigravityDisplayName('Claude 3.5 Sonnet (ACP)', 'claude-sonnet-5-5:acp')).toBe('Claude 3.5 Sonnet (ACP)');

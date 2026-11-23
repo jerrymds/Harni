@@ -11,6 +11,8 @@
  * previews, and Linter feedback without single-turn monolith timeouts.
  */
 
+import { HARNI_ACP_MCP_TOOL_PREFIX } from '../providers/harniAcpMcpBridge.js';
+
 export const AGY_TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   // File reading
   view_file: 'read_file',
@@ -51,7 +53,10 @@ export const AGY_TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
  */
 export function resolveCanonicalToolName(rawName: string): string {
   if (!rawName) return rawName;
-  const trimmed = rawName.trim();
+  let trimmed = rawName.trim();
+  if (trimmed.startsWith(HARNI_ACP_MCP_TOOL_PREFIX)) {
+    trimmed = trimmed.slice(HARNI_ACP_MCP_TOOL_PREFIX.length);
+  }
   return (
     AGY_TOOL_NAME_ALIASES[trimmed] ??
     AGY_TOOL_NAME_ALIASES[trimmed.toLowerCase()] ??
@@ -304,7 +309,21 @@ export function normalizeToolArguments(
     }
 
     case 'invoke_subagent': {
-      const rawSubagents = firstDefined<unknown[]>(args, ['subagents', 'Subagents']);
+      let rawSubagents = firstDefined<unknown[]>(args, ['subagents', 'Subagents']);
+      if (
+        !Array.isArray(rawSubagents) &&
+        firstDefined(args, [
+          'prompt',
+          'Prompt',
+          'role',
+          'Role',
+          'typeName',
+          'TypeName',
+          'type',
+        ]) !== undefined
+      ) {
+        rawSubagents = [args];
+      }
       if (Array.isArray(rawSubagents)) {
         args.subagents = rawSubagents
           .filter((s): s is Record<string, unknown> => Boolean(s && typeof s === 'object'))
@@ -318,11 +337,42 @@ export function normalizeToolArguments(
             const role = firstDefined<string>(s, ['role', 'Role']);
             const prompt = firstDefined<string>(s, ['prompt', 'Prompt']);
             const model = firstDefined<string>(s, ['model', 'Model']);
+            const background = toOptionalBoolean(firstDefined(s, ['background', 'Background']));
+            const maxTokensBudget = toOptionalNumber(
+              firstDefined(s, ['maxTokensBudget', 'max_tokens_budget']),
+            );
+            const timeoutMs = toOptionalNumber(firstDefined(s, ['timeoutMs', 'timeout_ms']));
+            const rawIsolation = firstDefined<string>(s, [
+              'isolation',
+              'Isolation',
+              'Workspace',
+              'workspace',
+            ]);
+            let isolation: 'worktree' | 'inherit' | undefined;
+            if (rawIsolation !== undefined) {
+              const isoLower = String(rawIsolation).trim().toLowerCase();
+              if (isoLower === 'worktree' || isoLower === 'branch' || isoLower === 'share') {
+                isolation = 'worktree';
+              } else if (isoLower === 'inherit') {
+                isolation = 'inherit';
+              }
+            }
+            const autoMergeWorktree = toOptionalBoolean(
+              firstDefined(s, ['autoMergeWorktree', 'auto_merge_worktree']),
+            );
+            const fork = firstDefined<string>(s, ['fork', 'Fork']);
+
             return {
               typeName: typeName !== undefined ? String(typeName) : 'self',
               role: role !== undefined ? String(role) : 'Subagent',
               prompt: prompt !== undefined ? String(prompt) : '',
               ...(model !== undefined && model !== 'inherit' ? { model: String(model) } : {}),
+              ...(background !== undefined ? { background } : {}),
+              ...(maxTokensBudget !== undefined ? { maxTokensBudget } : {}),
+              ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+              ...(isolation !== undefined ? { isolation } : {}),
+              ...(autoMergeWorktree !== undefined ? { autoMergeWorktree } : {}),
+              ...(fork !== undefined ? { fork: String(fork) } : {}),
             };
           });
       }

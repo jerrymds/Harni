@@ -1,97 +1,830 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import type { ChildProcess, spawn as nodeSpawn } from 'node:child_process';
 import * as fs from 'node:fs/promises';
+import * as http from 'node:http';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { AntigravityProvider, composeAntigravityModel } from '../src/providers/antigravityProvider.js';
-import { AgentCoreEngine, MockProvider } from '../src/index.js';
+import {
+  AntigravityProvider,
+  composeAntigravityModel,
+  toAgyAcpModelId,
+} from '../src/providers/antigravityProvider.js';
+import {
+  AgyAcpSession,
+  AgyAcpSessionPool,
+  buildZedClientInfo,
+} from '../src/providers/agyAcpSession.js';
+import {
+  ACP_HARNI_ORCHESTRATION_RULE_TAG,
+  buildAgyCompositePrompt,
+  buildAgyPromptParts,
+  buildAgySessionKey,
+} from '../src/providers/agyPromptBuilder.js';
+import { HarniAcpMcpBridge } from '../src/providers/harniAcpMcpBridge.js';
+import { ProviderFactory } from '../src/providers/providerFactory.js';
+import { AgentCoreEngine, MockProvider, SubagentManager } from '../src/index.js';
+import type { ChatMessage } from '@harni/types';
 
-/**
- * 建立一個「永遠不回應」的 SSE stream，模擬 Bridge 卡住的情況。
- * reader.read() 會一直 pending，直到被 cancel 或 timeout 觸發。
- */
-function createStalledStream(): ReadableStream<Uint8Array> {
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      // 故意不 push 任何資料，也不 close —— 模擬 Bridge 卡住
-      // 保留 controller 引用以便測試中可主動關閉
-      (controller as any).__stalled = true;
-    },
-    cancel() {
-      // 允許被 reader.cancel() 取消
-    },
-  });
+interface MockSpawnRecord {
+  command: string;
+  args: string[];
+  options: Record<string, unknown>;
+  requests: Array<Record<string, any>>;
+  proc: EventEmitter & {
+    stdin: PassThrough;
+    stdout: PassThrough;
+    stderr: PassThrough;
+    kill: ReturnType<typeof vi.fn>;
+  };
 }
 
-/** 建立一個正常回應的 SSE stream（發送 token 後結束） */
-function createNormalStream(): ReadableStream<Uint8Array> {
-  const encoder = new TextEncoder();
-  return new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(encoder.encode('data: {"type":"token","content":"hello"}\n\n'));
-      controller.enqueue(encoder.encode('data: {"type":"done"}\n\n'));
-      controller.close();
+interface MockAcpControllerOptions {
+  stallOnPrompt?: boolean;
+  onPrompt?: (
+    msg: Record<string, any>,
+    helpers: {
+      send: (obj: Record<string, unknown>) => void;
+      sendStderr: (line: string) => void;
+      exit: (code?: number) => void;
     },
-  });
+    record: MockSpawnRecord,
+  ) => void;
+  onMessage?: (
+    msg: Record<string, any>,
+    helpers: {
+      send: (obj: Record<string, unknown>) => void;
+      sendStderr: (line: string) => void;
+      exit: (code?: number) => void;
+    },
+    record: MockSpawnRecord,
+  ) => void;
 }
 
-describe('AntigravityProvider idle timeout', () => {
+function createMockAgySpawn(opts: MockAcpControllerOptions = {}): {
+  spawnFn: typeof nodeSpawn;
+  records: MockSpawnRecord[];
+} {
+  const records: MockSpawnRecord[] = [];
+
+  const spawnFn = vi.fn((command: string, args: string[] = [], options: Record<string, unknown> = {}) => {
+    const proc = new EventEmitter() as MockSpawnRecord['proc'];
+    proc.stdin = new PassThrough();
+    proc.stdout = new PassThrough();
+    proc.stderr = new PassThrough();
+
+    const record: MockSpawnRecord = {
+      command,
+      args: [...args],
+      options,
+      requests: [],
+      proc,
+    };
+    records.push(record);
+
+    proc.kill = vi.fn(() => {
+      proc.emit('exit', 0);
+      proc.emit('close', 0);
+      return true;
+    });
+
+    const helpers = {
+      send: (obj: Record<string, unknown>) => {
+        proc.stdout.write(JSON.stringify(obj) + '\n');
+      },
+      sendStderr: (line: string) => {
+        proc.stderr.write(line + '\n');
+      },
+      exit: (code = 0) => {
+        proc.emit('exit', code);
+        proc.emit('close', code);
+      },
+    };
+
+    let stdinBuf = '';
+    proc.stdin.on('data', (chunk: Buffer | string) => {
+      stdinBuf += chunk.toString();
+      const lines = stdinBuf.split(/\r?\n/);
+      stdinBuf = lines.pop() ?? '';
+      for (const rawLine of lines) {
+        const trimmed = rawLine.trim();
+        if (!trimmed) continue;
+        let msg: Record<string, any>;
+        try {
+          msg = JSON.parse(trimmed);
+        } catch {
+          continue;
+        }
+        record.requests.push(msg);
+
+        if (opts.onMessage) {
+          opts.onMessage(msg, helpers, record);
+        }
+
+        if (msg.method === 'initialize') {
+          helpers.send({
+            jsonrpc: '2.0',
+            id: msg.id,
+            result: { protocolVersion: 1, serverInfo: { name: 'agy', version: '1.0.0' } },
+          });
+        } else if (msg.method === 'session/new') {
+          helpers.send({
+            jsonrpc: '2.0',
+            id: msg.id,
+            result: {
+              sessionId: `acp_sess_${records.length}`,
+              models: { availableModels: ['gemini-3.8-flash-medium'] },
+            },
+          });
+        } else if (msg.method === 'session/set_model') {
+          helpers.send({
+            jsonrpc: '2.0',
+            id: msg.id,
+            result: {},
+          });
+        } else if (msg.method === 'session/prompt') {
+          if (opts.stallOnPrompt) {
+            continue;
+          }
+          if (opts.onPrompt) {
+            opts.onPrompt(msg, helpers, record);
+          } else {
+            helpers.send({
+              jsonrpc: '2.0',
+              method: 'session/update',
+              params: {
+                sessionId: msg.params?.sessionId,
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'hello' },
+                },
+              },
+            });
+            helpers.send({
+              jsonrpc: '2.0',
+              id: msg.id,
+              result: { stopReason: 'end_turn' },
+            });
+          }
+        } else if (msg.method === 'session/close') {
+          helpers.exit(0);
+        }
+      }
+    });
+
+    return proc as unknown as ChildProcess;
+  }) as unknown as typeof nodeSpawn;
+
+  return { spawnFn, records };
+}
+
+function userMsg(content: string): ChatMessage {
+  return {
+    id: `u_${Date.now()}_${Math.random()}`,
+    role: 'user',
+    content,
+    timestamp: Date.now(),
+  };
+}
+
+describe('AntigravityProvider direct ACP (Zed simulation + OAuth)', () => {
   afterEach(() => {
     vi.restoreAllMocks();
     delete process.env.ANTIGRAVITY_IDLE_TIMEOUT_MS;
+    delete process.env.ANTIGRAVITY_ACP_CLIENT_NAME;
+    delete process.env.ANTIGRAVITY_ACP_CLIENT_TITLE;
+    delete process.env.ANTIGRAVITY_ACP_CLIENT_VERSION;
   });
 
-  it('正常串流不受影響（收到 token 並完成）', async () => {
-    const provider = new AntigravityProvider({ baseURL: 'http://127.0.0.1:8123' });
+  it('Zed clientInfo 與 3 步驟握手 (initialize -> session/new -> session/set_model -> session/prompt)', async () => {
+    const pool = new AgyAcpSessionPool();
+    const { spawnFn, records } = createMockAgySpawn();
 
-    // Mock global fetch 回傳正常 stream
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue({
-        ok: true,
-        body: createNormalStream(),
-      } as unknown as Response),
-    );
+    const provider = new AntigravityProvider({
+      agyPath: 'agy',
+      spawnFn,
+      sessionPool: pool,
+      model: 'claude-sonnet-5-5:acp',
+      thinkingDepth: 'high',
+      workspaceRoot: process.cwd(),
+      sessionId: 'sess_zed_1',
+    });
 
     const chunks: any[] = [];
-    const result = await provider.streamCompletion([], 'sys', [], (chunk) => chunks.push(chunk));
+    const result = await provider.streamCompletion(
+      [userMsg('Hello Zed ACP')],
+      'sys prompt',
+      [],
+      (c) => chunks.push(c),
+    );
 
     expect(result.text).toBe('hello');
-    expect(chunks.some((c) => c.type === 'token')).toBe(true);
+    expect(chunks.some((c) => c.type === 'token' && c.content === 'hello')).toBe(true);
+    expect(records.length).toBe(1);
+
+    const methods = records[0]!.requests.map((r) => r.method);
+    expect(methods).toEqual(['initialize', 'session/new', 'session/set_model', 'session/prompt']);
+
+    const initReq = records[0]!.requests[0]!;
+    expect(initReq.params.protocolVersion).toBe(1);
+    expect(initReq.params.clientInfo).toEqual(buildZedClientInfo());
+    expect(initReq.params.clientInfo.name).toBe('zed');
+    expect(initReq.params.clientInfo.title).toBe('Zed');
+    expect(initReq.params.clientInfo.version).toBe('0.180.0');
+    expect(initReq.params.clientCapabilities).toEqual({
+      fs: { readTextFile: false, writeTextFile: false },
+      terminal: false,
+    });
+
+    const setModelReq = records[0]!.requests[2]!;
+    expect(setModelReq.params.modelId).toBe('claude-sonnet-5-5-high');
+
+    const promptReq = records[0]!.requests[3]!;
+    expect(promptReq.params.prompt).toEqual([{ type: 'text', text: 'Hello Zed ACP' }]);
+
+    await pool.shutdown();
   });
 
-  it('Bridge 卡住時，超過 idle timeout 會拋出明確錯誤', async () => {
-    // 用極短的 timeout (50ms) 加速測試
+  it('正確串流 session/update (agent_thought_chunk, agent_message_chunk, tool_call, tool_call_update) 與 result.usage', async () => {
+    const pool = new AgyAcpSessionPool();
+    const { spawnFn } = createMockAgySpawn({
+      onPrompt: (msg, { send }) => {
+        send({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            update: {
+              sessionUpdate: 'agent_thought_chunk',
+              content: { text: 'Thinking step 1...\n' },
+            },
+          },
+        });
+        send({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'tc_1',
+              status: 'in_progress',
+              title: 'read_file package.json',
+            },
+          },
+        });
+        send({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'tc_1',
+              status: 'completed',
+              title: 'read_file package.json',
+            },
+          },
+        });
+        send({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { text: 'Final answer' },
+            },
+          },
+        });
+        send({
+          jsonrpc: '2.0',
+          id: msg.id,
+          result: {
+            stopReason: 'end_turn',
+            usage: {
+              promptTokens: 120,
+              completionTokens: 45,
+              totalTokens: 165,
+            },
+          },
+        });
+      },
+    });
+
+    const provider = new AntigravityProvider({
+      agyPath: 'agy',
+      spawnFn,
+      sessionPool: pool,
+      sessionId: 'sess_stream_1',
+    });
+
+    const chunks: any[] = [];
+    const result = await provider.streamCompletion([userMsg('Inspect')], 'sys', [], (c) =>
+      chunks.push(c),
+    );
+
+    expect(result.text).toBe('Final answer');
+    expect(result.thinking).toContain('Thinking step 1...');
+    expect(result.thinking).toContain('[ACP Tool in_progress: read_file package.json]');
+    expect(result.thinking).toContain('[ACP Tool completed: read_file package.json]');
+    expect(result.usage).toEqual({
+      promptTokens: 120,
+      completionTokens: 45,
+      totalTokens: 165,
+    });
+    expect(chunks.some((c) => c.type === 'usage')).toBe(true);
+
+    await pool.shutdown();
+  });
+
+  it('tool_call_update 省略 title 時沿用同 toolCallId 在 tool_call 階段的標題，讓 extractIncompleteAcpTools 正確配對清除', async () => {
+    const pool = new AgyAcpSessionPool();
+    const { spawnFn } = createMockAgySpawn({
+      onPrompt: (msg, { send }) => {
+        send({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            update: {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'tc_omit_title',
+              status: 'in_progress',
+              title: 'File src/app.ts',
+            },
+          },
+        });
+        send({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            update: {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'tc_omit_title',
+              status: 'completed',
+            },
+          },
+        });
+        send({
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { text: 'Done' },
+            },
+          },
+        });
+        send({
+          jsonrpc: '2.0',
+          id: msg.id,
+          result: { stopReason: 'end_turn' },
+        });
+      },
+    });
+
+    const provider = new AntigravityProvider({
+      agyPath: 'agy',
+      spawnFn,
+      sessionPool: pool,
+      sessionId: 'sess_omit_title',
+    });
+
+    const result = await provider.streamCompletion([userMsg('Edit')], 'sys', [], () => {});
+    expect(result.thinking).toContain('[ACP Tool in_progress: File src/app.ts]');
+    expect(result.thinking).toContain('[ACP Tool completed: File src/app.ts]');
+    expect(AntigravityProvider.extractIncompleteAcpTools(result.thinking)).toEqual([]);
+
+    await pool.shutdown();
+  });
+
+  it('agy acp 卡住時超過 idle timeout 會拋出明確錯誤', async () => {
     process.env.ANTIGRAVITY_IDLE_TIMEOUT_MS = '50';
-    const provider = new AntigravityProvider({ baseURL: 'http://127.0.0.1:8123' });
+    const pool = new AgyAcpSessionPool();
+    const { spawnFn } = createMockAgySpawn({ stallOnPrompt: true });
 
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue({
-        ok: true,
-        body: createStalledStream(),
-      } as unknown as Response),
-    );
+    const provider = new AntigravityProvider({
+      agyPath: 'agy',
+      spawnFn,
+      sessionPool: pool,
+      sessionId: 'sess_timeout',
+    });
 
-    await expect(provider.streamCompletion([], 'sys', [], () => {})).rejects.toThrow(
-      /Antigravity Bridge 串流逾時/,
-    );
+    await expect(
+      provider.streamCompletion([userMsg('hello')], 'sys', [], () => {}),
+    ).rejects.toThrow(/Antigravity ACP 串流逾時/);
+
+    await pool.shutdown();
   });
 
-  it('環境變數未設定時使用預設 90 秒', () => {
-    const provider = new AntigravityProvider({ baseURL: 'http://127.0.0.1:8123' });
-    expect((provider as any).idleTimeoutMs).toBe(90_000);
-  });
+  it('環境變數未設定時使用預設 90 秒，設定時可覆寫，無效值回退預設', () => {
+    const p1 = new AntigravityProvider();
+    expect((p1 as any).idleTimeoutMs).toBe(90_000);
 
-  it('環境變數可覆寫 idle timeout', () => {
     process.env.ANTIGRAVITY_IDLE_TIMEOUT_MS = '5000';
-    const provider = new AntigravityProvider({ baseURL: 'http://127.0.0.1:8123' });
-    expect((provider as any).idleTimeoutMs).toBe(5000);
+    const p2 = new AntigravityProvider();
+    expect((p2 as any).idleTimeoutMs).toBe(5000);
+
+    process.env.ANTIGRAVITY_IDLE_TIMEOUT_MS = 'abc';
+    const p3 = new AntigravityProvider();
+    expect((p3 as any).idleTimeoutMs).toBe(90_000);
   });
 
-  it('無效的環境變數值會回退到預設', () => {
-    process.env.ANTIGRAVITY_IDLE_TIMEOUT_MS = 'abc';
-    const provider = new AntigravityProvider({ baseURL: 'http://127.0.0.1:8123' });
-    expect((provider as any).idleTimeoutMs).toBe(90_000);
+  describe('Dynamic autoApprove & interactive permission approval', () => {
+    it('autoApprove: true 時帶入 --dangerously-skip-permissions 並自動核准 session/request_permission (allow_once)', async () => {
+      const pool = new AgyAcpSessionPool();
+      const { spawnFn, records } = createMockAgySpawn({
+        onPrompt: (msg, { send }) => {
+          send({
+            jsonrpc: '2.0',
+            id: 901,
+            method: 'session/request_permission',
+            params: {
+              options: [
+                { optionId: 'allow_once', kind: 'allow_once', name: 'Allow once' },
+                { optionId: 'deny', kind: 'reject_once', name: 'Deny' },
+              ],
+              toolCall: {
+                toolCallId: 'call_auto_1',
+                name: 'run_command',
+                arguments: { command: 'npm test' },
+                title: 'Run npm test',
+              },
+            },
+          });
+          setTimeout(() => {
+            send({
+              jsonrpc: '2.0',
+              method: 'session/update',
+              params: {
+                update: { sessionUpdate: 'agent_message_chunk', content: { text: 'tests passed' } },
+              },
+            });
+            send({ jsonrpc: '2.0', id: msg.id, result: { stopReason: 'end_turn' } });
+          }, 10);
+        },
+      });
+
+      const requestApproval = vi.fn();
+      const provider = new AntigravityProvider({
+        agyPath: 'agy',
+        spawnFn,
+        sessionPool: pool,
+        autoApprove: true,
+        requestApproval,
+        sessionId: 'sess_auto_true',
+      });
+
+      const result = await provider.streamCompletion([userMsg('run tests')], 'sys', [], () => {});
+
+      expect(result.text).toBe('tests passed');
+      expect(records[0]!.args).toContain('--dangerously-skip-permissions');
+      expect(requestApproval).not.toHaveBeenCalled();
+
+      const permResp = records[0]!.requests.find((r) => r.id === 901 && r.result);
+      expect(permResp?.result).toEqual({
+        outcome: { outcome: 'selected', optionId: 'allow_once' },
+      });
+
+      await pool.shutdown();
+    });
+
+    it('autoApprove: false 時移除 --dangerously-skip-permissions 並呼叫 requestApproval 回傳 allow_once 或 deny', async () => {
+      const pool = new AgyAcpSessionPool();
+      const requestedApprovals: any[] = [];
+      let nextDecision = true;
+
+      const requestApproval = vi.fn(async (req) => {
+        requestedApprovals.push(req);
+        return { approved: nextDecision };
+      });
+
+      const { spawnFn, records } = createMockAgySpawn({
+        onPrompt: (msg, { send }) => {
+          send({
+            jsonrpc: '2.0',
+            id: 902,
+            method: 'session/request_permission',
+            params: {
+              options: [
+                { optionId: 'allow_once', kind: 'allow_once' },
+                { optionId: 'deny', kind: 'reject_once' },
+              ],
+              toolCall: {
+                toolCallId: 'call_interactive_1',
+                name: 'execute_command',
+                arguments: { command: 'git status' },
+                title: 'Run Git Status',
+              },
+            },
+          });
+        },
+        onMessage: (msg, { send }, record) => {
+          if (msg.id === 902 && msg.result) {
+            const promptReq = record.requests
+              .slice()
+              .reverse()
+              .find((r) => r.method === 'session/prompt');
+            send({
+              jsonrpc: '2.0',
+              method: 'session/update',
+              params: {
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { text: `outcome:${msg.result.outcome.optionId}` },
+                },
+              },
+            });
+            send({
+              jsonrpc: '2.0',
+              id: promptReq?.id,
+              result: { stopReason: 'end_turn' },
+            });
+          }
+        },
+      });
+
+      const providerApprove = new AntigravityProvider({
+        agyPath: 'agy',
+        spawnFn,
+        sessionPool: pool,
+        autoApprove: false,
+        requestApproval,
+        sessionId: 'sess_interactive_allow',
+      });
+
+      const r1 = await providerApprove.streamCompletion([userMsg('git status')], 'sys', [], () => {});
+      expect(records[0]!.args).not.toContain('--dangerously-skip-permissions');
+      expect(requestApproval).toHaveBeenCalledTimes(1);
+      expect(requestedApprovals[0]).toEqual({
+        toolCallId: 'call_interactive_1',
+        name: 'execute_command',
+        arguments: { command: 'git status' },
+        title: 'Run Git Status',
+      });
+      expect(r1.text).toBe('outcome:allow_once');
+
+      // Now reject
+      nextDecision = false;
+      const providerDeny = new AntigravityProvider({
+        agyPath: 'agy',
+        spawnFn,
+        sessionPool: pool,
+        autoApprove: false,
+        requestApproval,
+        sessionId: 'sess_interactive_deny',
+      });
+
+      const r2 = await providerDeny.streamCompletion([userMsg('rm file')], 'sys', [], () => {});
+      expect(records[1]!.args).not.toContain('--dangerously-skip-permissions');
+      expect(r2.text).toBe('outcome:deny');
+
+      await pool.shutdown();
+    });
+
+    it('autoApprove: false 且未提供 requestApproval 時預設回傳 deny', async () => {
+      const pool = new AgyAcpSessionPool();
+      const { spawnFn, records } = createMockAgySpawn({
+        onPrompt: (_msg, { send }) => {
+          send({
+            jsonrpc: '2.0',
+            id: 903,
+            method: 'session/request_permission',
+            params: {
+              options: [
+                { optionId: 'allow_once', kind: 'allow_once' },
+                { optionId: 'deny', kind: 'reject_once' },
+              ],
+              toolCall: {
+                toolCallId: 'call_no_handler',
+                name: 'run_command',
+                arguments: { command: 'ls' },
+              },
+            },
+          });
+        },
+        onMessage: (msg, { send }, record) => {
+          if (msg.id === 903 && msg.result) {
+            const promptReq = record.requests.find((r) => r.method === 'session/prompt');
+            send({
+              jsonrpc: '2.0',
+              id: promptReq?.id,
+              result: { stopReason: 'end_turn' },
+            });
+          }
+        },
+      });
+
+      const provider = new AntigravityProvider({
+        agyPath: 'agy',
+        spawnFn,
+        sessionPool: pool,
+        autoApprove: false,
+        sessionId: 'sess_no_handler',
+      });
+
+      await provider.streamCompletion([userMsg('list')], 'sys', [], () => {});
+      expect(records[0]!.args).not.toContain('--dangerously-skip-permissions');
+      const permResp = records[0]!.requests.find((r) => r.id === 903 && r.result);
+      expect(permResp?.result).toEqual({
+        outcome: { outcome: 'selected', optionId: 'deny' },
+      });
+
+      await pool.shutdown();
+    });
+  });
+
+  describe('AgyAcpSessionPool reuse & eviction', () => {
+    it('同一個 sessionId + workspaceRoot 多輪對話重用同一個 agy acp 行程；更換 workspaceDir 時自動重建', async () => {
+      const pool = new AgyAcpSessionPool();
+      const { spawnFn, records } = createMockAgySpawn();
+
+      const wsA = await fs.mkdtemp(path.join(os.tmpdir(), 'harni-ws-a-'));
+      const wsB = await fs.mkdtemp(path.join(os.tmpdir(), 'harni-ws-b-'));
+      try {
+        const providerA1 = new AntigravityProvider({
+          agyPath: 'agy',
+          spawnFn,
+          sessionPool: pool,
+          workspaceRoot: wsA,
+          sessionId: 'shared_sess',
+        });
+        await providerA1.streamCompletion([userMsg('Turn 1')], 'sys', [], () => {});
+        expect(records.length).toBe(1);
+
+        // Turn 2 with same sessionId + workspaceRoot reuses process
+        await providerA1.streamCompletion(
+          [
+            userMsg('Turn 1'),
+            { id: 'a1', role: 'assistant', content: 'hello', timestamp: Date.now() },
+            userMsg('Turn 2'),
+          ],
+          'sys',
+          [],
+          () => {},
+        );
+        expect(records.length).toBe(1);
+        const promptCalls = records[0]!.requests.filter((r) => r.method === 'session/prompt');
+        expect(promptCalls.length).toBe(2);
+        expect(promptCalls[1]!.params.prompt[0].text).toBe('Turn 2');
+
+        // Different workspaceRoot creates a new session key and spawns a new process
+        const providerB = new AntigravityProvider({
+          agyPath: 'agy',
+          spawnFn,
+          sessionPool: pool,
+          workspaceRoot: wsB,
+          sessionId: 'shared_sess',
+        });
+        await providerB.streamCompletion([userMsg('Turn in B')], 'sys', [], () => {});
+        expect(records.length).toBe(2);
+
+        // Also verify pool directly evicts & recreates when workspaceDir mismatches on same key
+        const directKey = 'direct_same_key';
+        const first = await pool.getOrCreateSession(directKey, {
+          agyPath: 'agy',
+          spawnFn,
+          workspaceDir: wsA,
+          sessionId: 'k1',
+        });
+        expect(first.isNew).toBe(true);
+        const second = await pool.getOrCreateSession(directKey, {
+          agyPath: 'agy',
+          spawnFn,
+          workspaceDir: wsA,
+          sessionId: 'k1',
+        });
+        expect(second.isNew).toBe(false);
+        const third = await pool.getOrCreateSession(directKey, {
+          agyPath: 'agy',
+          spawnFn,
+          workspaceDir: wsB,
+          sessionId: 'k1',
+        });
+        expect(third.isNew).toBe(true);
+        expect(first.session).not.toBe(third.session);
+      } finally {
+        await pool.shutdown();
+        await fs.rm(wsA, { recursive: true, force: true });
+        await fs.rm(wsB, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it('AbortSignal 取消時發送 session/cancel', async () => {
+    const pool = new AgyAcpSessionPool();
+    const { spawnFn, records } = createMockAgySpawn({ stallOnPrompt: true });
+
+    const provider = new AntigravityProvider({
+      agyPath: 'agy',
+      spawnFn,
+      sessionPool: pool,
+      sessionId: 'sess_abort',
+    });
+
+    const ac = new AbortController();
+    const p = provider.streamCompletion([userMsg('long task')], 'sys', [], () => {}, ac.signal);
+
+    await vi.waitFor(() => {
+      expect(records.length).toBe(1);
+      expect(records[0]!.requests.some((r) => r.method === 'session/prompt')).toBe(true);
+    });
+
+    ac.abort();
+
+    await expect(p).rejects.toThrow(/abort/i);
+    expect(records[0]!.requests.some((r) => r.method === 'session/cancel')).toBe(true);
+
+    await pool.shutdown();
+  });
+
+  it('無任何有效 user/tool turn 時直接回傳空文字而不啟動 ACP', async () => {
+    const pool = new AgyAcpSessionPool();
+    const { spawnFn, records } = createMockAgySpawn();
+
+    const provider = new AntigravityProvider({
+      agyPath: 'agy',
+      spawnFn,
+      sessionPool: pool,
+    });
+
+    const result = await provider.streamCompletion([], 'sys', [], () => {});
+    expect(result.text).toBe('');
+    expect(records.length).toBe(0);
+  });
+});
+
+describe('agyPromptBuilder & Antigravity model helpers', () => {
+  it('buildAgyPromptParts 注入 [ACP_SYNC_EXECUTION_RULE] 且不重複注入；deny 模式切換為文字 tool 呼叫指引', () => {
+    const tools = [
+      {
+        name: 'read_file',
+        description: 'Read file',
+        parameters: { type: 'object' as const, properties: {} },
+      },
+      {
+        name: 'invoke_subagent',
+        description: 'Spawn subagent',
+        parameters: { type: 'object' as const, properties: {} },
+      },
+    ];
+
+    const allowParts = buildAgyPromptParts([userMsg('hi')], 'base system prompt', tools, 'allow');
+    expect(allowParts.preamble).toContain('[ACP_SYNC_EXECUTION_RULE]');
+    expect(allowParts.preamble).toContain('WaitMsBeforeAsync');
+    expect(allowParts.preamble).toContain('### invoke_subagent');
+    expect(allowParts.preamble).not.toContain('### read_file');
+
+    const dedupParts = buildAgyPromptParts(
+      [userMsg('hi')],
+      'base [ACP_SYNC_EXECUTION_RULE] prompt',
+      tools,
+      'allow',
+    );
+    expect(dedupParts.preamble.match(/\[ACP_SYNC_EXECUTION_RULE\]/g)?.length).toBe(1);
+
+    const denyParts = buildAgyPromptParts([userMsg('hi')], 'base system prompt', tools, 'deny');
+    expect(denyParts.preamble).not.toContain('[ACP_SYNC_EXECUTION_RULE]');
+    expect(denyParts.preamble).toContain('Do NOT invoke built-in native tools directly');
+    expect(denyParts.preamble).toContain('### read_file');
+  });
+
+  it('buildAgyCompositePrompt 與 buildAgySessionKey 正確產生歷史摘要與穩定 24 字元雜湊鍵', () => {
+    const msgs: ChatMessage[] = [
+      userMsg('First question'),
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'Let me check',
+        toolCalls: [{ id: 'tc1', name: 'read_file', arguments: { path: 'a.ts' } }],
+        timestamp: Date.now(),
+      },
+      {
+        id: 't1',
+        role: 'tool',
+        name: 'read_file',
+        content: '',
+        toolResult: { output: 'file contents' },
+        timestamp: Date.now(),
+      },
+      userMsg('Second question'),
+    ];
+
+    const composite = buildAgyCompositePrompt(msgs, 'Second question');
+    expect(composite).toContain('## Earlier Conversation History');
+    expect(composite).toContain('User: First question');
+    expect(composite).toContain('Calling tool `read_file` with arguments: {"path":"a.ts"}');
+    expect(composite).toContain('## Current Request\nSecond question');
+
+    const k1 = buildAgySessionKey({ sessionId: 's1', workspaceRoot: '/ws/a' });
+    const k2 = buildAgySessionKey({ sessionId: 's1', workspaceRoot: '/ws/a' });
+    const k3 = buildAgySessionKey({ sessionId: 's1', workspaceRoot: '/ws/b' });
+    const kSub1 = buildAgySessionKey({ sessionId: 's1', subagentId: 'sub_1', workspaceRoot: '/ws/a' });
+    const kSub2 = buildAgySessionKey({ sessionId: 's1', subagentId: 'sub_2', workspaceRoot: '/ws/a' });
+    expect(k1).toHaveLength(24);
+    expect(k1).toBe(k2);
+    expect(k1).not.toBe(k3);
+    expect(kSub1).toHaveLength(24);
+    expect(kSub2).toHaveLength(24);
+    expect(kSub1).not.toBe(k1);
+    expect(kSub1).not.toBe(kSub2);
   });
 
   it('正確解析帶有後續文字大括號與多重工具呼叫的文字格式 tool call', () => {
@@ -116,62 +849,9 @@ describe('AntigravityProvider idle timeout', () => {
     expect(multi[0].arguments).toEqual({ path: 'package.json' });
     expect(multi[1].arguments).toEqual({ path: 'tsconfig.json' });
   });
-
-  it('streamCompletion 發送的 payload 包含動態組裝的思考等級模型名稱', async () => {
-    const provider = new AntigravityProvider({
-      baseURL: 'http://127.0.0.1:8123',
-      model: 'gemini-3.8-pro',
-      thinkingDepth: 'high',
-    });
-
-    let capturedOptions: any = null;
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockImplementation(async (_url: string, options: any) => {
-        capturedOptions = options;
-        return {
-          ok: true,
-          body: createNormalStream(),
-        } as unknown as Response;
-      }),
-    );
-
-    await provider.streamCompletion([], 'system prompt', [], () => {});
-
-    expect(capturedOptions).toBeDefined();
-    const body = JSON.parse(capturedOptions.body);
-    expect(body.model).toBe('gemini-3.8-pro-high');
-    expect(body.thinkingDepth).toBe('high');
-  });
-
-  it('streamCompletion 發送 ACP 模型時正確保留 :acp 後綴並組裝思考等級', async () => {
-    const provider = new AntigravityProvider({
-      baseURL: 'http://127.0.0.1:8123',
-      model: 'claude-sonnet-5-5:acp',
-      thinkingDepth: 'low',
-    });
-
-    let capturedOptions: any = null;
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockImplementation(async (_url: string, options: any) => {
-        capturedOptions = options;
-        return {
-          ok: true,
-          body: createNormalStream(),
-        } as unknown as Response;
-      }),
-    );
-
-    await provider.streamCompletion([], 'system prompt', [], () => {});
-
-    expect(capturedOptions).toBeDefined();
-    const body = JSON.parse(capturedOptions.body);
-    expect(body.model).toBe('claude-sonnet-5-5-low:acp');
-  });
 });
 
-describe('composeAntigravityModel', () => {
+describe('composeAntigravityModel & toAgyAcpModelId', () => {
   it('當 model 為空時，預設回傳 gemini-3.8-flash-medium', () => {
     expect(composeAntigravityModel('')).toBe('gemini-3.8-flash-medium');
     expect(composeAntigravityModel('   ')).toBe('gemini-3.8-flash-medium');
@@ -195,12 +875,17 @@ describe('composeAntigravityModel', () => {
     expect(composeAntigravityModel('claude-sonnet-5-5:acp', 'off')).toBe('claude-sonnet-5-5-medium:acp');
     expect(composeAntigravityModel('claude-sonnet-5-5:acp', 'medium')).toBe('claude-sonnet-5-5-medium:acp');
     expect(composeAntigravityModel('claude-opus-5-5:acp', 'high')).toBe('claude-opus-5-5-high:acp');
+    expect(toAgyAcpModelId('claude-opus-5-5:acp', 'high')).toBe('claude-opus-5-5-high');
   });
 
-  it('若模型已包含 -(low|medium|high)，維持原名稱不重複加後綴', () => {
+  it('若模型已包含 -(low|medium|high|xhigh) 或為 gemini-pro-orchestrator-*，維持原名稱不重複加後綴', () => {
     expect(composeAntigravityModel('gemini-3.8-flash-low', 'high')).toBe('gemini-3.8-flash-low');
     expect(composeAntigravityModel('gemini-3.8-flash-medium', 'high')).toBe('gemini-3.8-flash-medium');
     expect(composeAntigravityModel('gemini-3.8-flash-high', 'low')).toBe('gemini-3.8-flash-high');
+    expect(composeAntigravityModel('gemini-3.8-pro-xhigh', 'medium')).toBe('gemini-3.8-pro-xhigh');
+    expect(composeAntigravityModel('gemini-pro-orchestrator-v1', 'high')).toBe(
+      'gemini-pro-orchestrator-v1',
+    );
     expect(composeAntigravityModel('claude-sonnet-5-5-high:acp', 'low')).toBe('claude-sonnet-5-5-high:acp');
     expect(composeAntigravityModel('claude-sonnet-5-5-medium:acp', 'high')).toBe('claude-sonnet-5-5-medium:acp');
   });
@@ -213,447 +898,58 @@ describe('composeAntigravityModel', () => {
   });
 });
 
-describe('AntigravityProvider ACP and tool settings', () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-    delete process.env.ANTIGRAVITY_IDLE_TIMEOUT_MS;
+describe('AntigravityProvider.sanitizeMalformedJson & extractTextToolCalls', () => {
+  it('正確轉義字串字面量內的未轉義控制字元（如原始換行）', () => {
+    const raw = '{"content": "line1\nline2\rline3\tline4"}';
+    const sanitized = AntigravityProvider.sanitizeMalformedJson(raw);
+    expect(() => JSON.parse(raw)).toThrow();
+    expect(() => JSON.parse(sanitized)).not.toThrow();
+    const parsed = JSON.parse(sanitized);
+    expect(parsed.content).toBe('line1\nline2\rline3\tline4');
   });
 
-  it('Direct 模式傳遞 disable_builtin_tools: true, allow_tools: false, agy_mode: direct', async () => {
-    const provider = new AntigravityProvider({
-      baseURL: 'http://127.0.0.1:8123',
-      model: 'gemini-3.8-flash',
-      antigravityMode: 'direct',
-    });
-
-    let capturedOptions: any = null;
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockImplementation(async (_url: string, options: any) => {
-        capturedOptions = options;
-        return {
-          ok: true,
-          body: createNormalStream(),
-        } as unknown as Response;
-      }),
-    );
-
-    await provider.streamCompletion([], 'system prompt', [], () => {});
-
-    expect(capturedOptions).toBeDefined();
-    const body = JSON.parse(capturedOptions.body);
-    expect(body.authData.agy_mode).toBe('direct');
-    expect(body.authData.disable_builtin_tools).toBe(true);
-    expect(body.authData.allow_tools).toBe(false);
+  it('正確修正無效的 JSON 反斜線跳脫字元（\\`、\\s、\\S、\\\'、\\d）', () => {
+    const raw = '{"regex": "\\s+\\S*\\d+", "quote": "\\\'", "template": "\\`hello\\`"}';
+    const sanitized = AntigravityProvider.sanitizeMalformedJson(raw);
+    expect(() => JSON.parse(raw)).toThrow();
+    const parsed = JSON.parse(sanitized);
+    expect(parsed.regex).toBe('\\s+\\S*\\d+');
+    expect(parsed.quote).toBe("\\'");
+    expect(parsed.template).toBe('\\`hello\\`');
   });
 
-  it('ACP 模型 (:acp) 傳遞 disable_builtin_tools: false, allow_tools: true, dangerously_skip_permissions: true', async () => {
-    const provider = new AntigravityProvider({
-      baseURL: 'http://127.0.0.1:8123',
-      model: 'claude-sonnet-5-5:acp',
-    });
-
-    let capturedOptions: any = null;
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockImplementation(async (_url: string, options: any) => {
-        capturedOptions = options;
-        return {
-          ok: true,
-          body: createNormalStream(),
-        } as unknown as Response;
-      }),
-    );
-
-    await provider.streamCompletion([], 'system prompt', [], () => {});
-
-    expect(capturedOptions).toBeDefined();
-    const body = JSON.parse(capturedOptions.body);
-    expect(body.authData.agy_mode).toBe('acp');
-    expect(body.authData.disable_builtin_tools).toBe(false);
-    expect(body.authData.allow_tools).toBe(true);
-    expect(body.authData.dangerously_skip_permissions).toBe(true);
-    expect(body.authData.interactive_permissions).toBe(false);
+  it('保留標準有效的 JSON 跳脫字元（\\"、\\\\、\\/、\\b、\\f、\\n、\\r、\\t、\\u1234）', () => {
+    const raw = '{"valid": "\\"\\\\\\/\\b\\f\\n\\r\\t\\u0041"}';
+    const sanitized = AntigravityProvider.sanitizeMalformedJson(raw);
+    const parsed = JSON.parse(sanitized);
+    expect(parsed.valid).toBe('"\\/\b\f\n\r\tA');
   });
 
-  it('authData 中包含 agy_mode: "acp" 時亦判斷為 ACP 模式', async () => {
-    const provider = new AntigravityProvider({
-      baseURL: 'http://127.0.0.1:8123',
-      model: 'gemini-3.8-flash',
-      authData: { agy_mode: 'acp' },
-    });
+  it('正確解析包含原始換行與 \\`、\\s 的多行 TypeScript 程式碼工具呼叫', () => {
+    const text =
+      'Calling tool `write_to_file` with arguments: {\n' +
+      '  "path": "src/utils.ts",\n' +
+      '  "content": "export function parse(str: string): string {\n' +
+      '    const pattern = /\\s+/g;\n' +
+      '    return \\`result: ${str}\\`;\n' +
+      '  }"\n' +
+      '}\n' +
+      '檔案寫入已準備完成。';
 
-    let capturedOptions: any = null;
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockImplementation(async (_url: string, options: any) => {
-        capturedOptions = options;
-        return {
-          ok: true,
-          body: createNormalStream(),
-        } as unknown as Response;
-      }),
-    );
-
-    await provider.streamCompletion([], 'system prompt', [], () => {});
-
-    expect(capturedOptions).toBeDefined();
-    const body = JSON.parse(capturedOptions.body);
-    expect(body.authData.agy_mode).toBe('acp');
-    expect(body.authData.disable_builtin_tools).toBe(false);
-    expect(body.authData.allow_tools).toBe(true);
-    expect(body.authData.dangerously_skip_permissions).toBe(true);
-    expect(body.authData.interactive_permissions).toBe(false);
+    const calls = AntigravityProvider.extractTextToolCalls(text);
+    expect(calls.length).toBe(1);
+    expect(calls[0].name).toBe('write_file');
+    expect(calls[0].arguments.path).toBe('src/utils.ts');
+    expect(typeof calls[0].arguments.content).toBe('string');
+    expect(calls[0].arguments.content as string).toContain('export function parse');
   });
 
-  it('外部明確指定的 authData 設定能優先覆蓋預設值', async () => {
-    const provider = new AntigravityProvider({
-      baseURL: 'http://127.0.0.1:8123',
-      model: 'claude-sonnet-5-5:acp',
-      authData: {
-        disable_builtin_tools: true,
-        allow_tools: false,
-        dangerously_skip_permissions: false,
-      },
-    });
-
-    let capturedOptions: any = null;
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockImplementation(async (_url: string, options: any) => {
-        capturedOptions = options;
-        return {
-          ok: true,
-          body: createNormalStream(),
-        } as unknown as Response;
-      }),
-    );
-
-    await provider.streamCompletion([], 'system prompt', [], () => {});
-
-    expect(capturedOptions).toBeDefined();
-    const body = JSON.parse(capturedOptions.body);
-    expect(body.authData.disable_builtin_tools).toBe(true);
-    expect(body.authData.allow_tools).toBe(false);
-    expect(body.authData.dangerously_skip_permissions).toBe(false);
-  });
-});
-
-describe('AntigravityProvider Mode B: Interactive Permission Approval', () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  function createPermissionStream(permId = 'perm_123', toolCallId = 'call_abc'): ReadableStream<Uint8Array> {
-    const encoder = new TextEncoder();
-    return new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(
-          encoder.encode(
-            `data: ${JSON.stringify({
-              type: 'permission_request',
-              permissionId: permId,
-              toolCallId,
-              name: 'execute_command',
-              arguments: { command: 'git status' },
-              title: 'Run Git Status',
-            })}\n\n`,
-          ),
-        );
-        controller.enqueue(encoder.encode('data: {"type":"token","content":"command output"}\n\n'));
-        controller.enqueue(encoder.encode('data: {"type":"done"}\n\n'));
-        controller.close();
-      },
-    });
-  }
-
-  it('當 Bridge SSE 發送 permission_request 時，觸發 requestApproval 並透過 POST /api/permission_response 回傳 allow 決定', async () => {
-    const requestedApprovals: any[] = [];
-    const postedResponses: { url: string; body: any }[] = [];
-
-    const requestApproval = vi.fn().mockImplementation(async (req) => {
-      requestedApprovals.push(req);
-      return { approved: true, feedback: 'approved by user' };
-    });
-
-    const provider = new AntigravityProvider({
-      baseURL: 'http://127.0.0.1:8123',
-      model: 'claude-sonnet-5-5:acp',
-      requestApproval,
-    });
-
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockImplementation(async (url: string, options: any) => {
-        if (url.endsWith('/api/chat')) {
-          return {
-            ok: true,
-            body: createPermissionStream('perm_xyz', 'call_123'),
-          } as unknown as Response;
-        }
-        if (url.endsWith('/api/permission_response')) {
-          postedResponses.push({ url, body: JSON.parse(options.body) });
-          return {
-            ok: true,
-            json: async () => ({ status: 'ok', permissionId: 'perm_xyz' }),
-          } as unknown as Response;
-        }
-        throw new Error(`Unexpected url: ${url}`);
-      }),
-    );
-
-    const tokens: string[] = [];
-    const result = await provider.streamCompletion([], 'sys', [], (chunk) => {
-      if (chunk.type === 'token') tokens.push(chunk.content);
-    });
-
-    // 驗證 requestApproval 被正確呼叫
-    expect(requestApproval).toHaveBeenCalledTimes(1);
-    expect(requestedApprovals[0]).toEqual({
-      toolCallId: 'call_123',
-      name: 'execute_command',
-      arguments: { command: 'git status' },
-      title: 'Run Git Status',
-    });
-
-    // 驗證 POST /api/permission_response 發送了正確的批准內容
-    expect(postedResponses.length).toBe(1);
-    expect(postedResponses[0].url).toBe('http://127.0.0.1:8123/api/permission_response');
-    expect(postedResponses[0].body).toEqual({
-      permissionId: 'perm_xyz',
-      approved: true,
-      optionId: 'allow',
-      feedback: 'approved by user',
-    });
-
-    expect(result.text).toBe('command output');
-  });
-
-  it('當 requestApproval 拒絕時，透過 POST /api/permission_response 回傳 deny 決定', async () => {
-    const postedResponses: { url: string; body: any }[] = [];
-
-    const requestApproval = vi.fn().mockResolvedValue({
-      approved: false,
-      feedback: 'command too dangerous',
-    });
-
-    const provider = new AntigravityProvider({
-      baseURL: 'http://127.0.0.1:8123',
-      model: 'claude-sonnet-5-5:acp',
-      requestApproval,
-    });
-
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockImplementation(async (url: string, options: any) => {
-        if (url.endsWith('/api/chat')) {
-          return {
-            ok: true,
-            body: createPermissionStream('perm_deny', 'call_deny'),
-          } as unknown as Response;
-        }
-        if (url.endsWith('/api/permission_response')) {
-          postedResponses.push({ url, body: JSON.parse(options.body) });
-          return {
-            ok: true,
-            json: async () => ({ status: 'ok', permissionId: 'perm_deny' }),
-          } as unknown as Response;
-        }
-        throw new Error(`Unexpected url: ${url}`);
-      }),
-    );
-
-    await provider.streamCompletion([], 'sys', [], () => {});
-
-    expect(postedResponses.length).toBe(1);
-    expect(postedResponses[0].body).toEqual({
-      permissionId: 'perm_deny',
-      approved: false,
-      optionId: 'deny',
-      feedback: 'command too dangerous',
-    });
-  });
-
-  it('若未提供 requestApproval，預設透過 POST /api/permission_response 回傳 deny', async () => {
-    const postedResponses: { url: string; body: any }[] = [];
-
-    // 沒有提供 requestApproval
-    const provider = new AntigravityProvider({
-      baseURL: 'http://127.0.0.1:8123',
-      model: 'claude-sonnet-5-5:acp',
-    });
-
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockImplementation(async (url: string, options: any) => {
-        if (url.endsWith('/api/chat')) {
-          return {
-            ok: true,
-            body: createPermissionStream('perm_no_handler', 'call_no_handler'),
-          } as unknown as Response;
-        }
-        if (url.endsWith('/api/permission_response')) {
-          postedResponses.push({ url, body: JSON.parse(options.body) });
-          return {
-            ok: true,
-            json: async () => ({ status: 'ok', permissionId: 'perm_no_handler' }),
-          } as unknown as Response;
-        }
-        throw new Error(`Unexpected url: ${url}`);
-      }),
-    );
-
-    await provider.streamCompletion([], 'sys', [], () => {});
-
-    expect(postedResponses.length).toBe(1);
-    expect(postedResponses[0].body).toEqual({
-      permissionId: 'perm_no_handler',
-      approved: false,
-      optionId: 'deny',
-    });
-  });
-
-  describe('Antigravity execution mode and tool settings resolution', () => {
-    it('gemini-3.8-flash 預設使用 ACP 模式並配置 dangerously_skip_permissions', async () => {
-      const provider = new AntigravityProvider({
-        baseURL: 'http://127.0.0.1:8123',
-        model: 'gemini-3.8-flash',
-      });
-
-      let capturedPayload: any = null;
-      vi.stubGlobal(
-        'fetch',
-        vi.fn().mockImplementation(async (_url: string, options: any) => {
-          capturedPayload = JSON.parse(options.body);
-          return {
-            ok: true,
-            body: createNormalStream(),
-          } as unknown as Response;
-        }),
-      );
-
-      await provider.streamCompletion([], 'sys', [], () => {});
-
-      expect(capturedPayload).toBeDefined();
-      expect(capturedPayload.authData.agy_mode).toBe('acp');
-      expect(capturedPayload.authData.disable_builtin_tools).toBe(false);
-      expect(capturedPayload.authData.allow_tools).toBe(true);
-      expect(capturedPayload.authData.dangerously_skip_permissions).toBe(true);
-      expect(capturedPayload.authData.interactive_permissions).toBe(false);
-    });
-
-    it('gemini-3.8-flash 在 antigravityMode: direct 時切換為 Direct 模式', async () => {
-      const provider = new AntigravityProvider({
-        baseURL: 'http://127.0.0.1:8123',
-        model: 'gemini-3.8-flash',
-        antigravityMode: 'direct',
-      });
-
-      let capturedPayload: any = null;
-      vi.stubGlobal(
-        'fetch',
-        vi.fn().mockImplementation(async (_url: string, options: any) => {
-          capturedPayload = JSON.parse(options.body);
-          return {
-            ok: true,
-            body: createNormalStream(),
-          } as unknown as Response;
-        }),
-      );
-
-      await provider.streamCompletion([], 'sys', [], () => {});
-
-      expect(capturedPayload).toBeDefined();
-      expect(capturedPayload.authData.agy_mode).toBe('direct');
-      expect(capturedPayload.authData.disable_builtin_tools).toBe(true);
-      expect(capturedPayload.authData.allow_tools).toBe(false);
-    });
-
-    it('帶有 :acp 後綴的模型（如 claude-sonnet-4-6:acp）強制使用 ACP 模式，即使 antigravityMode 為 direct', async () => {
-      const provider = new AntigravityProvider({
-        baseURL: 'http://127.0.0.1:8123',
-        model: 'claude-sonnet-4-6:acp',
-        antigravityMode: 'direct',
-      });
-
-      let capturedPayload: any = null;
-      vi.stubGlobal(
-        'fetch',
-        vi.fn().mockImplementation(async (_url: string, options: any) => {
-          capturedPayload = JSON.parse(options.body);
-          return {
-            ok: true,
-            body: createNormalStream(),
-          } as unknown as Response;
-        }),
-      );
-
-      await provider.streamCompletion([], 'sys', [], () => {});
-
-      expect(capturedPayload).toBeDefined();
-      expect(capturedPayload.authData.agy_mode).toBe('acp');
-      expect(capturedPayload.authData.disable_builtin_tools).toBe(false);
-      expect(capturedPayload.authData.allow_tools).toBe(true);
-      expect(capturedPayload.authData.dangerously_skip_permissions).toBe(true);
-    });
-  });
-
-  describe('AntigravityProvider.sanitizeMalformedJson', () => {
-    it('正確轉義字串字面量內的未轉義控制字元（如原始換行）', () => {
-      const raw = '{"content": "line1\nline2\rline3\tline4"}';
-      const sanitized = AntigravityProvider.sanitizeMalformedJson(raw);
-      expect(() => JSON.parse(raw)).toThrow();
-      expect(() => JSON.parse(sanitized)).not.toThrow();
-      const parsed = JSON.parse(sanitized);
-      expect(parsed.content).toBe('line1\nline2\rline3\tline4');
-    });
-
-    it('正確修正無效的 JSON 反斜線跳脫字元（\\`、\\s、\\S、\\\'、\\d）', () => {
-      const raw = '{"regex": "\\s+\\S*\\d+", "quote": "\\\'", "template": "\\`hello\\`"}';
-      const sanitized = AntigravityProvider.sanitizeMalformedJson(raw);
-      expect(() => JSON.parse(raw)).toThrow();
-      const parsed = JSON.parse(sanitized);
-      expect(parsed.regex).toBe('\\s+\\S*\\d+');
-      expect(parsed.quote).toBe("\\'");
-      expect(parsed.template).toBe('\\`hello\\`');
-    });
-
-    it('保留標準有效的 JSON 跳脫字元（\\"、\\\\、\\/、\\b、\\f、\\n、\\r、\\t、\\u1234）', () => {
-      const raw = '{"valid": "\\"\\\\\\/\\b\\f\\n\\r\\t\\u0041"}';
-      const sanitized = AntigravityProvider.sanitizeMalformedJson(raw);
-      const parsed = JSON.parse(sanitized);
-      expect(parsed.valid).toBe('"\\/\b\f\n\r\tA');
-    });
-  });
-
-  describe('extractTextToolCalls with malformed JSON and code blocks', () => {
-    it('正確解析包含原始換行與 \\`、\\s 的多行 TypeScript 程式碼工具呼叫', () => {
-      const text =
-        'Calling tool `write_to_file` with arguments: {\n' +
-        '  "path": "src/utils.ts",\n' +
-        '  "content": "export function parse(str: string): string {\n' +
-        '    const pattern = /\\s+/g;\n' +
-        '    return \\`result: ${str}\\`;\n' +
-        '  }"\n' +
-        '}\n' +
-        '檔案寫入已準備完成。';
-
-      const calls = AntigravityProvider.extractTextToolCalls(text);
-      expect(calls.length).toBe(1);
-      expect(calls[0].name).toBe('write_file');
-      expect(calls[0].arguments.path).toBe('src/utils.ts');
-      expect(typeof calls[0].arguments.content).toBe('string');
-      expect((calls[0].arguments.content as string)).toContain('export function parse');
-    });
-
-    it('正確處理在尾端截斷的未閉合工具呼叫', () => {
-      const text =
-        'Calling tool `execute_command` with arguments: {"command": "npm run build';
-      const calls = AntigravityProvider.extractTextToolCalls(text);
-      expect(calls.length).toBe(1);
-      expect(calls[0].name).toBe('run_command');
-      expect(calls[0].arguments.command).toBe('npm run build');
-    });
+  it('正確處理在尾端截斷的未閉合工具呼叫', () => {
+    const text = 'Calling tool `execute_command` with arguments: {"command": "npm run build';
+    const calls = AntigravityProvider.extractTextToolCalls(text);
+    expect(calls.length).toBe(1);
+    expect(calls[0].name).toBe('run_command');
+    expect(calls[0].arguments.command).toBe('npm run build');
   });
 });
 
@@ -662,15 +958,12 @@ describe('AntigravityProvider.extractIncompleteAcpTools', () => {
     expect(AntigravityProvider.extractIncompleteAcpTools(undefined)).toEqual([]);
     expect(AntigravityProvider.extractIncompleteAcpTools('')).toEqual([]);
 
-    // in_progress 未結束會保留
-    const inProgressOnly =
-      '[ACP Tool in_progress: dotnet build]\n[ACP Tool running: npm test]\n';
+    const inProgressOnly = '[ACP Tool in_progress: dotnet build]\n[ACP Tool running: npm test]\n';
     expect(AntigravityProvider.extractIncompleteAcpTools(inProgressOnly)).toEqual([
       'dotnet build',
       'npm test',
     ]);
 
-    // completed / failed / cancelled 會清除對應工具
     const resolved =
       '[ACP Tool in_progress: dotnet build]\n' +
       '[ACP Tool pending: lint]\n' +
@@ -680,7 +973,6 @@ describe('AntigravityProvider.extractIncompleteAcpTools', () => {
       '[ACP Tool cancelled: unit test]\n';
     expect(AntigravityProvider.extractIncompleteAcpTools(resolved)).toEqual([]);
 
-    // auto_resumed 支援逗號分隔清除多個工具
     const autoResumed =
       '[ACP Tool in_progress: build_a]\n' +
       '[ACP Tool in_progress: build_b]\n' +
@@ -688,13 +980,9 @@ describe('AntigravityProvider.extractIncompleteAcpTools', () => {
       '[ACP Tool auto_resumed: build_a, build_b]\n';
     expect(AntigravityProvider.extractIncompleteAcpTools(autoResumed)).toEqual(['build_c']);
 
-    // 若無精確標題匹配（如 generic tool），則 pop 最後一個 active tool
-    const fallbackPop =
-      '[ACP Tool in_progress: dotnet build]\n' +
-      '[ACP Tool completed: tool]\n';
+    const fallbackPop = '[ACP Tool in_progress: dotnet build]\n[ACP Tool completed: tool]\n';
     expect(AntigravityProvider.extractIncompleteAcpTools(fallbackPop)).toEqual([]);
 
-    // File 相對路徑與絕對路徑可透過路徑後綴匹配清除，不影響併行執行中的 dotnet build
     const pathSuffixResolved =
       '[ACP Tool in_progress: dotnet build]\n' +
       '[ACP Tool in_progress: File TibAgentApi/Controllers/StoreController.cs]\n' +
@@ -703,62 +991,11 @@ describe('AntigravityProvider.extractIncompleteAcpTools', () => {
       'dotnet build',
     ]);
 
-    // 未識別的具名完成事件不會誤 pop 執行中的工具
     const unrelatedCompletion =
-      '[ACP Tool in_progress: dotnet build]\n' +
-      '[ACP Tool completed: unrelated_tool]\n';
+      '[ACP Tool in_progress: dotnet build]\n[ACP Tool completed: unrelated_tool]\n';
     expect(AntigravityProvider.extractIncompleteAcpTools(unrelatedCompletion)).toEqual([
       'dotnet build',
     ]);
-  });
-});
-
-describe('AntigravityProvider ACP_SYNC_EXECUTION_RULE injection', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    vi.restoreAllMocks();
-  });
-
-  it('ACP 模式注入 [ACP_SYNC_EXECUTION_RULE] 且不重複注入；Direct 模式不注入', async () => {
-    const capturedPrompts: string[] = [];
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockImplementation(async (_url: string, options: any) => {
-        const parsed = JSON.parse(options.body);
-        capturedPrompts.push(parsed.systemPrompt);
-        return {
-          ok: true,
-          body: createNormalStream(),
-        } as unknown as Response;
-      }),
-    );
-
-    // 1. ACP 模式正常注入
-    const acpProvider = new AntigravityProvider({
-      baseURL: 'http://127.0.0.1:8123',
-      model: 'claude-sonnet-5-5:acp',
-    });
-    await acpProvider.streamCompletion([], 'base system prompt', [], () => {});
-    expect(capturedPrompts[0]).toContain('[ACP_SYNC_EXECUTION_RULE]');
-    expect(capturedPrompts[0]).toContain('WaitMsBeforeAsync');
-
-    // 2. 已包含規則時不重複注入
-    await acpProvider.streamCompletion(
-      [],
-      'base system prompt [ACP_SYNC_EXECUTION_RULE] existing',
-      [],
-      () => {},
-    );
-    expect(capturedPrompts[1].match(/\[ACP_SYNC_EXECUTION_RULE\]/g)?.length).toBe(1);
-
-    // 3. Direct 模式不注入
-    const directProvider = new AntigravityProvider({
-      baseURL: 'http://127.0.0.1:8123',
-      model: 'gemini-3.8-flash',
-      antigravityMode: 'direct',
-    });
-    await directProvider.streamCompletion([], 'base system prompt', [], () => {});
-    expect(capturedPrompts[2]).toBe('base system prompt');
   });
 });
 
@@ -766,7 +1003,6 @@ describe('AgentCoreEngine ACP incomplete tool auto-continuation', () => {
   it('當 thinking 留下 [ACP Tool in_progress: ...] 且 toolCalls 為空時自動續接，最多重試 3 次', async () => {
     const tmpWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'harni-acp-cont-'));
     try {
-      // Case 1: 第 1 回合留下 in_progress，第 2 回合完成
       const engine1 = new AgentCoreEngine({ workspaceRoot: tmpWorkspace });
       const mock1 = new MockProvider({
         script: [
@@ -798,7 +1034,6 @@ describe('AgentCoreEngine ACP incomplete tool auto-continuation', () => {
       expect(lastMsgTurn2.content).toContain('[SYSTEM_NOTIFICATION]');
       expect(lastMsgTurn2.content).toContain('dotnet build');
 
-      // Case 2: 持續處於 in_progress，最多自動續接 3 次（總計 4 次呼叫：1 次初始 + 3 次重試）
       const engine2 = new AgentCoreEngine({ workspaceRoot: tmpWorkspace });
       const mock2 = new MockProvider({
         script: [
@@ -829,6 +1064,633 @@ describe('AgentCoreEngine ACP incomplete tool auto-continuation', () => {
       expect(callCount2).toBe(4);
       expect(completedStatusCount).toBe(1);
     } finally {
+      await fs.rm(tmpWorkspace, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Harni ACP MCP Bridge & Subagent Orchestration Integration', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    delete process.env.ANTIGRAVITY_IDLE_TIMEOUT_MS;
+  });
+
+  it('buildAgyPromptParts injects [ACP_HARNI_ORCHESTRATION_RULE], hides bridged tools from text list, and enforces disableSubagents', () => {
+    const tools = [
+      {
+        name: 'read_file',
+        description: 'Read file',
+        parameters: { type: 'object' as const, properties: {} },
+      },
+      {
+        name: 'invoke_subagent',
+        description: 'Spawn subagent',
+        parameters: { type: 'object' as const, properties: {} },
+      },
+      {
+        name: 'ask_question',
+        description: 'Ask user',
+        parameters: { type: 'object' as const, properties: {} },
+      },
+    ];
+
+    const bridged = buildAgyPromptParts([userMsg('hi')], 'sys', tools, 'allow', {
+      acpMcpServerName: 'harni',
+      acpMcpToolNames: ['invoke_subagent', 'ask_question'],
+    });
+
+    expect(bridged.preamble).toContain(ACP_HARNI_ORCHESTRATION_RULE_TAG);
+    expect(bridged.preamble).toContain('mcp_harni_invoke_subagent');
+    expect(bridged.preamble).toContain('mcp_harni_ask_question');
+    expect(bridged.preamble).not.toContain('## Available functions');
+    expect(bridged.preamble).not.toContain('### invoke_subagent');
+
+    const disabledSub = buildAgyPromptParts([userMsg('hi')], 'sys', [tools[0]!], 'allow', {
+      disableSubagents: true,
+    });
+    expect(disabledSub.preamble).toContain('Subagent orchestration is disabled');
+    expect(disabledSub.preamble).toContain('NEVER call CLI built-in `invoke_subagent`');
+  });
+
+  it('passes mcpServers when executeAcpTool is provided and AgyAcpSessionPool recreates when mcpToolsSignature changes', async () => {
+    const pool = new AgyAcpSessionPool();
+    const bridge = new HarniAcpMcpBridge();
+    const { spawnFn, records } = createMockAgySpawn();
+
+    try {
+      const invokeTool = {
+        name: 'invoke_subagent',
+        description: 'Spawn subagent',
+        parameters: { type: 'object' as const, properties: {} },
+      };
+      const askTool = {
+        name: 'ask_question',
+        description: 'Ask question',
+        parameters: { type: 'object' as const, properties: {} },
+      };
+
+      const provider = new AntigravityProvider({
+        agyPath: 'agy',
+        spawnFn,
+        sessionPool: pool,
+        mcpBridge: bridge,
+        sessionId: 'sess_mcp_sig',
+        executeAcpTool: async (_name, _args, meta) => ({
+          toolCallId: meta.toolCallId,
+          output: 'ok',
+        }),
+      });
+
+      // Turn 1 with [invoke_subagent]
+      await provider.streamCompletion([userMsg('Turn 1')], 'sys', [invokeTool], () => {});
+      expect(records).toHaveLength(1);
+      const newSess1 = records[0]!.requests.find((r) => r.method === 'session/new');
+      expect(newSess1?.params.mcpServers).toHaveLength(1);
+      expect(newSess1?.params.mcpServers[0].name).toBe('harni');
+      expect(newSess1?.params.mcpServers[0].url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp\/[a-f0-9]+$/);
+
+      // Turn 2 with same tools -> reuses warm session
+      await provider.streamCompletion([userMsg('Turn 2')], 'sys', [invokeTool], () => {});
+      expect(records).toHaveLength(1);
+
+      // Turn 3 with changed tool set -> recreates session
+      await provider.streamCompletion([userMsg('Turn 3')], 'sys', [invokeTool, askTool], () => {});
+      expect(records).toHaveLength(2);
+    } finally {
+      await pool.shutdown();
+      await bridge.close();
+    }
+  });
+
+  it('handles ACP permissions: auto-approves mcp_harni_*, denies bridged native tools, and prompts for run_command', async () => {
+    const pool = new AgyAcpSessionPool();
+    const bridge = new HarniAcpMcpBridge();
+    const requestApproval = vi.fn(async () => ({ approved: true }));
+
+    const { spawnFn, records } = createMockAgySpawn({
+      onPrompt: (msg, { send }) => {
+        // 1. mcp_harni_invoke_subagent -> auto-approved without requestApproval
+        send({
+          jsonrpc: '2.0',
+          id: 701,
+          method: 'session/request_permission',
+          params: {
+            options: [
+              { optionId: 'allow_once', kind: 'allow_once' },
+              { optionId: 'deny', kind: 'reject_once' },
+            ],
+            toolCall: { toolCallId: 'tc_mcp', name: 'mcp_harni_invoke_subagent', arguments: {} },
+          },
+        });
+        // 2. native invoke_subagent when bridged -> denied without requestApproval
+        send({
+          jsonrpc: '2.0',
+          id: 702,
+          method: 'session/request_permission',
+          params: {
+            options: [
+              { optionId: 'allow_once', kind: 'allow_once' },
+              { optionId: 'deny', kind: 'reject_once' },
+            ],
+            toolCall: { toolCallId: 'tc_native_sub', name: 'invoke_subagent', arguments: {} },
+          },
+        });
+        // 3. run_command -> still calls requestApproval
+        send({
+          jsonrpc: '2.0',
+          id: 703,
+          method: 'session/request_permission',
+          params: {
+            options: [
+              { optionId: 'allow_once', kind: 'allow_once' },
+              { optionId: 'deny', kind: 'reject_once' },
+            ],
+            toolCall: { toolCallId: 'tc_cmd', name: 'run_command', arguments: { command: 'ls' } },
+          },
+        });
+        setTimeout(() => {
+          send({ jsonrpc: '2.0', id: msg.id, result: { stopReason: 'end_turn' } });
+        }, 20);
+      },
+    });
+
+    try {
+      const provider = new AntigravityProvider({
+        agyPath: 'agy',
+        spawnFn,
+        sessionPool: pool,
+        mcpBridge: bridge,
+        autoApprove: false,
+        requestApproval,
+        sessionId: 'sess_perm_bridge',
+        executeAcpTool: async (_name, _args, meta) => ({
+          toolCallId: meta.toolCallId,
+          output: 'ok',
+        }),
+      });
+
+      const invokeTool = {
+        name: 'invoke_subagent',
+        description: 'Spawn subagent',
+        parameters: { type: 'object' as const, properties: {} },
+      };
+
+      await provider.streamCompletion([userMsg('test perms')], 'sys', [invokeTool], () => {});
+
+      const resp701 = records[0]!.requests.find((r) => r.id === 701 && r.result);
+      const resp702 = records[0]!.requests.find((r) => r.id === 702 && r.result);
+      const resp703 = records[0]!.requests.find((r) => r.id === 703 && r.result);
+
+      expect(resp701?.result.outcome.optionId).toBe('allow_once');
+      expect(resp702?.result.outcome.optionId).toBe('deny');
+      expect(resp703?.result.outcome.optionId).toBe('allow_once');
+      expect(requestApproval).toHaveBeenCalledTimes(1);
+      expect(requestApproval.mock.calls[0]![0].name).toBe('run_command');
+    } finally {
+      await pool.shutdown();
+      await bridge.close();
+    }
+  });
+
+  it('protects against idle timeout while hasActiveInternalToolCalls() is true and resumes timeout once false', async () => {
+    const pool = new AgyAcpSessionPool();
+    const { spawnFn } = createMockAgySpawn({ stallOnPrompt: true });
+
+    const session = new AgyAcpSession({
+      agyPath: 'agy',
+      spawnFn,
+      turnTimeoutMs: 40,
+      sessionId: 'sess_active_call_timeout',
+    });
+
+    try {
+      let active = true;
+      setTimeout(() => {
+        active = false;
+      }, 110);
+
+      const startedAt = Date.now();
+      const consume = async () => {
+        for await (const _ev of session.sendTurn('wait on active call', {
+          timeoutMs: 40,
+          hasActiveInternalToolCalls: () => active,
+        })) {
+          // wait
+        }
+      };
+
+      await expect(consume()).rejects.toThrow(/Antigravity ACP 串流逾時/);
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(100);
+    } finally {
+      await session.close();
+      await pool.shutdown();
+    }
+  });
+
+  it('normalizeUsage parses inputTokens / outputTokens / cachedReadTokens / cachedWriteTokens', async () => {
+    const pool = new AgyAcpSessionPool();
+    const { spawnFn } = createMockAgySpawn({
+      onPrompt: (msg, { send }) => {
+        send({
+          jsonrpc: '2.0',
+          id: msg.id,
+          result: {
+            stopReason: 'end_turn',
+            usage: {
+              inputTokens: 300,
+              outputTokens: 75,
+              cachedReadTokens: 120,
+              cachedWriteTokens: 40,
+            },
+          },
+        });
+      },
+    });
+
+    try {
+      const provider = new AntigravityProvider({
+        agyPath: 'agy',
+        spawnFn,
+        sessionPool: pool,
+        sessionId: 'sess_usage_agy_fields',
+      });
+      const result = await provider.streamCompletion([userMsg('usage')], 'sys', [], () => {});
+      expect(result.usage).toEqual({
+        promptTokens: 300,
+        completionTokens: 75,
+        totalTokens: 375,
+        cacheReadTokens: 120,
+        cacheWriteTokens: 40,
+      });
+    } finally {
+      await pool.shutdown();
+    }
+  });
+
+  it('end-to-end: AgentCoreEngine + mock agy acp + real HarniAcpMcpBridge executes subagent via HTTP MCP', async () => {
+    const tmpWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'harni-e2e-bridge-'));
+    const pool = new AgyAcpSessionPool();
+    const bridge = new HarniAcpMcpBridge();
+    const engine = new AgentCoreEngine({
+      workspaceRoot: tmpWorkspace,
+      defaultProvider: 'antigravity',
+      autoTestEnabled: false,
+      gitCheckpointEnabled: false,
+    });
+
+    try {
+      const { spawnFn } = createMockAgySpawn({
+        onPrompt: (msg, { send }, record) => {
+          const newSessReq = record.requests.find((r) => r.method === 'session/new');
+          const mcpServer = newSessReq?.params?.mcpServers?.[0];
+          expect(mcpServer).toBeDefined();
+
+          const mcpUrl = new URL(mcpServer.url);
+          const authVal = mcpServer.headers.find((h: any) => h.name === 'Authorization')?.value;
+
+          const req = http.request(
+            {
+              hostname: mcpUrl.hostname,
+              port: Number(mcpUrl.port),
+              path: mcpUrl.pathname,
+              method: 'POST',
+              headers: {
+                Authorization: authVal,
+                'Content-Type': 'application/json',
+              },
+            },
+            (res) => {
+              const chunks: Buffer[] = [];
+              res.on('data', (c: Buffer) => chunks.push(c));
+              res.on('end', () => {
+                const rpcRes = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+                const mcpText = rpcRes.result?.content?.[0]?.text || '';
+                send({
+                  jsonrpc: '2.0',
+                  method: 'session/update',
+                  params: {
+                    update: {
+                      sessionUpdate: 'agent_message_chunk',
+                      content: { text: `Subagent result received: ${mcpText}` },
+                    },
+                  },
+                });
+                send({ jsonrpc: '2.0', id: msg.id, result: { stopReason: 'end_turn' } });
+              });
+            },
+          );
+          req.write(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: 55,
+              method: 'tools/call',
+              params: {
+                name: 'invoke_subagent',
+                arguments: {
+                  TypeName: 'researcher',
+                  Role: 'Bridge Researcher',
+                  Prompt: 'Summarize workspace',
+                },
+              },
+            }),
+          );
+          req.end();
+        },
+      });
+
+      let callIndex = 0;
+      vi.spyOn(ProviderFactory, 'create').mockImplementation((_type, opts) => {
+        callIndex++;
+        if (callIndex === 1) {
+          return new AntigravityProvider({
+            ...opts,
+            agyPath: 'agy',
+            spawnFn,
+            sessionPool: pool,
+            mcpBridge: bridge,
+          });
+        }
+        return new MockProvider({
+          ...opts,
+          script: [{ text: 'E2E Subagent Findings: OK' }],
+        });
+      });
+
+      const spawnedEvents: any[] = [];
+      const statusEvents: any[] = [];
+      const completedEvents: any[] = [];
+      engine.on('subagent:spawned', (e) => spawnedEvents.push(e));
+      engine.on('subagent:status', (e) => statusEvents.push(e));
+      engine.on('subagent:completed', (e) => completedEvents.push(e));
+
+      await engine.startTask('Delegate via MCP bridge', {
+        sessionId: 'sess_e2e_bridge',
+        provider: 'antigravity',
+        model: 'claude-sonnet-5-5:acp',
+        autoApprove: true,
+        subagentsEnabled: true,
+      });
+
+      expect(spawnedEvents).toHaveLength(1);
+      expect(spawnedEvents[0].subagent.role).toBe('Bridge Researcher');
+      expect(statusEvents.some((e) => e.status === 'running')).toBe(true);
+      expect(completedEvents).toHaveLength(1);
+      expect(completedEvents[0].status).toBe('completed');
+      expect(completedEvents[0].result).toContain('E2E Subagent Findings: OK');
+
+      const state = engine.getTaskState('sess_e2e_bridge');
+      expect(state?.subagents).toHaveLength(1);
+      expect(state?.subagents?.[0]?.status).toBe('completed');
+      const lastMsg = state?.messages[state.messages.length - 1];
+      expect(lastMsg?.content).toContain('E2E Subagent Findings: OK');
+    } finally {
+      await pool.shutdown();
+      await bridge.close();
+      await engine.dispose();
+      await fs.rm(tmpWorkspace, { recursive: true, force: true });
+    }
+  });
+
+  it('fallback mirroring: native invoke_subagent acp_tool updates mirror to SubagentManager while mcp_harni_invoke_subagent does not duplicate', async () => {
+    const tmpWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'harni-mirror-'));
+    const pool = new AgyAcpSessionPool();
+    const bridge = new HarniAcpMcpBridge();
+    const engine = new AgentCoreEngine({
+      workspaceRoot: tmpWorkspace,
+      defaultProvider: 'antigravity',
+      autoTestEnabled: false,
+      gitCheckpointEnabled: false,
+    });
+
+    try {
+      const { spawnFn } = createMockAgySpawn({
+        onPrompt: (msg, { send }) => {
+          // Should NOT mirror mcp_harni_invoke_subagent
+          send({
+            jsonrpc: '2.0',
+            method: 'session/update',
+            params: {
+              update: {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'tc_bridged_ignored',
+                name: 'mcp_harni_invoke_subagent',
+                status: 'in_progress',
+                title: 'mcp_harni_invoke_subagent',
+                arguments: { TypeName: 'coder', Role: 'Ignored', Prompt: 'Should not mirror' },
+              },
+            },
+          });
+          send({
+            jsonrpc: '2.0',
+            method: 'session/update',
+            params: {
+              update: {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'tc_bridged_ignored',
+                status: 'completed',
+              },
+            },
+          });
+          // Native fallback invoke_subagent SHOULD mirror
+          send({
+            jsonrpc: '2.0',
+            method: 'session/update',
+            params: {
+              update: {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'tc_native_mirror',
+                name: 'invoke_subagent',
+                status: 'in_progress',
+                title: 'Native Subagent',
+                arguments: { TypeName: 'researcher', Role: 'Native Scout', Prompt: 'Explore repo' },
+              },
+            },
+          });
+          send({
+            jsonrpc: '2.0',
+            method: 'session/update',
+            params: {
+              update: {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'tc_native_mirror',
+                status: 'completed',
+                output: 'Native scout done',
+              },
+            },
+          });
+          send({
+            jsonrpc: '2.0',
+            method: 'session/update',
+            params: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { text: 'Mirrored complete' },
+              },
+            },
+          });
+          send({ jsonrpc: '2.0', id: msg.id, result: { stopReason: 'end_turn' } });
+        },
+      });
+
+      vi.spyOn(ProviderFactory, 'create').mockImplementation((_type, opts) => {
+        return new AntigravityProvider({
+          ...opts,
+          agyPath: 'agy',
+          spawnFn,
+          sessionPool: pool,
+          mcpBridge: bridge,
+        });
+      });
+
+      const spawned: any[] = [];
+      const completed: any[] = [];
+      engine.on('subagent:spawned', (e) => spawned.push(e));
+      engine.on('subagent:completed', (e) => completed.push(e));
+
+      await engine.startTask('Run fallback mirror test', {
+        sessionId: 'sess_mirror',
+        provider: 'antigravity',
+        model: 'claude-sonnet-5-5:acp',
+        autoApprove: true,
+      });
+
+      expect(spawned).toHaveLength(1);
+      expect(spawned[0].subagent.id).toBe('tc_native_mirror');
+      expect(spawned[0].subagent.role).toBe('Native Scout');
+      expect(completed).toHaveLength(1);
+      expect(completed[0].subagentId).toBe('tc_native_mirror');
+      expect(completed[0].result).toBe('Native scout done');
+
+      const state = engine.getTaskState('sess_mirror');
+      expect(state?.subagents).toHaveLength(1);
+      expect(state?.subagents?.[0]?.id).toBe('tc_native_mirror');
+      expect(state?.subagents?.[0]?.status).toBe('completed');
+    } finally {
+      await pool.shutdown();
+      await bridge.close();
+      await engine.dispose();
+      await fs.rm(tmpWorkspace, { recursive: true, force: true });
+    }
+  });
+
+  it('subagent running in acp mode tracks acp_tool progress in toolCallCount and emits subagent:tool', async () => {
+    const tmpWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'harni-sub-acp-tool-'));
+    const pool = new AgyAcpSessionPool();
+    const bridge = new HarniAcpMcpBridge();
+
+    try {
+      const { spawnFn } = createMockAgySpawn({
+        onPrompt: (msg, { send }) => {
+          send({
+            jsonrpc: '2.0',
+            method: 'session/update',
+            params: {
+              update: {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'sub_tc_1',
+                name: 'read_file',
+                status: 'in_progress',
+                title: 'Read package.json',
+              },
+            },
+          });
+          send({
+            jsonrpc: '2.0',
+            method: 'session/update',
+            params: {
+              update: {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'sub_tc_1',
+                status: 'pending',
+              },
+            },
+          });
+          send({
+            jsonrpc: '2.0',
+            method: 'session/update',
+            params: {
+              update: {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'sub_tc_1',
+                status: 'in_progress',
+              },
+            },
+          });
+          send({
+            jsonrpc: '2.0',
+            method: 'session/update',
+            params: {
+              update: {
+                sessionUpdate: 'tool_call_update',
+                toolCallId: 'sub_tc_1',
+                status: 'completed',
+                output: '{"name":"harni"}',
+              },
+            },
+          });
+          // mcp_harni_* acp_tool should be ignored to avoid double counting
+          send({
+            jsonrpc: '2.0',
+            method: 'session/update',
+            params: {
+              update: {
+                sessionUpdate: 'tool_call',
+                toolCallId: 'sub_tc_mcp',
+                name: 'mcp_harni_ask_question',
+                status: 'in_progress',
+                title: 'ask_question',
+              },
+            },
+          });
+          send({
+            jsonrpc: '2.0',
+            method: 'session/update',
+            params: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { text: 'Subagent finished inspection' },
+              },
+            },
+          });
+          send({ jsonrpc: '2.0', id: msg.id, result: { stopReason: 'end_turn' } });
+        },
+      });
+
+      const subProvider = new AntigravityProvider({
+        agyPath: 'agy',
+        spawnFn,
+        sessionPool: pool,
+        mcpBridge: bridge,
+        sessionId: 'sess_sub_acp',
+        subagentId: 'sub_acp_1',
+      });
+
+      const manager = new SubagentManager({ workspaceRoot: tmpWorkspace });
+      const toolEvents: any[] = [];
+      manager.on('subagent:tool', (ev) => toolEvents.push(ev));
+
+      const results = await manager.spawnSubagents([
+        {
+          typeName: 'researcher',
+          role: 'ACP Researcher',
+          prompt: 'Inspect package.json',
+          sessionId: 'sess_sub_acp',
+          parentId: 'parent_1',
+          customProvider: subProvider,
+        },
+      ]);
+
+      expect(results).toHaveLength(1);
+      expect(results[0]!.status).toBe('completed');
+      expect(results[0]!.toolCallCount).toBe(1);
+      const startEvents = toolEvents.filter((e) => e.toolName === 'read_file' && e.status === 'start');
+      const completeEvents = toolEvents.filter((e) => e.toolName === 'read_file' && e.status === 'complete');
+      expect(startEvents).toHaveLength(1);
+      expect(completeEvents).toHaveLength(1);
+      expect(toolEvents.some((e) => e.toolName === 'mcp_harni_ask_question')).toBe(false);
+    } finally {
+      await pool.shutdown();
+      await bridge.close();
       await fs.rm(tmpWorkspace, { recursive: true, force: true });
     }
   });

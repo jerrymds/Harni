@@ -1301,6 +1301,134 @@ All unit tests pass with zero regressions.
     expect(completedPayload.structuredReport.modifiedFiles).toHaveLength(2);
   });
 
+  it('sanitizes markdown links, annotations, and no-modification placeholders in modifiedFiles and avoids heading false positives', async () => {
+    const dirtyReport = `
+## Summary
+Completed report sanitization check.
+
+### 1. 收斂 modifiedFiles 欄位顯示與解析
+- This subsection discusses modifiedFiles field parsing and must not be mistaken for the Modified Files section.
+
+## Modified Files
+- [activeContext.md](file:\\D:\\Work\\Project\\Harni\\memory-bank\\activeContext.md#L3-L42)：將 ## Current Work Focus 更新為最新狀態
+- [progress.md](file:///D:/Work/Project/Harni/memory-bank/progress.md#L1-L20)
+- \`README.md\` - 全面翻新
+- **src/app.ts** (修正)
+- 無（唯讀覆驗，未修改任何檔案）
+`;
+
+    // Without workspaceRoot: extracts cleaned absolute/relative paths and drops "無..."
+    const parsedAbsolute = SubagentInstance.parseStructuredReport(dirtyReport);
+    expect(parsedAbsolute?.modifiedFiles).toEqual([
+      'D:/Work/Project/Harni/memory-bank/activeContext.md',
+      'D:/Work/Project/Harni/memory-bank/progress.md',
+      'README.md',
+      'src/app.ts',
+    ]);
+
+    // With workspaceRoot: normalizes workspace-internal paths to relative paths and deduplicates
+    const duplicateReport = `
+## 修改檔案
+- [activeContext.md](file:\\D:\\Work\\Project\\Harni\\memory-bank\\activeContext.md#L3-L42)：將 ## Current Work Focus...
+- [activeContext.md](file:///D:/Work/Project/Harni/memory-bank/activeContext.md#L10)
+- [progress.md](file:///D:/Work/Project/Harni/memory-bank/progress.md#L1-L20)
+- \`README.md\` - 全面翻新
+- **src/app.ts** (修正)
+- 無（唯讀覆驗，未修改任何檔案）
+`;
+    const parsedRelative = SubagentInstance.parseStructuredReport(
+      duplicateReport,
+      'D:\\Work\\Project\\Harni',
+    );
+    expect(parsedRelative?.modifiedFiles).toEqual([
+      'memory-bank/activeContext.md',
+      'memory-bank/progress.md',
+      'README.md',
+      'src/app.ts',
+    ]);
+
+    // Section containing "modifiedFiles" in prose title must NOT be misclassified when no Modified Files section exists
+    const falseHeadingReport = `
+## Summary
+Reviewed report parser.
+
+### 1. 收斂 modifiedFiles 欄位顯示與解析
+- \`packages/agent-core/src/subagents/subagentInstance.ts\`
+`;
+    const parsedFalseHeading = SubagentInstance.parseStructuredReport(falseHeadingReport);
+    expect(parsedFalseHeading?.summary).toBe('Reviewed report parser.');
+    expect(parsedFalseHeading?.modifiedFiles).toBeUndefined();
+
+    // Direct extractCleanFilePath edge cases
+    expect(
+      SubagentInstance.extractCleanFilePath(
+        '[activeContext.md](file:\\D:\\Work\\Project\\Harni\\memory-bank\\activeContext.md#L3-L42)：說明',
+        'D:\\Work\\Project\\Harni',
+      ),
+    ).toBe('memory-bank/activeContext.md');
+    expect(SubagentInstance.extractCleanFilePath('`README.md` - 全面翻新')).toBe('README.md');
+    expect(SubagentInstance.extractCleanFilePath('**src/app.ts** (修正)')).toBe('src/app.ts');
+    expect(SubagentInstance.extractCleanFilePath('none-config.ts')).toBe('none-config.ts');
+    expect(SubagentInstance.extractCleanFilePath('nil-check.ts')).toBe('nil-check.ts');
+    expect(SubagentInstance.extractCleanFilePath('src/app.ts:42:10')).toBe('src/app.ts');
+    expect(SubagentInstance.extractCleanFilePath('./src/app.ts')).toBe('src/app.ts');
+    expect(SubagentInstance.extractCleanFilePath('../src/app.ts')).toBe('../src/app.ts');
+    expect(SubagentInstance.extractCleanFilePath('file:///Users/dev/app.ts')).toBe('/Users/dev/app.ts');
+    expect(SubagentInstance.extractCleanFilePath('file:/Users/dev/app.ts')).toBe('/Users/dev/app.ts');
+    expect(SubagentInstance.extractCleanFilePath('D:/repo//src/a.ts', 'D:/repo')).toBe('src/a.ts');
+    expect(SubagentInstance.extractCleanFilePath('D:/repo/', 'D:/repo')).toBeNull();
+    expect(SubagentInstance.extractCleanFilePath('vscode://file/Users/dev/app.ts')).toBeNull();
+    expect(SubagentInstance.extractCleanFilePath('無（唯讀覆驗，未修改任何檔案）')).toBeNull();
+    expect(SubagentInstance.extractCleanFilePath('None remaining.')).toBeNull();
+    expect(SubagentInstance.extractCleanFilePath('https://example.com/docs')).toBeNull();
+
+    // Deduplicates src/app.ts:42:10 and ./src/app.ts and handles Simplified Chinese headings/phrases
+    const simplifiedReport = `
+## 变更文件
+- src/app.ts:42:10
+- ./src/app.ts
+- none-config.ts
+- nil-check.ts
+- 没有
+- No files modified
+`;
+    const parsedSimplified = SubagentInstance.parseStructuredReport(simplifiedReport);
+    expect(parsedSimplified?.modifiedFiles).toEqual(['src/app.ts', 'none-config.ts', 'nil-check.ts']);
+
+    // End-to-end buildFinalStructuredReport merges tool-tracked modifiedFiles with report bullets cleanly
+    const manager = new SubagentManager({ workspaceRoot: tempTestDir });
+    const absTempFile = path.join(tempTestDir, 'merged_file.ts');
+    const mockCoder = new MockProvider({
+      script: [
+        {
+          text: 'Writing merged_file.ts',
+          toolCalls: [
+            {
+              id: 'call_merge_1',
+              name: 'write_to_file',
+              arguments: { path: absTempFile, content: 'export const ok = true;' },
+            },
+          ],
+        },
+        {
+          text: `## Summary\nUpdated file.\n\n## Modified Files\n- [merged_file.ts](file:///${absTempFile.replace(/\\/g, '/')}#L1)：新增 ok 常數\n- 無`,
+        },
+      ],
+    });
+    const [execResult] = await manager.spawnSubagents([
+      {
+        typeName: 'coder',
+        role: 'Coder',
+        prompt: 'Write merged_file.ts',
+        sessionId: 'sess_merge_clean',
+        parentId: 'parent',
+        customProvider: mockCoder,
+      },
+    ]);
+    expect(execResult.structuredReport?.modifiedFiles).toEqual(['merged_file.ts']);
+    await fs.rm(absTempFile, { force: true });
+  });
+
   it('P2-1: spawns background subagents asynchronously and awaits completion via manage_subagents wait', async () => {
     const manager = new SubagentManager({ workspaceRoot: tempTestDir });
     let completedCount = 0;
@@ -1817,5 +1945,133 @@ All unit tests pass with zero regressions.
     expect(taskStateEmitted).toBeDefined();
     expect(Array.isArray(taskStateEmitted.subagents)).toBe(true);
     expect(taskStateEmitted.subagents[0].id).toBe(result.id);
+  });
+
+  it('P3-3: resolves per-session modelTierMap across arbitrary providers without cross-session leakage', async () => {
+    const engine = new AgentCoreEngine({
+      workspaceRoot: tempTestDir,
+      defaultProvider: 'openrouter',
+      defaultModel: 'anthropic/claude-3.5-sonnet',
+      experienceLearningEnabled: false,
+      autoTestEnabled: false,
+      gitCheckpointEnabled: false,
+    });
+
+    const manager = engine.getSubagentManager();
+
+    // Session A uses custom per-provider modelTierMap on openrouter
+    const sessATierMap = {
+      fast: 'google/gemini-2.5-flash',
+      reasoning: 'openai/o3-mini',
+    };
+
+    const sessAResults = await manager.spawnSubagents([
+      {
+        typeName: 'researcher',
+        role: 'OR Researcher',
+        prompt: 'Explore files',
+        sessionId: 'sess_tier_a',
+        parentId: 'main',
+        provider: 'openrouter',
+        parentModel: 'anthropic/claude-3.5-sonnet',
+        modelTierMap: sessATierMap,
+        customProvider: new MockProvider({ script: [{ text: 'Found files' }] }),
+      },
+      {
+        typeName: 'coder',
+        role: 'OR Coder',
+        prompt: 'Write feature',
+        sessionId: 'sess_tier_a',
+        parentId: 'main',
+        provider: 'openrouter',
+        parentModel: 'anthropic/claude-3.5-sonnet',
+        modelTierMap: sessATierMap,
+        customProvider: new MockProvider({ script: [{ text: 'Implemented feature' }] }),
+      },
+      {
+        typeName: 'reviewer',
+        role: 'OR Reviewer',
+        prompt: 'Review diffs',
+        sessionId: 'sess_tier_a',
+        parentId: 'main',
+        provider: 'openrouter',
+        parentModel: 'anthropic/claude-3.5-sonnet',
+        modelTierMap: sessATierMap,
+        customProvider: new MockProvider({ script: [{ text: 'Looks good' }] }),
+      },
+    ]);
+
+    expect(manager.getInstance(sessAResults[0].id)?.getInfo().model).toBe('google/gemini-2.5-flash');
+    expect(manager.getInstance(sessAResults[1].id)?.getInfo().model).toBe('anthropic/claude-3.5-sonnet');
+    expect(manager.getInstance(sessAResults[2].id)?.getInfo().model).toBe('openai/o3-mini');
+
+    // Session B does NOT set modelTierMap -> should fall back to parentModel without inheriting Session A's map
+    const sessBResults = await manager.spawnSubagents([
+      {
+        typeName: 'researcher',
+        role: 'Cline Researcher',
+        prompt: 'Explore files',
+        sessionId: 'sess_tier_b',
+        parentId: 'main',
+        provider: 'cline',
+        parentModel: 'cline-pass/deepseek-v4-pro',
+        customProvider: new MockProvider({ script: [{ text: 'Found files' }] }),
+      },
+    ]);
+
+    expect(manager.getInstance(sessBResults[0].id)?.getInfo().model).toBe('cline-pass/deepseek-v4-pro');
+  });
+
+  it('P3-4: HarnirulesParser.applyRules clears explicit model when switching to modelTier and avoids duplicate systemPrompt concatenation', () => {
+    const registry = new SubagentRegistry(true);
+    const definitions = registry['definitions'];
+
+    // First apply an explicit model
+    const explicitRules = HarnirulesParser.parse(`
+## Subagents
+### researcher
+- Model: legacy-explicit-model
+- Instructions: Focus on TypeScript files.
+`);
+    HarnirulesParser.applyRules(explicitRules, definitions);
+    expect(registry.get('researcher')?.model).toBe('legacy-explicit-model');
+
+    // Re-apply using Model Tier instead of explicit Model (and same Instructions)
+    const tierRules = HarnirulesParser.parse(
+      `
+## researcher
+- **Model Tier**: \`fast\`
+- **Instructions**: Focus on TypeScript files.
+`,
+      true,
+    );
+    HarnirulesParser.applyRules(tierRules, definitions);
+    HarnirulesParser.applyRules(tierRules, definitions);
+
+    const updated = registry.get('researcher');
+    expect(updated?.model).toBeUndefined();
+    expect(updated?.modelTier).toBe('fast');
+    const occurrences = updated?.systemPrompt.split('Focus on TypeScript files.').length ?? 0;
+    expect(occurrences).toBe(2); // appears exactly once
+  });
+
+  it('normalizes research -> researcher and prioritizes custom define_subagent over alias normalization', () => {
+    const registry = new SubagentRegistry(true);
+    expect(registry.has('research')).toBe(true);
+    expect(registry.get('research')?.name).toBe('researcher');
+
+    const customDef = {
+      name: 'research',
+      role: 'Custom Research Lead',
+      description: 'Custom research definition',
+      systemPrompt: 'Custom research instructions.',
+      allowedTools: ['read_file'],
+    };
+    registry.register(customDef);
+
+    expect(registry.get('research')?.role).toBe('Custom Research Lead');
+    expect(registry.get('researcher')?.name).toBe('researcher');
+    expect(registry.remove('research')).toBe(true);
+    expect(registry.get('research')?.name).toBe('researcher');
   });
 });

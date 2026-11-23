@@ -110,7 +110,7 @@ export function resolveModelContextWindow(
     return modelInfo.contextWindow;
   }
 
-  const cleanModel = (selectedModel || '').replace(/:acp$/i, '').replace(/-(low|medium|high)$/i, '');
+  const cleanModel = normalizeAntigravityModelId(selectedModel).replace(/:acp$/i, '');
   const modelId = cleanModel.toLowerCase().trim();
 
   // 2. Exact match
@@ -183,15 +183,18 @@ export function formatTokenCount(num: number): string {
 
 /**
  * Normalizes an Antigravity model ID by stripping thinking level suffixes.
- * Special exception: gpt-oss-120b-medium preserves '-medium'.
+ * Special exceptions: gpt-oss-120b-medium and gemini-pro-orchestrator-* preserve their names.
  */
 export function normalizeAntigravityModelId(rawId?: string): string {
   const trimmed = (rawId || '').trim();
   const hasAcp = trimmed.toLowerCase().endsWith(':acp');
   let base = hasAcp ? trimmed.slice(0, -4) : trimmed;
 
-  if (base.toLowerCase() !== 'gpt-oss-120b-medium') {
-    base = base.replace(/-(low|medium|high)$/i, '');
+  if (
+    base.toLowerCase() !== 'gpt-oss-120b-medium' &&
+    !/^gemini-pro-orchestrator-/i.test(base)
+  ) {
+    base = base.replace(/-(low|medium|high|xhigh)$/i, '');
   }
 
   return hasAcp ? `${base}:acp` : base;
@@ -199,14 +202,14 @@ export function normalizeAntigravityModelId(rawId?: string): string {
 
 /**
  * Strips thinking level badges and provider labels from model names:
- * (Low), (Medium), (High), (Antigravity), (ACP Mode).
+ * (Low), (Medium), (High), (XHigh), (Antigravity), (ACP Mode).
  * Pure ACP models are normalized with '(ACP)' suffix.
  */
 export function cleanAntigravityDisplayName(name?: string, id?: string): string {
   let cleaned = (name || id || '').trim();
   cleaned = cleaned
-    .replace(/\s*\((?:low|medium|high)\)/gi, '')
-    .replace(/\s*-\s*(?:low|medium|high)$/gi, '')
+    .replace(/\s*\((?:low|medium|high|xhigh)\)/gi, '')
+    .replace(/\s*-\s*(?:low|medium|high|xhigh)$/gi, '')
     .replace(/\s*\(antigravity\)/gi, '')
     .replace(/\s*\(acp\s+mode\)/gi, '')
     .trim();

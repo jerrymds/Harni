@@ -244,6 +244,7 @@ export const ChatPanel: React.FC = () => {
   const isRevertingCheckpoint = useAgentStore((s) => s.isRevertingCheckpoint);
   const worktreeIsolationEnabled = useAgentStore((s) => s.worktreeIsolationEnabled);
   const subagentsEnabled = useAgentStore((s) => s.subagentsEnabled);
+  const strictOrchestration = useAgentStore((s) => Boolean(s.strictOrchestration));
   const contextWindow = useAgentStore((s) => s.contextWindow);
   const modelContextWindows = useAgentStore((s) => s.modelContextWindows);
 
@@ -261,6 +262,7 @@ export const ChatPanel: React.FC = () => {
     discardWorktree,
     setWorktreeIsolationEnabled,
     setSubagentsEnabled,
+    setStrictOrchestration,
   } = useAgentStore(
     useShallow((s) => ({
       setAutoApprove: s.setAutoApprove,
@@ -274,6 +276,7 @@ export const ChatPanel: React.FC = () => {
       discardWorktree: s.discardWorktree,
       setWorktreeIsolationEnabled: s.setWorktreeIsolationEnabled,
       setSubagentsEnabled: s.setSubagentsEnabled,
+      setStrictOrchestration: s.setStrictOrchestration,
     }))
   );
 
@@ -776,6 +779,22 @@ export const ChatPanel: React.FC = () => {
                   <span>{subagentsEnabled ? '🤖 Subagents 開啟' : '單一 Agent'}</span>
                 </button>
 
+                {subagentsEnabled && (
+                  <button
+                    type="button"
+                    onClick={() => setStrictOrchestration(!strictOrchestration)}
+                    className={`flex items-center space-x-1.5 px-2.5 py-0.5 rounded-lg border text-[10.5px] font-medium transition-all cursor-pointer shrink-0 ${
+                      strictOrchestration
+                        ? 'border-amber-500/50 bg-amber-500/15 text-amber-800 dark:text-amber-300 shadow-soft font-semibold'
+                        : 'border-ag-border bg-ag-sidebar/60 text-ag-textMuted hover:text-ag-textPrimary'
+                    }`}
+                    title="強制調度模式：開啟後主代理人只負責規劃協調，所有讀寫與執行指令強制派發給 Researcher / Coder / Reviewer"
+                  >
+                    <Layers className={`h-3 w-3 ${strictOrchestration ? 'text-amber-600 dark:text-amber-400' : 'text-ag-textMuted'}`} />
+                    <span>{strictOrchestration ? '🎯 強制調度' : '彈性調度'}</span>
+                  </button>
+                )}
+
                 <span className="text-ag-border shrink-0">•</span>
 
                 {/* Context 用量 (Context Usage) */}
@@ -792,27 +811,27 @@ export const ChatPanel: React.FC = () => {
               </div>
 
               <div className="flex items-center space-x-2.5 shrink-0 ml-auto">
-                {isBusy && (
+                <BranchDropdown disabled={isBusy} />
+
+                {isBusy ? (
                   <button
                     type="button"
                     onClick={cancelTask}
-                    className="flex items-center space-x-1.5 rounded-xl border border-rose-300 bg-rose-50 px-3.5 py-1.5 text-xs font-semibold text-rose-700 hover:bg-rose-100 transition-all shadow-soft cursor-pointer"
+                    className="flex items-center space-x-1.5 rounded-xl border border-rose-300 bg-rose-50 px-4 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-100 transition-all shadow-soft cursor-pointer"
                   >
                     <Square className="h-3 w-3 fill-rose-500 text-rose-500" />
-                    <span>停止 (Stop)</span>
+                    <span>停止</span>
+                  </button>
+                ) : (
+                  <button
+                    type="submit"
+                    disabled={!inputPrompt.trim() && attachments.length === 0}
+                    className="flex items-center space-x-2 rounded-xl bg-ag-primary px-5 py-2 text-xs font-semibold text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed shadow-soft transition-all duration-150 active:scale-98 cursor-pointer"
+                  >
+                    <span>發送</span>
+                    <CornerDownLeft className="h-3.5 w-3.5" />
                   </button>
                 )}
-
-                <BranchDropdown disabled={isBusy} />
-
-                <button
-                  type="submit"
-                  disabled={isBusy || (!inputPrompt.trim() && attachments.length === 0)}
-                  className="flex items-center space-x-2 rounded-xl bg-ag-primary px-5 py-2 text-xs font-semibold text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed shadow-soft transition-all duration-150 active:scale-98 cursor-pointer"
-                >
-                  <span>發送</span>
-                  <CornerDownLeft className="h-3.5 w-3.5" />
-                </button>
               </div>
             </div>
           </form>

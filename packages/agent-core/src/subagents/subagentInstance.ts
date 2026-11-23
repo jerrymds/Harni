@@ -5,9 +5,11 @@ import type {
   FileDiff,
   SubagentDefinition,
   SubagentInstanceInfo,
+  SubagentModelTier,
   SubagentStatus,
   SubagentStructuredReport,
   TokenUsage,
+  ToolCall,
   ToolCallMiddlewareContext,
   ToolCallRequest,
   ToolResult,
@@ -20,8 +22,10 @@ import type {
   ProviderCompletionResult,
   StreamChunk,
 } from '../providers/baseProvider.js';
+import { HARNI_ACP_MCP_TOOL_PREFIX } from '../providers/harniAcpMcpBridge.js';
 import { AutoTestRunner } from '../testing/autoTestRunner.js';
 import type { ToolExecutionContext } from '../tools/baseTool.js';
+import { normalizeToolCall } from '../tools/toolAdapter.js';
 import { ToolRegistry } from '../tools/toolRegistry.js';
 import type { McpServerManager } from '../mcp/mcpServerManager.js';
 import { isRateLimitError } from '../utils/rateLimit.js';
@@ -39,6 +43,7 @@ export interface SubagentInstanceOptions {
   role: string;
   prompt: string;
   model?: string;
+  modelTierMap?: Partial<Record<SubagentModelTier, string>>;
   workspaceRoot: string;
   provider: BaseLLMProvider;
   toolRegistry: ToolRegistry;
@@ -149,6 +154,7 @@ export class SubagentInstance extends EventEmitter {
   private abortController: AbortController | null = null;
   private currentToolSummary?: string;
   private pluginManager?: WorkflowPluginManager;
+  private modelTierMap?: Partial<Record<SubagentModelTier, string>>;
   private pluginStates = new Map<string, unknown>();
   private codeModified = false;
   private modifiedFiles = new Set<string>();
@@ -182,6 +188,7 @@ export class SubagentInstance extends EventEmitter {
     this.role = options.role;
     this.prompt = options.prompt;
     this.model = options.model;
+    this.modelTierMap = options.modelTierMap;
     this.alias = options.alias;
     this.forkedFrom = options.forkedFrom;
     this.workspaceRoot = options.workspaceRoot;
@@ -326,7 +333,122 @@ export class SubagentInstance extends EventEmitter {
     };
   }
 
-  public static parseStructuredReport(text?: string): SubagentStructuredReport | undefined {
+  private static readonly NO_MODIFICATION_REGEX =
+    /^(?:無|无|none|n\/a|nil|沒有|没有|未修改|no\s+files?(?:\s+modified|\s+changed)?)(?:$|\.$|\.\s|[（(\s:：—–]|-\s|-$|修改|變更|变更|任何|檔案|文件)/i;
+
+  public static extractCleanFilePath(raw: string, workspaceRoot?: string): string | null {
+    if (!raw || typeof raw !== 'string') return null;
+
+    const stripFormatting = (val: string): string => {
+      let cur = val.trim();
+      let prev: string;
+      do {
+        prev = cur;
+        cur = cur
+          .trim()
+          .replace(/^(?:\*\*|__|``|`)+/, '')
+          .replace(/(?:\*\*|__|``|`)+$/, '')
+          .trim();
+        if (
+          (cur.startsWith('"') && cur.endsWith('"') && cur.length >= 2) ||
+          (cur.startsWith("'") && cur.endsWith("'") && cur.length >= 2) ||
+          (cur.startsWith('*') && cur.endsWith('*') && cur.length >= 2 && !cur.startsWith('**'))
+        ) {
+          cur = cur.slice(1, -1).trim();
+        }
+      } while (cur !== prev);
+      return cur;
+    };
+
+    const stripFileProtocol = (val: string): string =>
+      val
+        .replace(/^file:[\\/]+([a-zA-Z]:[\\/])/i, '$1')
+        .replace(/^file:(?:\/\/|\/)(?=\/)/i, '')
+        .replace(/^file:(?=\/)/i, '')
+        .replace(/^file:[\\]+/i, '');
+
+    let s = stripFormatting(raw);
+    if (!s || SubagentInstance.NO_MODIFICATION_REGEX.test(s)) {
+      return null;
+    }
+
+    const mdMatch =
+      s.match(/\[([^\]]+)\]\(([^()\s]*(?:\([^()]*\)[^()\s]*)*)\)/) ??
+      s.match(/\[([^\]]+)\]\(([^)]*)\)/);
+    if (mdMatch) {
+      const label = mdMatch[1].trim();
+      const target = mdMatch[2].trim();
+      const isNonFileScheme =
+        /^[a-zA-Z][a-zA-Z0-9+.-]+:/i.test(target) && !/^file:/i.test(target);
+      const isFileTarget = target.length > 0 && !target.startsWith('#') && !isNonFileScheme;
+      s = isFileTarget ? target : label;
+      try {
+        s = decodeURIComponent(s);
+      } catch {
+        // Keep raw target if percent-encoding is malformed
+      }
+      s = stripFileProtocol(s);
+      s = s.replace(/#.*$/, '');
+    }
+
+    s = s.replace(/[：].*$/, '');
+    s = s.replace(/\s*:\s+.*$/, '');
+    s = s.replace(/\s+[-–—]\s+.*$/, '');
+    s = s.replace(/\s+[（(][^（）()]*[）)]$/, '').replace(/（[^（）]*）$/, '');
+    s = stripFormatting(s);
+    s = s.replace(/#.*$/, '');
+
+    if (/^file:/i.test(s)) {
+      try {
+        s = decodeURIComponent(s);
+      } catch {
+        // Keep raw value if percent-encoding is malformed
+      }
+      s = stripFileProtocol(s);
+    }
+
+    s = stripFormatting(s);
+    s = s.replace(/^(.{2,}?):\d+(?:[:-]\d+)*$/, '$1');
+    s = stripFormatting(s);
+
+    if (
+      !s ||
+      /[\r\n\[\]]/.test(s) ||
+      /^[a-zA-Z][a-zA-Z0-9+.-]{1,}:/i.test(s) ||
+      SubagentInstance.NO_MODIFICATION_REGEX.test(s)
+    ) {
+      return null;
+    }
+
+    s = s.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '');
+    if (workspaceRoot && workspaceRoot.trim()) {
+      const normRoot = workspaceRoot.trim().replace(/\\/g, '/').replace(/\/+$/, '');
+      if (normRoot) {
+        const isWindowsDrive = /^[a-zA-Z]:(?:\/|$)/.test(normRoot);
+        const matchesExactRoot = isWindowsDrive
+          ? s.toLowerCase() === normRoot.toLowerCase()
+          : s === normRoot;
+        if (matchesExactRoot) {
+          return null;
+        }
+        const prefix = `${normRoot}/`;
+        const matchesPrefix = isWindowsDrive
+          ? s.toLowerCase().startsWith(prefix.toLowerCase())
+          : s.startsWith(prefix);
+        if (matchesPrefix) {
+          s = s.slice(prefix.length).replace(/^\/+/, '');
+        }
+      }
+    }
+
+    s = s.replace(/^(?:\.\/)+/, '');
+    return s || null;
+  }
+
+  public static parseStructuredReport(
+    text?: string,
+    workspaceRoot?: string,
+  ): SubagentStructuredReport | undefined {
     if (!text || typeof text !== 'string') return undefined;
 
     const sectionRegex = /^#{1,4}\s+(.+)$/gm;
@@ -371,9 +493,15 @@ export class SubagentInstance extends EventEmitter {
       return items.length > 0 ? items : undefined;
     };
 
-    const findSectionContent = (keywords: string[]): string | undefined => {
+    const findSectionContent = (
+      keywords: string[],
+      exactKeywords?: string[],
+    ): string | undefined => {
       for (const [title, content] of Object.entries(sections)) {
-        if (keywords.some((kw) => title.includes(kw))) {
+        if (
+          keywords.some((kw) => title.includes(kw)) ||
+          exactKeywords?.some((kw) => title === kw)
+        ) {
           return content;
         }
       }
@@ -381,14 +509,24 @@ export class SubagentInstance extends EventEmitter {
     };
 
     const summaryContent = findSectionContent(['summary', '摘要', 'overview']);
-    const modifiedContent = findSectionContent([
-      'modified file',
-      'modified',
-      '修改檔案',
-      '修改文件',
-      'changed file',
-      'files modified',
-    ]);
+    const modifiedContent = findSectionContent(
+      [
+        'modified files',
+        'modified file',
+        'files modified',
+        'changed files',
+        'changed file',
+        '修改檔案',
+        '修改的檔案',
+        '變更檔案',
+        '變更的檔案',
+        '修改文件',
+        '变更档案',
+        '变更的档案',
+        '变更文件',
+      ],
+      ['modified', '修改'],
+    );
     const findingsContent = findSectionContent([
       'finding',
       '發現',
@@ -411,7 +549,18 @@ export class SubagentInstance extends EventEmitter {
       'unresolved',
     ]);
 
-    const modifiedFiles = parseBullets(modifiedContent);
+    const rawModifiedFiles = parseBullets(modifiedContent);
+    const cleanedModifiedFiles = rawModifiedFiles
+      ? Array.from(
+          new Set(
+            rawModifiedFiles
+              .map((item) => SubagentInstance.extractCleanFilePath(item, workspaceRoot))
+              .filter((p): p is string => p !== null),
+          ),
+        )
+      : undefined;
+    const modifiedFiles =
+      cleanedModifiedFiles && cleanedModifiedFiles.length > 0 ? cleanedModifiedFiles : undefined;
     const findings = parseBullets(findingsContent);
     const openQuestions = parseBullets(questionsContent);
     const summary = summaryContent?.trim() || undefined;
@@ -431,16 +580,23 @@ export class SubagentInstance extends EventEmitter {
   }
 
   private buildFinalStructuredReport(text?: string): SubagentStructuredReport | undefined {
-    const parsed = SubagentInstance.parseStructuredReport(text);
+    const parsed = SubagentInstance.parseStructuredReport(text, this.workspaceRoot);
     if (this.modifiedFiles.size === 0) {
       return parsed;
     }
     const mergedFiles = Array.from(
-      new Set([...(parsed?.modifiedFiles ?? []), ...this.modifiedFiles]),
+      new Set(
+        [...(parsed?.modifiedFiles ?? []), ...this.modifiedFiles]
+          .map((p) => SubagentInstance.extractCleanFilePath(p, this.workspaceRoot))
+          .filter((p): p is string => p !== null),
+      ),
     );
+    if (!parsed && mergedFiles.length === 0) {
+      return undefined;
+    }
     return {
       ...parsed,
-      modifiedFiles: mergedFiles,
+      modifiedFiles: mergedFiles.length > 0 ? mergedFiles : undefined,
     };
   }
 
@@ -537,7 +693,57 @@ export class SubagentInstance extends EventEmitter {
 
   public setWorkspaceRoot(workspaceRoot: string): void {
     this.workspaceRoot = workspaceRoot;
+    this.provider.setWorkspaceRoot(workspaceRoot);
     this.updatedAt = Date.now();
+  }
+
+  public async executeExternalToolCall(
+    name: string,
+    args: Record<string, unknown>,
+    meta: { toolCallId: string; signal?: AbortSignal },
+  ): Promise<ToolResult> {
+    if (this.abortController?.signal.aborted || meta.signal?.aborted) {
+      return {
+        toolCallId: meta.toolCallId,
+        isError: true,
+        output: 'Subagent execution cancelled',
+        summary: 'Cancelled',
+      };
+    }
+
+    const normalized = normalizeToolCall(name, args);
+    const toolCall: ToolCall = {
+      id: meta.toolCallId,
+      name: normalized.name,
+      arguments: normalized.arguments,
+    };
+
+    this.toolCallCount++;
+    this.currentToolSummary = `Subagent calling ${toolCall.name}`;
+    this.emit('tool', {
+      toolName: toolCall.name,
+      summary: `Subagent called ${toolCall.name}`,
+      status: 'start',
+    });
+
+    const mergedController = new AbortController();
+    const instSignal = this.abortController?.signal;
+    const onInstAbort = () => mergedController.abort();
+    const onMetaAbort = () => mergedController.abort();
+    instSignal?.addEventListener('abort', onInstAbort, { once: true });
+    meta.signal?.addEventListener('abort', onMetaAbort, { once: true });
+
+    try {
+      const subCtx = this.pluginManager ? this.createPluginContext() : undefined;
+      return await this.executeSingleToolCall(toolCall, subCtx, {
+        recordToolMessage: false,
+        signal: mergedController.signal,
+      });
+    } finally {
+      instSignal?.removeEventListener('abort', onInstAbort);
+      meta.signal?.removeEventListener('abort', onMetaAbort);
+      this.currentToolSummary = undefined;
+    }
   }
 
   public getStatus(): SubagentStatus {
@@ -776,6 +982,9 @@ export class SubagentInstance extends EventEmitter {
         });
 
         let turnHasUsageChunk = false;
+        const seenAcpToolCallIds = new Set<string>();
+        const startedAcpToolCallIds = new Set<string>();
+        const endedAcpToolCallIds = new Set<string>();
         const result = await this.streamCompletionWithRetry(
           this.contextManager.getMessages(),
           systemPrompt,
@@ -786,6 +995,56 @@ export class SubagentInstance extends EventEmitter {
               this.emit('token', { text: chunk.content, isThinking: false });
             } else if (chunk.type === 'thinking') {
               this.emit('token', { text: chunk.thought, isThinking: true });
+            } else if (chunk.type === 'acp_tool') {
+              if (chunk.name.startsWith(HARNI_ACP_MCP_TOOL_PREFIX)) {
+                return;
+              }
+              const statusLower = chunk.status.toLowerCase();
+              const isStart =
+                statusLower === 'in_progress' ||
+                statusLower === 'pending' ||
+                statusLower === 'running';
+              const isEnd =
+                statusLower === 'completed' ||
+                statusLower === 'failed' ||
+                statusLower === 'error' ||
+                statusLower === 'cancelled' ||
+                statusLower === 'canceled';
+
+              const toolCallKey = chunk.toolCallId || chunk.title || chunk.name;
+              if (chunk.toolCallId && !seenAcpToolCallIds.has(chunk.toolCallId)) {
+                seenAcpToolCallIds.add(chunk.toolCallId);
+                this.toolCallCount++;
+              }
+
+              if (isStart) {
+                this.currentToolSummary = `Subagent calling ${chunk.title || chunk.name}`;
+                if (!startedAcpToolCallIds.has(toolCallKey)) {
+                  startedAcpToolCallIds.add(toolCallKey);
+                  this.emit('tool', {
+                    toolName: chunk.name,
+                    summary: `Subagent called ${chunk.title || chunk.name}`,
+                    status: 'start',
+                  });
+                }
+              } else if (isEnd) {
+                this.currentToolSummary = undefined;
+                if (!endedAcpToolCallIds.has(toolCallKey)) {
+                  endedAcpToolCallIds.add(toolCallKey);
+                  const isErr =
+                    statusLower === 'failed' ||
+                    statusLower === 'error' ||
+                    statusLower === 'cancelled' ||
+                    statusLower === 'canceled';
+                  this.emit('tool', {
+                    toolName: chunk.name,
+                    summary: chunk.output
+                      ? chunk.output.slice(0, 200)
+                      : `${isErr ? 'Failed' : 'Finished'} ${chunk.title || chunk.name}`,
+                    status: isErr ? 'error' : 'complete',
+                  });
+                }
+              }
             } else if (chunk.type === 'tool_call') {
               this.currentToolSummary = `Subagent calling ${chunk.name}`;
               this.emit('tool', {
@@ -869,299 +1128,7 @@ export class SubagentInstance extends EventEmitter {
         for (const toolCall of result.toolCalls) {
           if (this.abortController?.signal.aborted) break;
           this.toolCallCount++;
-
-          const execContext: ToolExecutionContext = {
-            workspaceRoot: this.workspaceRoot,
-            executeTerminalCommand: this.executeTerminalCommand,
-            sessionId: this.sessionId,
-            taskId: this.id,
-            depth: this.depth,
-            subagentManager: this.subagentManager,
-            swarmBoardService: this.swarmBoardService,
-            agentAlias: this.alias || this.id,
-            getSessionMessages: this.getSessionMessages,
-            resolveForkMessages: (source: string) =>
-              this.subagentManager?.resolveForkMessages(
-                this.sessionId,
-                source,
-                this.getSessionMessages,
-              ),
-            model: this.model,
-            parentSignal: this.abortController?.signal,
-            onFileDiff: this.onFileDiff,
-            onDiagnostics: this.onDiagnostics,
-            onTerminalData: this.onTerminalData,
-            onCodeModified: this.onCodeModified,
-            anthropicOAuth: this.anthropicOAuth,
-            openaiOAuth: this.openaiOAuth,
-            openaiAccountId: this.openaiAccountId,
-            skipInlineDiagnostics: this.pluginManager
-              ? this.pluginManager.hasPlugin('harni.syntax-diagnostics')
-              : false,
-            askQuestion: this.askUserQuestion
-              ? async (qParams) => {
-                  const prevStatus = this.status;
-                  this.setStatus('waiting_for_input');
-                  try {
-                    return await this.askUserQuestion!(
-                      this.sessionId,
-                      {
-                        ...qParams,
-                        subagentId: this.id,
-                        subagentRole: this.role,
-                      },
-                      this.abortController?.signal,
-                    );
-                  } finally {
-                    if (this.status === 'waiting_for_input') {
-                      this.setStatus(prevStatus === 'waiting_for_input' ? 'running' : prevStatus);
-                    }
-                  }
-                }
-              : undefined,
-          };
-
-          const mcpTool = this.definition.enableMcpTools
-            ? this.mcpManager?.getTool(toolCall.name)
-            : undefined;
-
-          let toolResult: ToolResult;
-
-          if (this.pluginManager && subCtx) {
-            const canonicalToolName = this.toolRegistry.resolveToolName(toolCall.name);
-            const isMcpTool = Boolean(mcpTool);
-            const mcpToolAllowedReadOnly =
-              isMcpTool && this.mcpManager
-                ? this.mcpManager.isToolAllowedForReadOnly(toolCall.name)
-                : true;
-            const requiresApproval = mcpTool
-              ? (this.mcpManager?.getToolRequiresApproval(toolCall.name) ?? false)
-              : (this.toolRegistry.getTool(toolCall.name)?.requiresApproval ?? false);
-
-            const toolCtx: ToolCallMiddlewareContext = {
-              toolCall,
-              canonicalToolName,
-              requiresApproval,
-              isMcpTool,
-              mcpToolAllowedReadOnly:
-                this.definition.enableWriteTools === false
-                  ? mcpToolAllowedReadOnly
-                  : true,
-              metadata: {},
-            };
-
-            const coreExecutor = async (): Promise<ToolResult> => {
-              if (mcpTool && this.mcpManager) {
-                return await this.mcpManager.callTool(
-                  toolCall.name,
-                  (toolCall.arguments || {}) as Record<string, unknown>,
-                );
-              } else {
-                return await this.toolRegistry.executeTool(
-                  toolCall.name,
-                  toolCall.arguments,
-                  execContext,
-                );
-              }
-            };
-
-            try {
-              toolResult = await this.pluginManager.executeToolWithMiddleware(
-                subCtx,
-                toolCtx,
-                async () => {
-                  try {
-                    return await coreExecutor();
-                  } catch (err: unknown) {
-                    const errStr = err instanceof Error ? err.message : String(err);
-                    return {
-                      toolCallId: toolCall.id,
-                      isError: true,
-                      output: `Subagent tool error (${toolCall.name}): ${errStr}`,
-                      summary: `Failed ${toolCall.name}`,
-                    };
-                  }
-                },
-              );
-            } catch (err: unknown) {
-              const errStr = err instanceof Error ? err.message : String(err);
-              toolResult = {
-                toolCallId: toolCall.id,
-                isError: true,
-                output: `Subagent tool error (${toolCall.name}): ${errStr}`,
-                summary: `Failed ${toolCall.name}`,
-              };
-            }
-            toolResult.toolCallId = toolCall.id;
-
-            this.emit('tool', {
-              toolName: toolCall.name,
-              summary:
-                toolResult.summary ||
-                (toolResult.isError
-                  ? `Error: ${toolResult.output}`
-                  : `Finished ${toolCall.name}`),
-              status: toolResult.isError ? 'error' : 'complete',
-            });
-            this.currentToolSummary = undefined;
-          } else if (
-            this.definition.enableWriteTools === false &&
-            mcpTool &&
-            this.mcpManager &&
-            !this.mcpManager.isToolAllowedForReadOnly(toolCall.name)
-          ) {
-            toolResult = {
-              toolCallId: toolCall.id,
-              isError: true,
-              output: 'Tool not permitted for read-only subagent',
-              summary: `Permission denied: ${toolCall.name}`,
-            };
-            this.emit('tool', {
-              toolName: toolCall.name,
-              summary: `Permission denied: ${toolCall.name}`,
-              status: 'error',
-            });
-          } else {
-            // A1 Check: Approval check
-            const requiresApproval = mcpTool
-              ? (this.mcpManager?.getToolRequiresApproval(toolCall.name) ?? false)
-              : (this.toolRegistry.getTool(toolCall.name)?.requiresApproval ?? false);
-
-            let isApproved = true;
-            let rejectReason: string | undefined;
-
-            if (requiresApproval) {
-              if (!this.requestToolApproval) {
-                isApproved = false;
-                rejectReason = `User rejected execution of tool '${toolCall.name}'.`;
-              } else {
-                const approvalRes = await this.requestToolApproval(
-                  this.sessionId,
-                  {
-                    id: toolCall.id,
-                    name: toolCall.name,
-                    arguments: (toolCall.arguments || {}) as Record<string, unknown>,
-                    requiresApproval: true,
-                    subagentId: this.id,
-                    subagentRole: this.role,
-                  },
-                  this.abortController?.signal,
-                );
-                if (!approvalRes.approved) {
-                  isApproved = false;
-                  rejectReason = `User rejected execution of tool '${toolCall.name}'. ${approvalRes.feedback ? 'Feedback: ' + approvalRes.feedback : ''}`.trim();
-                }
-              }
-            }
-
-            if (!isApproved) {
-              toolResult = {
-                toolCallId: toolCall.id,
-                isError: true,
-                output: rejectReason || `User rejected execution of tool '${toolCall.name}'.`,
-                summary: `Rejected ${toolCall.name}`,
-              };
-              this.emit('tool', {
-                toolName: toolCall.name,
-                summary: `Rejected ${toolCall.name}`,
-                status: 'error',
-              });
-            } else {
-              try {
-                if (mcpTool && this.mcpManager) {
-                  toolResult = await this.mcpManager.callTool(
-                    toolCall.name,
-                    (toolCall.arguments || {}) as Record<string, unknown>,
-                  );
-                } else {
-                  toolResult = await this.toolRegistry.executeTool(
-                    toolCall.name,
-                    toolCall.arguments,
-                    execContext,
-                  );
-                }
-                this.emit('tool', {
-                  toolName: toolCall.name,
-                  summary: toolResult.summary || `Finished ${toolCall.name}`,
-                  status: toolResult.isError ? 'error' : 'complete',
-                });
-              } catch (err: unknown) {
-                const errStr = err instanceof Error ? err.message : String(err);
-                toolResult = {
-                  toolCallId: toolCall.id,
-                  isError: true,
-                  output: `Subagent tool error (${toolCall.name}): ${errStr}`,
-                  summary: `Failed ${toolCall.name}`,
-                };
-                this.emit('tool', {
-                  toolName: toolCall.name,
-                  summary: `Error: ${errStr}`,
-                  status: 'error',
-                });
-              } finally {
-                this.currentToolSummary = undefined;
-              }
-            }
-
-            const MAX_SUBAGENT_TOOL_OUTPUT_CHARS = 30_000;
-            let fallbackOutputStr =
-              typeof toolResult.output === 'string'
-                ? toolResult.output
-                : JSON.stringify(toolResult.output);
-
-            if (fallbackOutputStr.length > MAX_SUBAGENT_TOOL_OUTPUT_CHARS) {
-              const truncatedSuffix =
-                `\n\n...[Subagent 工具輸出過長 (共 ${fallbackOutputStr.length.toLocaleString()} 字元)，已自動壓縮至安全長度以維護 Token 安全]...\n` +
-                fallbackOutputStr.slice(-1000);
-              fallbackOutputStr = fallbackOutputStr.slice(0, 28_000) + truncatedSuffix;
-              if (typeof toolResult.output === 'string') {
-                toolResult.output = fallbackOutputStr;
-              }
-            }
-          }
-
-          toolResult.toolCallId = toolCall.id;
-
-          // Check code modification
-          if (!toolResult.isError) {
-            const resolvedName = this.toolRegistry.resolveToolName(toolCall.name);
-            if (
-              resolvedName === 'write_file' ||
-              resolvedName === 'edit_file' ||
-              resolvedName === 'write_to_file' ||
-              resolvedName === 'replace_file_content'
-            ) {
-              const targetPath = String(
-                (toolCall.arguments as Record<string, unknown>)?.path ??
-                  (toolCall.arguments as Record<string, unknown>)?.TargetFile ??
-                  (toolCall.arguments as Record<string, unknown>)?.AbsolutePath ??
-                  '',
-              ).trim();
-              if (targetPath) {
-                this.modifiedFiles.add(targetPath);
-              }
-              if (AutoTestRunner.isCodeFile(targetPath)) {
-                this.codeModified = true;
-                this.onCodeModified?.();
-              }
-            }
-          }
-
-          const toolOutputStr =
-            typeof toolResult.output === 'string'
-              ? toolResult.output
-              : JSON.stringify(toolResult.output);
-
-          const toolMsg: ChatMessage = {
-            id: `sub_tool_${Date.now()}`,
-            role: 'tool',
-            name: toolCall.name,
-            content: toolOutputStr,
-            toolCallId: toolCall.id,
-            toolResult,
-            timestamp: Date.now(),
-          };
-          this.contextManager.addMessage(toolMsg);
+          await this.executeSingleToolCall(toolCall, subCtx, { recordToolMessage: true });
         }
       }
 
@@ -1308,6 +1275,312 @@ export class SubagentInstance extends EventEmitter {
       alias: this.alias,
       forkedFrom: this.forkedFrom,
     };
+  }
+
+  private async executeSingleToolCall(
+    toolCall: ToolCall,
+    subCtx?: WorkflowPluginContext,
+    options?: { recordToolMessage?: boolean; signal?: AbortSignal },
+  ): Promise<ToolResult> {
+    const effectiveSignal = options?.signal ?? this.abortController?.signal;
+    const execContext: ToolExecutionContext = {
+      workspaceRoot: this.workspaceRoot,
+      executeTerminalCommand: this.executeTerminalCommand,
+      sessionId: this.sessionId,
+      taskId: this.id,
+      depth: this.depth,
+      subagentManager: this.subagentManager,
+      swarmBoardService: this.swarmBoardService,
+      agentAlias: this.alias || this.id,
+      getSessionMessages: this.getSessionMessages,
+      resolveForkMessages: (source: string) =>
+        this.subagentManager?.resolveForkMessages(
+          this.sessionId,
+          source,
+          this.getSessionMessages,
+        ),
+      provider: this.provider.providerType,
+      model: this.model,
+      modelTierMap: this.modelTierMap,
+      parentSignal: effectiveSignal,
+      onFileDiff: this.onFileDiff,
+      onDiagnostics: this.onDiagnostics,
+      onTerminalData: this.onTerminalData,
+      onCodeModified: this.onCodeModified,
+      anthropicOAuth: this.anthropicOAuth,
+      openaiOAuth: this.openaiOAuth,
+      openaiAccountId: this.openaiAccountId,
+      skipInlineDiagnostics: this.pluginManager
+        ? this.pluginManager.hasPlugin('harni.syntax-diagnostics')
+        : false,
+      askQuestion: this.askUserQuestion
+        ? async (qParams) => {
+            const prevStatus = this.status;
+            this.setStatus('waiting_for_input');
+            try {
+              return await this.askUserQuestion!(
+                this.sessionId,
+                {
+                  ...qParams,
+                  subagentId: this.id,
+                  subagentRole: this.role,
+                },
+                effectiveSignal,
+              );
+            } finally {
+              if (this.status === 'waiting_for_input') {
+                this.setStatus(prevStatus === 'waiting_for_input' ? 'running' : prevStatus);
+              }
+            }
+          }
+        : undefined,
+    };
+
+    const mcpTool = this.definition.enableMcpTools
+      ? this.mcpManager?.getTool(toolCall.name)
+      : undefined;
+
+    let toolResult: ToolResult;
+
+    if (this.pluginManager && subCtx) {
+      const canonicalToolName = this.toolRegistry.resolveToolName(toolCall.name);
+      const isMcpTool = Boolean(mcpTool);
+      const mcpToolAllowedReadOnly =
+        isMcpTool && this.mcpManager
+          ? this.mcpManager.isToolAllowedForReadOnly(toolCall.name)
+          : true;
+      const requiresApproval = mcpTool
+        ? (this.mcpManager?.getToolRequiresApproval(toolCall.name) ?? false)
+        : (this.toolRegistry.getTool(toolCall.name)?.requiresApproval ?? false);
+
+      const toolCtx: ToolCallMiddlewareContext = {
+        toolCall,
+        canonicalToolName,
+        requiresApproval,
+        isMcpTool,
+        mcpToolAllowedReadOnly:
+          this.definition.enableWriteTools === false
+            ? mcpToolAllowedReadOnly
+            : true,
+        metadata: {},
+      };
+
+      const coreExecutor = async (): Promise<ToolResult> => {
+        if (mcpTool && this.mcpManager) {
+          return await this.mcpManager.callTool(
+            toolCall.name,
+            (toolCall.arguments || {}) as Record<string, unknown>,
+          );
+        } else {
+          return await this.toolRegistry.executeTool(
+            toolCall.name,
+            toolCall.arguments,
+            execContext,
+          );
+        }
+      };
+
+      try {
+        toolResult = await this.pluginManager.executeToolWithMiddleware(
+          subCtx,
+          toolCtx,
+          async () => {
+            try {
+              return await coreExecutor();
+            } catch (err: unknown) {
+              const errStr = err instanceof Error ? err.message : String(err);
+              return {
+                toolCallId: toolCall.id,
+                isError: true,
+                output: `Subagent tool error (${toolCall.name}): ${errStr}`,
+                summary: `Failed ${toolCall.name}`,
+              };
+            }
+          },
+        );
+      } catch (err: unknown) {
+        const errStr = err instanceof Error ? err.message : String(err);
+        toolResult = {
+          toolCallId: toolCall.id,
+          isError: true,
+          output: `Subagent tool error (${toolCall.name}): ${errStr}`,
+          summary: `Failed ${toolCall.name}`,
+        };
+      }
+      toolResult.toolCallId = toolCall.id;
+
+      this.emit('tool', {
+        toolName: toolCall.name,
+        summary:
+          toolResult.summary ||
+          (toolResult.isError
+            ? `Error: ${toolResult.output}`
+            : `Finished ${toolCall.name}`),
+        status: toolResult.isError ? 'error' : 'complete',
+      });
+      this.currentToolSummary = undefined;
+    } else if (
+      this.definition.enableWriteTools === false &&
+      mcpTool &&
+      this.mcpManager &&
+      !this.mcpManager.isToolAllowedForReadOnly(toolCall.name)
+    ) {
+      toolResult = {
+        toolCallId: toolCall.id,
+        isError: true,
+        output: 'Tool not permitted for read-only subagent',
+        summary: `Permission denied: ${toolCall.name}`,
+      };
+      this.emit('tool', {
+        toolName: toolCall.name,
+        summary: `Permission denied: ${toolCall.name}`,
+        status: 'error',
+      });
+    } else {
+      // A1 Check: Approval check
+      const requiresApproval = mcpTool
+        ? (this.mcpManager?.getToolRequiresApproval(toolCall.name) ?? false)
+        : (this.toolRegistry.getTool(toolCall.name)?.requiresApproval ?? false);
+
+      let isApproved = true;
+      let rejectReason: string | undefined;
+
+      if (requiresApproval) {
+        if (!this.requestToolApproval) {
+          isApproved = false;
+          rejectReason = `User rejected execution of tool '${toolCall.name}'.`;
+        } else {
+          const approvalRes = await this.requestToolApproval(
+            this.sessionId,
+            {
+              id: toolCall.id,
+              name: toolCall.name,
+              arguments: (toolCall.arguments || {}) as Record<string, unknown>,
+              requiresApproval: true,
+              subagentId: this.id,
+              subagentRole: this.role,
+            },
+            effectiveSignal,
+          );
+          if (!approvalRes.approved) {
+            isApproved = false;
+            rejectReason = `User rejected execution of tool '${toolCall.name}'. ${approvalRes.feedback ? 'Feedback: ' + approvalRes.feedback : ''}`.trim();
+          }
+        }
+      }
+
+      if (!isApproved) {
+        toolResult = {
+          toolCallId: toolCall.id,
+          isError: true,
+          output: rejectReason || `User rejected execution of tool '${toolCall.name}'.`,
+          summary: `Rejected ${toolCall.name}`,
+        };
+        this.emit('tool', {
+          toolName: toolCall.name,
+          summary: `Rejected ${toolCall.name}`,
+          status: 'error',
+        });
+      } else {
+        try {
+          if (mcpTool && this.mcpManager) {
+            toolResult = await this.mcpManager.callTool(
+              toolCall.name,
+              (toolCall.arguments || {}) as Record<string, unknown>,
+            );
+          } else {
+            toolResult = await this.toolRegistry.executeTool(
+              toolCall.name,
+              toolCall.arguments,
+              execContext,
+            );
+          }
+          this.emit('tool', {
+            toolName: toolCall.name,
+            summary: toolResult.summary || `Finished ${toolCall.name}`,
+            status: toolResult.isError ? 'error' : 'complete',
+          });
+        } catch (err: unknown) {
+          const errStr = err instanceof Error ? err.message : String(err);
+          toolResult = {
+            toolCallId: toolCall.id,
+            isError: true,
+            output: `Subagent tool error (${toolCall.name}): ${errStr}`,
+            summary: `Failed ${toolCall.name}`,
+          };
+          this.emit('tool', {
+            toolName: toolCall.name,
+            summary: `Error: ${errStr}`,
+            status: 'error',
+          });
+        } finally {
+          this.currentToolSummary = undefined;
+        }
+      }
+
+      const MAX_SUBAGENT_TOOL_OUTPUT_CHARS = 30_000;
+      let fallbackOutputStr =
+        typeof toolResult.output === 'string'
+          ? toolResult.output
+          : JSON.stringify(toolResult.output);
+
+      if (fallbackOutputStr.length > MAX_SUBAGENT_TOOL_OUTPUT_CHARS) {
+        const truncatedSuffix =
+          `\n\n...[Subagent 工具輸出過長 (共 ${fallbackOutputStr.length.toLocaleString()} 字元)，已自動壓縮至安全長度以維護 Token 安全]...\n` +
+          fallbackOutputStr.slice(-1000);
+        fallbackOutputStr = fallbackOutputStr.slice(0, 28_000) + truncatedSuffix;
+        if (typeof toolResult.output === 'string') {
+          toolResult.output = fallbackOutputStr;
+        }
+      }
+    }
+
+    toolResult.toolCallId = toolCall.id;
+
+    // Check code modification
+    if (!toolResult.isError) {
+      const resolvedName = this.toolRegistry.resolveToolName(toolCall.name);
+      if (
+        resolvedName === 'write_file' ||
+        resolvedName === 'edit_file' ||
+        resolvedName === 'write_to_file' ||
+        resolvedName === 'replace_file_content'
+      ) {
+        const targetPath = String(
+          (toolCall.arguments as Record<string, unknown>)?.path ??
+            (toolCall.arguments as Record<string, unknown>)?.TargetFile ??
+            (toolCall.arguments as Record<string, unknown>)?.AbsolutePath ??
+            '',
+        ).trim();
+        if (targetPath) {
+          this.modifiedFiles.add(targetPath);
+        }
+        if (AutoTestRunner.isCodeFile(targetPath)) {
+          this.codeModified = true;
+          this.onCodeModified?.();
+        }
+      }
+    }
+
+    if (options?.recordToolMessage !== false) {
+      const toolOutputStr =
+        typeof toolResult.output === 'string'
+          ? toolResult.output
+          : JSON.stringify(toolResult.output);
+
+      const toolMsg: ChatMessage = {
+        id: `sub_tool_${Date.now()}`,
+        role: 'tool',
+        name: toolCall.name,
+        content: toolOutputStr,
+        toolCallId: toolCall.id,
+        toolResult,
+        timestamp: Date.now(),
+      };
+      this.contextManager.addMessage(toolMsg);
+    }
+
+    return toolResult;
   }
 
   private setStatus(newStatus: SubagentStatus): void {

@@ -3,6 +3,7 @@ import { normalizeAgentMode, type AgentStatus, type ChatMessage, type ChatSessio
 import type { AgentStoreState, ChatSlice } from '../types.js';
 import {
   apiFetch,
+  cleanChangedFilePath,
   clearMessagesInDB,
   deleteSessionFromDB,
   loadSavedFolders,
@@ -151,6 +152,8 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
         enableWorktree: isGitPluginEnabled && get().worktreeIsolationEnabled,
         enableCheckpoint: isGitPluginEnabled && get().gitCheckpointEnabled,
         subagentsEnabled: get().subagentsEnabled,
+        modelTierMap: (get().subagentModelTierMaps || {})[selectedProvider] || {},
+        strictOrchestration: Boolean(get().strictOrchestration),
         antigravityMode: get().antigravityMode,
         thinkingDepth: get().thinkingDepth,
         contextWindow:
@@ -725,26 +728,44 @@ export const createChatSlice: StateCreator<AgentStoreState, [], [], ChatSlice> =
   openChangedFile: (sessionId, filePath) => {
     const { sessionChangedFiles, subagents, sessions, folders, activeFolderId, workspaceInfo, ws } = get();
     const entries = sessionChangedFiles[sessionId] || [];
-    const matched = entries.find((f) => f.path === filePath);
+    const sessionSubs = subagents[sessionId] || [];
+    const targetSession = sessions.find((s) => s.id === sessionId);
+    const targetFolder = folders.find((f) => f.id === (targetSession?.folderId || activeFolderId));
+    const baseWorkspaceRoot = targetFolder?.path || workspaceInfo?.rootPath;
+
+    const getEntryWorkspaceRoot = (entry?: (typeof entries)[number]) => {
+      const matchedSubagent = entry?.subagentId
+        ? sessionSubs.find((sub) => sub.id === entry.subagentId)
+        : undefined;
+      return matchedSubagent?.worktreePath || baseWorkspaceRoot;
+    };
+
+    const matchingEntries = entries.filter((f) => {
+      if (f.path === filePath) return true;
+      const entryRoot = getEntryWorkspaceRoot(f);
+      const cleanRequested = cleanChangedFilePath(filePath, entryRoot);
+      if (!cleanRequested) return false;
+      return cleanChangedFilePath(f.path, entryRoot) === cleanRequested;
+    });
+    const matched = matchingEntries.find((f) => Boolean(f.diff)) || matchingEntries[0];
 
     if (matched?.diff) {
       set({ activeDiff: matched.diff, isDocumentViewerOpen: true });
       return;
     }
 
-    const matchedSubagent = matched?.subagentId
-      ? (subagents[sessionId] || []).find((sub) => sub.id === matched.subagentId)
-      : undefined;
-    const targetSession = sessions.find((s) => s.id === sessionId);
-    const targetFolder = folders.find((f) => f.id === (targetSession?.folderId || activeFolderId));
-    const workspaceRoot = matchedSubagent?.worktreePath || targetFolder?.path || workspaceInfo?.rootPath;
+    const workspaceRoot = getEntryWorkspaceRoot(matched);
+    const cleanPath = cleanChangedFilePath(filePath, workspaceRoot);
+    if (!cleanPath) {
+      return;
+    }
 
     set({ activeDiff: null });
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(
         JSON.stringify({
           type: 'file:open',
-          payload: { path: filePath, workspaceRoot },
+          payload: { path: cleanPath, workspaceRoot },
         }),
       );
     }

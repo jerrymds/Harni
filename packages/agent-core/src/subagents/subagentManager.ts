@@ -8,10 +8,13 @@ import type {
   SubagentDefinition,
   SubagentInstanceInfo,
   SubagentModelTier,
+  SubagentStatus,
   ToolCallRequest,
 } from '@harni/types';
 import { DynamicSubagentHarness } from '../harness/dynamicSubagentHarness.js';
 import type { McpServerManager } from '../mcp/mcpServerManager.js';
+import { AGY_ACP_SESSION_POOL } from '../providers/agyAcpSession.js';
+import { HARNI_ACP_MCP_BRIDGE } from '../providers/harniAcpMcpBridge.js';
 import { ProviderFactory } from '../providers/providerFactory.js';
 import type { SkillRegistry } from '../skills/skillRegistry.js';
 import type { GitCheckpointService } from '../git/gitCheckpointService.js';
@@ -85,6 +88,7 @@ export interface SubagentManagerConfig {
 export class SubagentManager extends EventEmitter {
   private registry: SubagentRegistry;
   private instances = new Map<string, SubagentInstance>();
+  private externalSubagents = new Map<string, SubagentInstanceInfo>();
   private instanceParams = new Map<string, SpawnSubagentParams>();
   private executionPromises = new Map<string, Promise<SubagentExecutionResult>>();
   private resumingIds = new Set<string>();
@@ -104,6 +108,7 @@ export class SubagentManager extends EventEmitter {
   private skillRegistry?: SkillRegistry;
   private dynamicHarnessEnabled: boolean;
   private antigravityMode?: AntigravityExecutionMode;
+  private autoApprove: boolean = false;
   private pluginManager?: import('../plugins/pluginManager.js').WorkflowPluginManager;
   private getExperiencesForPrompt?: (
     query: string,
@@ -200,6 +205,10 @@ export class SubagentManager extends EventEmitter {
 
   public getAntigravityMode(): AntigravityExecutionMode | undefined {
     return this.antigravityMode;
+  }
+
+  public setAutoApprove(enabled: boolean): void {
+    this.autoApprove = enabled;
   }
 
   public setMaxConcurrent(max: number): void {
@@ -344,6 +353,94 @@ export class SubagentManager extends EventEmitter {
     return await resumePromise;
   }
 
+  public upsertExternalSubagent(info: {
+    id: string;
+    sessionId: string;
+    parentId: string;
+    typeName?: string;
+    role?: string;
+    prompt?: string;
+    model?: string;
+    status: SubagentStatus;
+    result?: string;
+    error?: string;
+    toolCallCount?: number;
+    currentToolSummary?: string;
+  }): SubagentInstanceInfo {
+    const existing = this.externalSubagents.get(info.id);
+    const now = Date.now();
+    const isTerminal =
+      info.status === 'completed' || info.status === 'error' || info.status === 'cancelled';
+
+    const next: SubagentInstanceInfo = {
+      id: info.id,
+      parentId: info.parentId,
+      sessionId: info.sessionId,
+      typeName: info.typeName || existing?.typeName || 'self',
+      role: info.role || existing?.role || 'Subagent',
+      prompt: info.prompt || existing?.prompt || '',
+      status: info.status,
+      model: info.model ?? existing?.model,
+      depth: existing?.depth ?? 1,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+      completedAt: isTerminal ? (existing?.completedAt ?? now) : undefined,
+      result: info.result ?? existing?.result,
+      error: info.error ?? existing?.error,
+      toolCallCount: info.toolCallCount ?? existing?.toolCallCount ?? 0,
+      currentToolSummary: isTerminal
+        ? undefined
+        : (info.currentToolSummary ?? existing?.currentToolSummary),
+    };
+
+    this.externalSubagents.set(info.id, next);
+
+    if (!existing) {
+      this.emit('subagent:spawned', {
+        sessionId: next.sessionId,
+        subagent: next,
+      });
+      if (isTerminal) {
+        this.emit('subagent:completed', {
+          sessionId: next.sessionId,
+          subagentId: next.id,
+          status: next.status,
+          result: next.result || next.error || 'Subagent execution finished.',
+          error: next.error,
+          durationMs: (next.completedAt ?? now) - next.createdAt,
+          role: next.role,
+        });
+      } else if (next.status !== 'pending') {
+        this.emit('subagent:status', {
+          sessionId: next.sessionId,
+          subagentId: next.id,
+          status: next.status,
+          error: next.error,
+        });
+      }
+    } else if (existing.status !== next.status) {
+      this.emit('subagent:status', {
+        sessionId: next.sessionId,
+        subagentId: next.id,
+        status: next.status,
+        error: next.error,
+      });
+      if (isTerminal) {
+        this.emit('subagent:completed', {
+          sessionId: next.sessionId,
+          subagentId: next.id,
+          status: next.status,
+          result: next.result || next.error || 'Subagent execution finished.',
+          error: next.error,
+          durationMs: (next.completedAt ?? now) - next.createdAt,
+          role: next.role,
+        });
+      }
+    }
+
+    return next;
+  }
+
   public getInstancesBySession(sessionId: string): SubagentInstanceInfo[] {
     const list: SubagentInstanceInfo[] = [];
     for (const inst of this.instances.values()) {
@@ -351,11 +448,19 @@ export class SubagentManager extends EventEmitter {
         list.push(inst.getInfo());
       }
     }
+    for (const ext of this.externalSubagents.values()) {
+      if (ext.sessionId === sessionId) {
+        list.push({ ...ext });
+      }
+    }
     return list;
   }
 
   public getAllInstances(): SubagentInstanceInfo[] {
-    return Array.from(this.instances.values()).map((inst) => inst.getInfo());
+    return [
+      ...Array.from(this.instances.values()).map((inst) => inst.getInfo()),
+      ...Array.from(this.externalSubagents.values()).map((ext) => ({ ...ext })),
+    ];
   }
 
   public defineSubagent(definition: SubagentDefinition): void {
@@ -466,14 +571,20 @@ export class SubagentManager extends EventEmitter {
         }
 
         const effectiveProvider = params.provider || this.defaultProvider;
+        const mergedTierMap =
+          params.modelTierMap !== undefined
+            ? { ...this.registry.getModelTierMap(), ...params.modelTierMap }
+            : undefined;
         const resolvedModel = this.registry.resolveModel({
           explicitModel: params.model,
           definition: effectiveDefinition,
           provider: effectiveProvider,
           parentModel: params.parentModel || this.defaultModel,
+          customTierMap: mergedTierMap,
         });
 
         const roleLabel = params.role || effectiveDefinition.role || effectiveDefinition.name;
+        let createdInstance: SubagentInstance | undefined;
 
         // Create provider for subagent
         const provider =
@@ -488,7 +599,20 @@ export class SubagentManager extends EventEmitter {
             openaiOAuth: params.openaiOAuth,
             openaiAccountId: params.openaiAccountId,
             sessionId: params.sessionId,
+            subagentId,
             antigravityMode: this.antigravityMode,
+            autoApprove: this.autoApprove,
+            executeAcpTool: async (name, args, meta) => {
+              if (!createdInstance) {
+                return {
+                  toolCallId: meta.toolCallId,
+                  isError: true,
+                  output: 'Subagent instance is not initialized yet.',
+                  summary: 'Subagent not ready',
+                };
+              }
+              return await createdInstance.executeExternalToolCall(name, args, meta);
+            },
             requestApproval: this.requestToolApproval
               ? async (req) => {
                   return await this.requestToolApproval!(
@@ -515,6 +639,7 @@ export class SubagentManager extends EventEmitter {
           role: params.role || effectiveDefinition.role || effectiveDefinition.name,
           prompt: params.prompt,
           model: resolvedModel,
+          modelTierMap: params.modelTierMap,
           workspaceRoot: workspace,
           provider,
           toolRegistry: subagentToolRegistry,
@@ -542,6 +667,7 @@ export class SubagentManager extends EventEmitter {
           swarmBoardService: params.swarmBoardService,
           getSessionMessages: params.getSessionMessages,
         });
+        createdInstance = instance;
 
         this.instances.set(subagentId, instance);
 
@@ -669,7 +795,23 @@ export class SubagentManager extends EventEmitter {
         if (inst && (!sessionId || inst.sessionId === sessionId)) {
           inst.abort('Terminated by manage_subagents request');
           this.cleanupKilledInstanceWorktree(inst);
+          void AGY_ACP_SESSION_POOL.evictBySubagentId(id);
+          HARNI_ACP_MCP_BRIDGE.unregisterBySubagentId(id);
           affected.push(inst.getInfo());
+          continue;
+        }
+        const ext = this.externalSubagents.get(id);
+        if (ext && (!sessionId || ext.sessionId === sessionId)) {
+          const updated = this.upsertExternalSubagent({
+            id: ext.id,
+            sessionId: ext.sessionId,
+            parentId: ext.parentId,
+            status: 'cancelled',
+            error: 'Terminated by manage_subagents request',
+          });
+          void AGY_ACP_SESSION_POOL.evictBySubagentId(id);
+          HARNI_ACP_MCP_BRIDGE.unregisterBySubagentId(id);
+          affected.push(updated);
         }
       }
       return affected;
@@ -681,7 +823,25 @@ export class SubagentManager extends EventEmitter {
         if (!sessionId || inst.sessionId === sessionId) {
           inst.abort('Terminated by kill_all request');
           this.cleanupKilledInstanceWorktree(inst);
+          void AGY_ACP_SESSION_POOL.evictBySubagentId(inst.id);
+          HARNI_ACP_MCP_BRIDGE.unregisterBySubagentId(inst.id);
           affected.push(inst.getInfo());
+        }
+      }
+      for (const ext of this.externalSubagents.values()) {
+        if (!sessionId || ext.sessionId === sessionId) {
+          if (ext.status !== 'completed' && ext.status !== 'error' && ext.status !== 'cancelled') {
+            const updated = this.upsertExternalSubagent({
+              id: ext.id,
+              sessionId: ext.sessionId,
+              parentId: ext.parentId,
+              status: 'cancelled',
+              error: 'Terminated by kill_all request',
+            });
+            affected.push(updated);
+          }
+          void AGY_ACP_SESSION_POOL.evictBySubagentId(ext.id);
+          HARNI_ACP_MCP_BRIDGE.unregisterBySubagentId(ext.id);
         }
       }
       return affected;
@@ -751,10 +911,19 @@ export class SubagentManager extends EventEmitter {
       if (!sessionId || inst.sessionId === sessionId) {
         inst.abort('Session cleared');
         this.cleanupKilledInstanceWorktree(inst);
+        void AGY_ACP_SESSION_POOL.evictBySubagentId(id);
+        HARNI_ACP_MCP_BRIDGE.unregisterBySubagentId(id);
         this.instances.delete(id);
         this.instanceParams.delete(id);
         this.executionPromises.delete(id);
         this.resumingIds.delete(id);
+      }
+    }
+    for (const [id, ext] of this.externalSubagents.entries()) {
+      if (!sessionId || ext.sessionId === sessionId) {
+        void AGY_ACP_SESSION_POOL.evictBySubagentId(id);
+        HARNI_ACP_MCP_BRIDGE.unregisterBySubagentId(id);
+        this.externalSubagents.delete(id);
       }
     }
   }
@@ -776,6 +945,22 @@ export class SubagentManager extends EventEmitter {
     for (const inst of this.instances.values()) {
       if (inst.sessionId === sessionId) {
         inst.abort('Session aborted');
+      }
+    }
+    for (const ext of this.externalSubagents.values()) {
+      if (
+        ext.sessionId === sessionId &&
+        ext.status !== 'completed' &&
+        ext.status !== 'error' &&
+        ext.status !== 'cancelled'
+      ) {
+        this.upsertExternalSubagent({
+          id: ext.id,
+          sessionId: ext.sessionId,
+          parentId: ext.parentId,
+          status: 'cancelled',
+          error: 'Session aborted',
+        });
       }
     }
   }
@@ -948,6 +1133,10 @@ export class SubagentManager extends EventEmitter {
       });
     } finally {
       this.releaseConcurrencySlot();
+      if (!instance.hasPendingInbox()) {
+        void AGY_ACP_SESSION_POOL.evictBySubagentId(subagentId);
+        HARNI_ACP_MCP_BRIDGE.unregisterBySubagentId(subagentId);
+      }
     }
 
     if (

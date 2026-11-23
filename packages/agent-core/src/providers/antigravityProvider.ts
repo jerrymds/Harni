@@ -1,18 +1,41 @@
+import type { spawn } from 'node:child_process';
 import {
   BaseLLMProvider,
   type ProviderCompletionResult,
   type ProviderOptions,
   type StreamChunk,
 } from './baseProvider.js';
+import {
+  AGY_ACP_SESSION_POOL,
+  type AgyAcpSessionPool,
+} from './agyAcpSession.js';
+import {
+  AGY_BUILTIN_OVERLAP_TOOLS,
+  buildAgyCompositePrompt,
+  buildAgyPromptParts,
+  buildAgySessionKey,
+} from './agyPromptBuilder.js';
+import {
+  HARNI_ACP_MCP_BRIDGE,
+  type HarniAcpMcpBridge,
+  type HarniAcpMcpBridgeHandle,
+} from './harniAcpMcpBridge.js';
+import { AgyBinaryResolver } from '../utils/agyBinaryResolver.js';
 import { normalizeToolCall } from '../tools/toolAdapter.js';
-import type { ChatMessage, LLMProviderType, ThinkingDepth, ToolDefinition } from '@harni/types';
+import type {
+  ChatMessage,
+  LLMProviderType,
+  ThinkingDepth,
+  TokenUsage,
+  ToolDefinition,
+} from '@harni/types';
 
 /**
  * 組裝 Antigravity 模型名稱與思考等級。
  *
  * 規則：
  * 1. 若 model 為空，預設回傳 'gemini-3.8-flash-medium'。
- * 2. 若包含 :acp 後綴，先分離後綴；若是 gpt-oss-120b-medium 或已包含 -(low|medium|high)，不重複加後綴，維持原名稱。
+ * 2. 若包含 :acp 後綴，先分離後綴；若是 gpt-oss-120b-medium、gemini-pro-orchestrator-* 或已包含 -(low|medium|high|xhigh)，不重複加後綴，維持原名稱。
  * 3. 思考等級映射：'low' ➜ 'low'；'high' 或 'ultra' ➜ 'high'；'medium'、'off' 或預設 ➜ 'medium'。
  * 4. 組裝成 `${base}-${targetDepth}`，並視情況補回 :acp（例如 claude-sonnet-5-5-high:acp）。
  */
@@ -25,7 +48,11 @@ export function composeAntigravityModel(model?: string, depth?: ThinkingDepth): 
   const hasAcp = trimmed.toLowerCase().endsWith(':acp');
   const base = hasAcp ? trimmed.slice(0, -4) : trimmed;
 
-  if (base.toLowerCase() === 'gpt-oss-120b-medium' || /-(low|medium|high)$/i.test(base)) {
+  if (
+    base.toLowerCase() === 'gpt-oss-120b-medium' ||
+    /^gemini-pro-orchestrator-/i.test(base) ||
+    /-(low|medium|high|xhigh)$/i.test(base)
+  ) {
     return trimmed;
   }
 
@@ -42,11 +69,22 @@ export function composeAntigravityModel(model?: string, depth?: ThinkingDepth): 
   return hasAcp ? `${composed}:acp` : composed;
 }
 
-/** 串流 idle timeout：超過此時間未收到任何資料即視為 Bridge 卡住並拋錯 (預設 90 秒) */
+/**
+ * Converts a Harni Antigravity model ID (optionally with `:acp`) into the raw `agy acp` modelId.
+ */
+export function toAgyAcpModelId(model?: string, depth?: ThinkingDepth): string {
+  return composeAntigravityModel(model, depth).replace(/:acp$/i, '');
+}
+
+/** 串流 idle timeout：超過此時間未收到任何資料即視為 ACP 逾時並拋錯 (預設 90 秒) */
 const DEFAULT_IDLE_TIMEOUT_MS = 90_000;
 
 export interface AntigravityProviderOptions extends ProviderOptions {
   authData?: Record<string, unknown>;
+  sessionPool?: AgyAcpSessionPool;
+  mcpBridge?: HarniAcpMcpBridge;
+  agyPath?: string;
+  spawnFn?: typeof spawn;
 }
 
 export class AntigravityProvider extends BaseLLMProvider {
@@ -56,16 +94,38 @@ export class AntigravityProvider extends BaseLLMProvider {
   /** 可透過環境變數 ANTIGRAVITY_IDLE_TIMEOUT_MS 覆寫的串流 idle timeout */
   private readonly idleTimeoutMs: number;
   private readonly customAuthData?: Record<string, unknown>;
+  private readonly sessionPool: AgyAcpSessionPool;
+  private readonly mcpBridge: HarniAcpMcpBridge;
+  private readonly agyPath?: string;
+  private readonly spawnFn?: typeof spawn;
 
   constructor(options: AntigravityProviderOptions = {}) {
     super(options);
     this.model = options.model || this.defaultModel;
-    this.baseURL = (options.baseURL || process.env.ANTIGRAVITY_BRIDGE_URL || 'http://127.0.0.1:8123').replace(/\/+$/, '');
+    this.baseURL = options.baseURL || 'agy://acp';
     this.customAuthData = options.authData;
-    this.requestApproval = options.requestApproval;
+    this.sessionPool = options.sessionPool ?? AGY_ACP_SESSION_POOL;
+    this.mcpBridge = options.mcpBridge ?? HARNI_ACP_MCP_BRIDGE;
+    this.agyPath = options.agyPath;
+    this.spawnFn = options.spawnFn;
     const envTimeout = Number(process.env.ANTIGRAVITY_IDLE_TIMEOUT_MS);
     this.idleTimeoutMs =
       Number.isFinite(envTimeout) && envTimeout > 0 ? envTimeout : DEFAULT_IDLE_TIMEOUT_MS;
+  }
+
+  private resolveAuthData(): Record<string, unknown> {
+    let authData: Record<string, unknown> = { ...(this.customAuthData || {}) };
+    if (this.apiKey) {
+      try {
+        const parsed = JSON.parse(this.apiKey);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          authData = { ...authData, ...(parsed as Record<string, unknown>) };
+        }
+      } catch {
+        // Plain API key string is ignored for direct agy acp OAuth
+      }
+    }
+    return authData;
   }
 
   public async streamCompletion(
@@ -75,268 +135,178 @@ export class AntigravityProvider extends BaseLLMProvider {
     onChunk: (chunk: StreamChunk) => void,
     signal?: AbortSignal,
   ): Promise<ProviderCompletionResult> {
-    const url = `${this.baseURL}/api/chat`;
+    const authData = this.resolveAuthData();
 
-    let authData: Record<string, unknown> = { ...(this.customAuthData || {}) };
-    const effectiveKey =
-      this.apiKey ||
-      process.env.GEMINI_API_KEY ||
-      process.env.GOOGLE_API_KEY ||
-      process.env.ANTIGRAVITY_API_KEY;
+    const explicitSkip =
+      authData.dangerously_skip_permissions !== undefined
+        ? Boolean(authData.dangerously_skip_permissions)
+        : undefined;
+    const explicitInteractive =
+      authData.interactive_permissions !== undefined
+        ? Boolean(authData.interactive_permissions)
+        : undefined;
 
-    if (effectiveKey) {
-      try {
-        const parsed = JSON.parse(effectiveKey);
-        if (typeof parsed === 'object' && parsed !== null) {
-          authData = { ...authData, ...parsed };
-        } else {
-          authData = { ...authData, token: effectiveKey, apiKey: effectiveKey };
-        }
-      } catch {
-        authData = { ...authData, token: effectiveKey, apiKey: effectiveKey };
-      }
+    let dangerouslySkipPermissions: boolean;
+    let interactivePermissions: boolean;
+
+    if (explicitSkip !== undefined || explicitInteractive !== undefined) {
+      dangerouslySkipPermissions = explicitSkip ?? !explicitInteractive;
+      interactivePermissions = explicitInteractive ?? !dangerouslySkipPermissions;
+    } else if (this.autoApprove === true) {
+      dangerouslySkipPermissions = true;
+      interactivePermissions = false;
+    } else if (this.autoApprove === false) {
+      dangerouslySkipPermissions = false;
+      interactivePermissions = true;
+    } else {
+      interactivePermissions = Boolean(this.requestApproval);
+      dangerouslySkipPermissions = !interactivePermissions;
     }
 
     const modelForcesAcp = (this.model || '').toLowerCase().includes(':acp');
-    const rawAuthMode = String(
-      (authData as any)?.agy_mode || (authData as any)?.mode || '',
-    ).toLowerCase();
-    const rawEnvMode = String(
-      process.env.ANTIGRAVITY_AGY_MODE ||
-        process.env.ANTIGRAVITY_EXECUTION_MODE ||
-        '',
-    ).toLowerCase();
-    const configuredMode: 'acp' | 'direct' =
-      this.antigravityMode === 'direct' || this.antigravityMode === 'acp'
-        ? this.antigravityMode
-        : rawAuthMode === 'direct' || rawAuthMode === 'acp'
-          ? (rawAuthMode as 'acp' | 'direct')
-          : rawEnvMode === 'direct'
-            ? 'direct'
-            : 'acp';
-    const isAcp = modelForcesAcp || configuredMode === 'acp';
+    const authModeDirect =
+      String(authData.agy_mode || authData.mode || '').toLowerCase() === 'direct';
+    const isDirectMode =
+      !modelForcesAcp && (this.antigravityMode === 'direct' || authModeDirect);
 
-    const defaultToolSettings = isAcp
-      ? {
-          agy_mode: 'acp',
-          disable_builtin_tools: false,
-          allow_tools: true,
-          dangerously_skip_permissions: true,
-          interactive_permissions: false,
-        }
-      : {
-          agy_mode: 'direct',
-          disable_builtin_tools: true,
-          allow_tools: false,
-        };
+    const disableBuiltinTools =
+      authData.disable_builtin_tools !== undefined
+        ? Boolean(authData.disable_builtin_tools)
+        : isDirectMode;
+    const allowTools =
+      authData.allow_tools !== undefined
+        ? Boolean(authData.allow_tools)
+        : !disableBuiltinTools;
 
-    const acpSyncRule =
-      '\n\n[ACP_SYNC_EXECUTION_RULE] When using run_command for builds/tests/checks, set WaitMsBeforeAsync to 10000 to wait synchronously whenever possible. Never finish your turn after launching a command or build check with an interim status message; inspect background task output via manage_task and complete all requested edits before ending your turn.';
-    const baseSystemPrompt = systemPrompt || '';
-    const effectiveSystemPrompt =
-      isAcp && !baseSystemPrompt.includes('[ACP_SYNC_EXECUTION_RULE]')
-        ? `${baseSystemPrompt}${acpSyncRule}`
-        : systemPrompt;
+    const toolPolicy: 'allow' | 'deny' = allowTools ? 'allow' : 'deny';
+    let bridgeTools: ToolDefinition[] = [];
+    let bridgedToolNames: string[] = [];
+    let mcpToolsSignature = '';
+    let preamble: string;
+    let turns: string[];
 
-    const payload = {
-      messages: messages.map((m) => ({
-        role: m.role,
-        content: m.content,
-        name: m.name,
-        thinking: m.thinking,
-        toolCalls: m.toolCalls,
-        toolCallId: m.toolCallId,
-        toolResult: m.toolResult,
-      })),
-      systemPrompt: effectiveSystemPrompt,
-      tools: tools.map((t) => ({
-        name: t.name,
-        description: t.description,
-        parameters: t.parameters,
-      })),
-      model: composeAntigravityModel(this.model || this.defaultModel, this.thinkingDepth),
-      thinkingDepth: this.thinkingDepth,
-      workspaceRoot: this.workspaceRoot,
-      authData: {
-        ...defaultToolSettings,
-        ...authData,
-        ...(this.sessionId ? { conversation_id: this.sessionId, sessionId: this.sessionId } : {}),
-      },
-    };
-
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
-          ...(this.sessionId ? { 'x-session-id': this.sessionId, 'x-conversation-id': this.sessionId } : {}),
-        },
-        body: JSON.stringify(payload),
-        signal,
+    if (toolPolicy === 'allow' && this.executeAcpTool) {
+      bridgeTools = tools.filter((t) => !AGY_BUILTIN_OVERLAP_TOOLS.has(t.name));
+      bridgedToolNames = bridgeTools.map((t) => t.name).sort();
+      mcpToolsSignature = bridgedToolNames.join(',');
+      const built = buildAgyPromptParts(messages, systemPrompt, tools, toolPolicy, {
+        acpMcpServerName: bridgeTools.length > 0 ? this.mcpBridge.serverName : undefined,
+        acpMcpToolNames: bridgedToolNames,
+        disableSubagents: !tools.some((t) => t.name === 'invoke_subagent'),
       });
-    } catch (fetchErr: any) {
-      throw new Error(
-        `無法連接 Antigravity Bridge 服務 (${this.baseURL})：${fetchErr.message || '連線失敗'}。` +
-          '請確認外部 Antigravity Bridge 服務是否已啟動（預設為 http://127.0.0.1:8123），或於設定中檢查 Bridge Base URL。',
-        { cause: fetchErr },
-      );
+      preamble = built.preamble;
+      turns = built.turns;
+    } else {
+      const built = buildAgyPromptParts(messages, systemPrompt, tools, toolPolicy);
+      preamble = built.preamble;
+      turns = built.turns;
     }
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Antigravity Bridge Error (${response.status}): ${errorText}`);
+    if (turns.length === 0) {
+      return { text: '' };
     }
 
-    if (!response.body) {
-      throw new Error('Antigravity Bridge response body is null');
+    const acpModelId = toAgyAcpModelId(this.model || this.defaultModel, this.thinkingDepth);
+    const agyPath = await AgyBinaryResolver.resolve(this.agyPath);
+    const sessionKey = buildAgySessionKey({
+      sessionId: this.sessionId,
+      subagentId: this.subagentId,
+      workspaceRoot: this.workspaceRoot,
+      systemPrompt: preamble,
+      messages,
+    });
+
+    let bridgeHandle: HarniAcpMcpBridgeHandle | undefined;
+    if (toolPolicy === 'allow' && this.executeAcpTool) {
+      if (bridgeTools.length > 0) {
+        const executeTool = this.executeAcpTool;
+        bridgeHandle = await this.mcpBridge.register(
+          sessionKey,
+          {
+            getTools: () => bridgeTools,
+            executeTool,
+          },
+          { sessionId: this.sessionId, subagentId: this.subagentId },
+        );
+      } else {
+        this.mcpBridge.unregister(sessionKey);
+      }
+    } else {
+      this.mcpBridge.unregister(sessionKey);
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
+    const geminiDir =
+      typeof authData.gemini_dir === 'string'
+        ? authData.gemini_dir
+        : typeof authData.geminiDir === 'string'
+          ? authData.geminiDir
+          : undefined;
+
+    const { session, isNew } = await this.sessionPool.getOrCreateSession(sessionKey, {
+      agyPath,
+      spawnFn: this.spawnFn,
+      model: acpModelId,
+      systemPrompt: preamble,
+      workspaceDir: this.workspaceRoot,
+      sessionId: this.sessionId,
+      subagentId: this.subagentId,
+      mcpServers: bridgeHandle ? [bridgeHandle.serverSpec] : [],
+      mcpToolsSignature,
+      internalMcpServerName: bridgeHandle?.serverName,
+      bridgedToolNames,
+      geminiDir,
+      dangerouslySkipPermissions,
+      interactivePermissions,
+      disableBuiltinTools,
+      turnTimeoutMs: this.idleTimeoutMs,
+    });
+
+    const lastTurn = turns[turns.length - 1]!;
+    const currentPrompt =
+      (isNew || session.turnCount === 0) && turns.length > 1
+        ? buildAgyCompositePrompt(messages, lastTurn)
+        : lastTurn;
 
     let fullText = '';
     let fullThinking = '';
+    let lastUsage: Partial<TokenUsage> | undefined;
     const toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }> = [];
-    let buffer = '';
 
-    let isStreamDone = false;
-
-    // --- Idle timeout 防護：避免 Bridge 卡住時 reader.read() 無限等待 ---
-    const readWithIdleTimeout = (): Promise<ReadableStreamReadResult<Uint8Array>> =>
-      new Promise((resolve, reject) => {
-        let settled = false;
-        const timer = setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          // 主動取消串流，避免資源洩漏
-          reader.cancel().catch(() => {});
-          reject(
-            new Error(
-              `Antigravity Bridge 串流逾時：超過 ${Math.round(this.idleTimeoutMs / 1000)} 秒未收到任何資料，` +
-                'Bridge 可能已卡住。請檢查 Bridge 服務狀態後重試。',
-            ),
-          );
-        }, this.idleTimeoutMs);
-        // 不阻止 Node.js process 正常退出
-        if (typeof (timer as NodeJS.Timeout).unref === 'function') {
-          (timer as NodeJS.Timeout).unref();
-        }
-
-        reader.read().then(
-          (result) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            resolve(result);
-          },
-          (err: unknown) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            reject(err);
-          },
-        );
-      });
-
-    while (!isStreamDone) {
-      const { done, value } = await readWithIdleTimeout();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith('data: ')) continue;
-        const dataStr = trimmed.slice(6);
-        if (!dataStr.trim()) continue;
-        if (dataStr === '[DONE]') {
-          isStreamDone = true;
-          break;
-        }
-
-        let chunk: any;
-        try {
-          chunk = JSON.parse(dataStr);
-        } catch {
-          continue;
-        }
-
-        if (chunk.type === 'done') {
-          isStreamDone = true;
-          break;
-        }
-        if (chunk.type === 'error') {
-          throw new Error(chunk.message || 'Antigravity bridge stream error');
-        }
-        if (chunk.type === 'token' && typeof chunk.content === 'string') {
-          fullText += chunk.content;
-          onChunk({ type: 'token', content: chunk.content });
-        } else if (chunk.type === 'thinking' && typeof chunk.thought === 'string') {
-          fullThinking += chunk.thought;
-          onChunk({ type: 'thinking', thought: chunk.thought });
-        } else if (chunk.type === 'tool_call' && chunk.name) {
-          const thoughtSig = chunk.thoughtSignature || chunk.thought_signature;
-          const normalized = normalizeToolCall(chunk.name, chunk.arguments || {});
-          const tcObj = {
-            id: chunk.id || `ag_call_${Date.now()}_${toolCalls.length}`,
-            name: normalized.name,
-            arguments: normalized.arguments,
-            ...(thoughtSig ? { thoughtSignature: thoughtSig } : {}),
-          };
-          toolCalls.push(tcObj);
-          onChunk({ type: 'tool_call', ...tcObj });
-        } else if (chunk.type === 'usage' && chunk.usage) {
-          onChunk({ type: 'usage', usage: chunk.usage });
-        } else if (chunk.type === 'permission_request') {
-          let approved = false;
-          let feedback: string | undefined;
-          if (this.requestApproval) {
-            try {
-              const approval = await this.requestApproval({
-                toolCallId: chunk.toolCallId || chunk.permissionId,
-                name: chunk.name || 'tool',
-                arguments: chunk.arguments || {},
-                title: chunk.title,
-              });
-              approved = approval.approved;
-              feedback = approval.feedback;
-            } catch (approvalErr) {
-              console.error('[AntigravityProvider] requestApproval threw error:', approvalErr);
-              approved = false;
-            }
-          }
-          try {
-            await fetch(`${this.baseURL}/api/permission_response`, {
-              method: 'POST',
-              headers: {
-                'content-type': 'application/json',
-                ...(this.apiKey ? { authorization: `Bearer ${this.apiKey}` } : {}),
-                ...(this.sessionId ? { 'x-session-id': this.sessionId, 'x-conversation-id': this.sessionId } : {}),
-              },
-              body: JSON.stringify({
-                permissionId: chunk.permissionId,
-                approved,
-                optionId: approved ? 'allow' : 'deny',
-                feedback,
-              }),
+    for await (const event of session.sendTurn(currentPrompt, {
+      model: acpModelId,
+      timeoutMs: this.idleTimeoutMs,
+      signal,
+      hasActiveInternalToolCalls: bridgeHandle ? () => bridgeHandle.hasActiveCalls() : undefined,
+      onPermissionRequest: this.requestApproval
+        ? async (req) => {
+            return await this.requestApproval!({
+              toolCallId: req.toolCallId,
+              name: req.name,
+              arguments: req.arguments,
+              title: req.title,
             });
-          } catch (err) {
-            console.error('Failed to send permission response to Bridge:', err);
           }
+        : undefined,
+    })) {
+      if (event.type === 'token') {
+        fullText += event.content;
+        onChunk({ type: 'token', content: event.content });
+      } else if (event.type === 'thinking') {
+        fullThinking += event.thought;
+        onChunk({ type: 'thinking', thought: event.thought });
+      } else if (event.type === 'acp_tool') {
+        onChunk(event);
+      } else if (event.type === 'usage') {
+        lastUsage = event.usage;
+        onChunk({ type: 'usage', usage: event.usage });
+      } else if (event.type === 'result') {
+        if (!fullText && event.text) {
+          fullText = event.text;
         }
-      }
-      if (isStreamDone) {
-        break;
       }
     }
 
-    // Fallback: If no structured toolCalls were yielded, but fullText contains text-formatted tool calls
-    // e.g. "Calling tool replace_file_content with arguments: {...}"
-    if (toolCalls.length === 0 && fullText.trim()) {
+    if (fullText.trim()) {
       const extracted = AntigravityProvider.extractTextToolCalls(fullText);
       for (const call of extracted) {
         toolCalls.push(call);
@@ -348,6 +318,7 @@ export class AntigravityProvider extends BaseLLMProvider {
       text: fullText,
       thinking: fullThinking || undefined,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+      ...(lastUsage ? { usage: lastUsage } : {}),
     };
   }
 

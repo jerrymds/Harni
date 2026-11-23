@@ -8,6 +8,7 @@ import {
   type LLMProviderConfig,
   type LLMProviderType,
   type SubagentInstanceInfo,
+  type SubagentModelTier,
   type WorkspaceFolder,
 } from '@harni/types';
 
@@ -486,4 +487,197 @@ export function saveSubagentsToStorage(subagents: Record<string, SubagentInstanc
       console.warn('[store] Failed to save subagents to localStorage:', err);
     }
   }, 300);
+}
+
+const ALLOWED_SUBAGENT_TIERS: ReadonlyArray<SubagentModelTier> = ['fast', 'reasoning', 'inherit'];
+
+export function sanitizeSubagentTierMap(
+  raw: unknown,
+): Partial<Record<SubagentModelTier, string>> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return {};
+  }
+  const record = raw as Record<string, unknown>;
+  const sanitized: Partial<Record<SubagentModelTier, string>> = {};
+  for (const tier of ALLOWED_SUBAGENT_TIERS) {
+    const value = record[tier];
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (trimmed.length > 0) {
+        sanitized[tier] = trimmed;
+      }
+    }
+  }
+  return sanitized;
+}
+
+export function sanitizeSubagentModelTierMaps(
+  raw: unknown,
+): Record<string, Partial<Record<SubagentModelTier, string>>> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return {};
+  }
+  const result: Record<string, Partial<Record<SubagentModelTier, string>>> = {};
+  for (const [providerId, rawMap] of Object.entries(raw as Record<string, unknown>)) {
+    const clean = sanitizeSubagentTierMap(rawMap);
+    if (Object.keys(clean).length > 0) {
+      result[providerId] = clean;
+    }
+  }
+  return result;
+}
+
+export function loadSavedSubagentModelTierMaps(): Record<
+  string,
+  Partial<Record<SubagentModelTier, string>>
+> {
+  try {
+    const raw = localStorage.getItem('harni_web_subagent_model_tier_maps');
+    if (raw) {
+      return sanitizeSubagentModelTierMaps(JSON.parse(raw));
+    }
+  } catch {}
+  return {};
+}
+
+const NO_MODIFICATION_PATTERN =
+  /^(?:無|无|none|n\/a|nil|沒有|没有|未修改|no\s+files?(?:\s+modified|\s+changed)?)(?:$|\.$|\.\s|[（(\s:：—–]|-\s|-$|修改|變更|变更|任何|檔案|文件)/i;
+
+function stripOuterFormatting(input: string): string {
+  let current = input.trim();
+  let changed = true;
+  while (changed) {
+    const prev = current;
+    current = current.trim();
+    current = current.replace(/^[-*•]\s+/, '').trim();
+    if (current.startsWith('**')) {
+      current = current.slice(2);
+    }
+    if (current.endsWith('**')) {
+      current = current.slice(0, -2);
+    }
+    current = current.replace(/^`+/, '').replace(/`+$/, '').trim();
+    if (
+      (current.startsWith('"') && current.endsWith('"') && current.length >= 2) ||
+      (current.startsWith("'") && current.endsWith("'") && current.length >= 2)
+    ) {
+      current = current.slice(1, -1);
+    }
+    current = current.trim();
+    changed = current !== prev;
+  }
+  return current;
+}
+
+function stripFileProtocol(input: string): string {
+  return input
+    .trim()
+    .replace(/^file:[\\/]+([a-zA-Z]:[\\/])/i, '$1')
+    .replace(/^file:(?:\/\/|\/)(?=\/)/i, '')
+    .replace(/^file:(?=\/)/i, '')
+    .replace(/^file:[\\]+/i, '');
+}
+
+function safeDecodeURIComponent(input: string): string {
+  try {
+    return decodeURIComponent(input);
+  } catch {
+    return input;
+  }
+}
+
+function normalizeLinkCandidate(raw: string): string {
+  let value = stripOuterFormatting(raw);
+  value = safeDecodeURIComponent(value);
+  value = stripFileProtocol(value);
+  value = value.replace(/#L\d+(?:[-–—]L?\d+)?$/i, '').replace(/#.*$/, '');
+  return stripOuterFormatting(value);
+}
+
+/**
+ * 淨化變更檔案路徑：解析 Markdown 連結、剝除 `file:` 協定與行號錨點、
+ * 移除後方附帶說明、過濾「無修改」等非路徑描述，並在提供 `workspaceRoot` 時正規化為相對路徑。
+ */
+export function cleanChangedFilePath(rawPath: string, workspaceRoot?: string): string | null {
+  if (typeof rawPath !== 'string') {
+    return null;
+  }
+
+  let candidate = stripOuterFormatting(rawPath);
+  if (!candidate || NO_MODIFICATION_PATTERN.test(candidate)) {
+    return null;
+  }
+
+  const mdLinkMatch =
+    candidate.match(/\[([^\]]+)\]\(([^()\s]*(?:\([^()]*\)[^()\s]*)*)\)/) ??
+    candidate.match(/\[([^\]]+)\]\(([^)]*)\)/);
+  if (mdLinkMatch) {
+    const label = mdLinkMatch[1] ?? '';
+    const target = mdLinkMatch[2] ?? '';
+    const cleanedTarget = normalizeLinkCandidate(target);
+    const isNonFileScheme = /^[a-zA-Z][a-zA-Z0-9+.-]{1,}:/i.test(cleanedTarget);
+    if (
+      cleanedTarget &&
+      !cleanedTarget.startsWith('#') &&
+      !isNonFileScheme &&
+      !NO_MODIFICATION_PATTERN.test(cleanedTarget)
+    ) {
+      candidate = cleanedTarget;
+    } else {
+      candidate = stripOuterFormatting(label);
+      if (/^file:/i.test(candidate)) {
+        candidate = safeDecodeURIComponent(candidate);
+      }
+    }
+  } else if (/^file:/i.test(candidate)) {
+    candidate = safeDecodeURIComponent(candidate);
+  }
+
+  candidate = candidate.replace(/[：].*$/, '');
+  candidate = candidate.replace(/\s*:\s+.*$/, '');
+  candidate = candidate.replace(/\s+[-–—]\s+.*$/, '');
+  candidate = candidate.replace(/\s+[（(][^（）()]*[）)]$/, '');
+  candidate = candidate.replace(/[（][^（）]*[）]$/, '');
+  candidate = candidate.replace(/#L\d+(?:[-–—]L?\d+)?$/i, '').replace(/#.*$/, '');
+  candidate = stripFileProtocol(candidate);
+  candidate = stripOuterFormatting(candidate);
+  candidate = candidate.replace(/^(.{2,}?):\d+(?:[:-]\d+)*$/, '$1');
+  candidate = stripOuterFormatting(candidate);
+
+  if (
+    !candidate ||
+    /[\r\n]/.test(candidate) ||
+    candidate.includes('[') ||
+    candidate.includes(']') ||
+    /^[a-zA-Z][a-zA-Z0-9+.-]{1,}:/i.test(candidate) ||
+    NO_MODIFICATION_PATTERN.test(candidate)
+  ) {
+    return null;
+  }
+
+  const normalizedPath = candidate.replace(/\\/g, '/').replace(/^(?:\.\/)+/, '');
+  if (typeof workspaceRoot === 'string' && workspaceRoot.trim().length > 0) {
+    const normRoot = workspaceRoot.trim().replace(/\\/g, '/').replace(/\/+$/, '');
+    if (normRoot.length > 0) {
+      const isWindowsDrive = /^[a-zA-Z]:(?:\/|$)/.test(normRoot);
+      const matchesExactRoot = isWindowsDrive
+        ? normalizedPath.toLowerCase() === normRoot.toLowerCase()
+        : normalizedPath === normRoot;
+      if (matchesExactRoot) {
+        return null;
+      }
+      const matchesRoot = isWindowsDrive
+        ? normalizedPath.toLowerCase().startsWith(`${normRoot.toLowerCase()}/`)
+        : normalizedPath.startsWith(`${normRoot}/`);
+      if (matchesRoot) {
+        const stripped = normalizedPath
+          .slice(normRoot.length + 1)
+          .replace(/^\/+/, '')
+          .replace(/^(?:\.\/)+/, '');
+        return stripped || null;
+      }
+    }
+  }
+
+  return normalizedPath || null;
 }

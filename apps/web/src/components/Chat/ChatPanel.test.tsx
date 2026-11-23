@@ -26,6 +26,7 @@ describe('ChatPanel Component - Image Paste and File Upload', () => {
       isRevertingCheckpoint: false,
       worktreeIsolationEnabled: false,
       subagentsEnabled: true,
+      strictOrchestration: false,
       contextWindow: 128000,
       modelContextWindows: {},
     });
@@ -139,5 +140,66 @@ describe('ChatPanel Component - Image Paste and File Upload', () => {
     expect(sendBtn).toBeInTheDocument();
     expect(Boolean(branchTrigger.compareDocumentPosition(sendBtn) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
     expect(branchTrigger).toHaveTextContent('main');
+  });
+
+  it('renders and toggles strict orchestration quick button when subagents are enabled', () => {
+    const { rerender } = render(<ChatPanel />);
+    const toggleBtn = screen.getByRole('button', { name: '彈性調度' });
+    expect(toggleBtn).toBeInTheDocument();
+
+    fireEvent.click(toggleBtn);
+    expect(useAgentStore.getState().strictOrchestration).toBe(true);
+    expect(screen.getByRole('button', { name: '🎯 強制調度' })).toBeInTheDocument();
+
+    useAgentStore.setState({ subagentsEnabled: false });
+    rerender(<ChatPanel />);
+    expect(screen.queryByRole('button', { name: '🎯 強制調度' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '彈性調度' })).not.toBeInTheDocument();
+  });
+
+  it('toggles between Send and Stop buttons based on agent busy status and calls cancelTask', () => {
+    const cancelTaskSpy = vi.fn();
+    useAgentStore.setState({
+      status: 'idle',
+      cancelTask: cancelTaskSpy,
+      currentBranch: 'main',
+      branches: [{ name: 'main', current: true }],
+    });
+
+    const { rerender } = render(<ChatPanel />);
+
+    // Idle state: Send is visible, Stop is not rendered
+    expect(screen.getByRole('button', { name: '發送' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument();
+
+    // Busy state ('thinking'): Send is hidden, Stop is rendered to the right of BranchDropdown
+    useAgentStore.setState({ status: 'thinking' });
+    rerender(<ChatPanel />);
+
+    expect(screen.queryByRole('button', { name: '發送' })).not.toBeInTheDocument();
+    const stopBtn = screen.getByRole('button', { name: '停止' });
+    const branchTrigger = screen.getByTestId('branch-dropdown-trigger');
+    expect(stopBtn).toBeInTheDocument();
+    expect(Boolean(branchTrigger.compareDocumentPosition(stopBtn) & Node.DOCUMENT_POSITION_FOLLOWING)).toBe(true);
+
+    fireEvent.click(stopBtn);
+    expect(cancelTaskSpy).toHaveBeenCalledTimes(1);
+
+    // Busy state ('streaming'): Stop remains rendered and Send remains hidden
+    useAgentStore.setState({ status: 'streaming' });
+    rerender(<ChatPanel />);
+    expect(screen.queryByRole('button', { name: '發送' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '停止' })).toBeInTheDocument();
+
+    // Completed / idle state: Stop is hidden, Send is visible again
+    useAgentStore.setState({ status: 'completed' });
+    rerender(<ChatPanel />);
+    expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '發送' })).toBeInTheDocument();
+
+    useAgentStore.setState({ status: 'idle' });
+    rerender(<ChatPanel />);
+    expect(screen.queryByRole('button', { name: '停止' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '發送' })).toBeInTheDocument();
   });
 });

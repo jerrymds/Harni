@@ -6,7 +6,10 @@ import { ContextManager } from './context/contextManager.js';
 import { SystemPromptBuilder } from './prompts/systemPrompt.js';
 import { BaseLLMProvider } from './providers/baseProvider.js';
 import { AntigravityProvider } from './providers/antigravityProvider.js';
+import { AGY_ACP_SESSION_POOL } from './providers/agyAcpSession.js';
+import { HARNI_ACP_MCP_BRIDGE } from './providers/harniAcpMcpBridge.js';
 import { ProviderFactory } from './providers/providerFactory.js';
+import { normalizeToolCall } from './tools/toolAdapter.js';
 import { ToolRegistry } from './tools/toolRegistry.js';
 import { SkillRegistry } from './skills/skillRegistry.js';
 import { McpServerManager } from './mcp/mcpServerManager.js';
@@ -36,8 +39,10 @@ import type {
   LLMProviderType,
   ServerToClientEvents,
   SubagentModelTier,
+  SubagentStatus,
   TaskState,
   TokenUsage,
+  ToolCall,
   ToolCallRequest,
   ToolResult,
   WorktreeStatusInfo,
@@ -69,6 +74,7 @@ export interface AgentEngineConfig {
   mcpEnabled?: boolean;
   mcpServers?: Record<string, McpServerConfig>;
   subagentsEnabled?: boolean;
+  strictOrchestration?: boolean;
   maxSubagentDepth?: number;
   maxSubagentConcurrent?: number;
   modelTierMap?: Partial<Record<SubagentModelTier, string>>;
@@ -117,6 +123,8 @@ interface SessionTask {
   isWorktree?: boolean;
   worktreeBranch?: string;
   subagentsEnabled: boolean;
+  strictOrchestration: boolean;
+  modelTierMap?: Partial<Record<SubagentModelTier, string>>;
   anthropicOAuth?: boolean;
   openaiOAuth?: boolean;
   openaiAccountId?: string;
@@ -200,6 +208,7 @@ export class AgentCoreEngine extends EventEmitter {
 
   public worktreeTimeoutMs: number = 180000;
   public subagentsEnabled: boolean = true;
+  public strictOrchestration: boolean = false;
   private _dynamicHarnessEnabled: boolean = true;
   public get dynamicHarnessEnabled(): boolean {
     return this._dynamicHarnessEnabled;
@@ -273,6 +282,7 @@ export class AgentCoreEngine extends EventEmitter {
     this._worktreeIsolationEnabled = config.worktreeIsolationEnabled ?? false;
     this.worktreeTimeoutMs = config.worktreeTimeoutMs ?? 180000;
     this.subagentsEnabled = config.subagentsEnabled ?? true;
+    this.strictOrchestration = config.strictOrchestration ?? false;
     this.dynamicHarnessEnabled = config.dynamicHarnessEnabled ?? true;
     this._experienceLearningEnabled = config.experienceLearningEnabled ?? false;
     this.experienceStorageDir = config.experienceStorageDir;
@@ -555,6 +565,7 @@ export class AgentCoreEngine extends EventEmitter {
         this.emitEvent('terminal:data', { data, sessionId: sessionTask.sessionId });
       },
       isSubagentsEnabled: () => sessionTask.subagentsEnabled !== false,
+      isStrictOrchestrationEnabled: () => sessionTask.strictOrchestration === true,
       isMcpToolAllowedReadOnly: (toolName: string) =>
         this.mcpManager.getTool(toolName)
           ? this.mcpManager.isToolAllowedForReadOnly(toolName)
@@ -901,6 +912,8 @@ export class AgentCoreEngine extends EventEmitter {
     this.swarmBoardService.dispose();
     await this.pluginManager.runDispose();
     await this.mcpManager.disconnectAll();
+    await AGY_ACP_SESSION_POOL.shutdown();
+    await HARNI_ACP_MCP_BRIDGE.close();
   }
 
   /**
@@ -910,6 +923,8 @@ export class AgentCoreEngine extends EventEmitter {
     void this.pluginManager.runSessionReset(sessionId);
     this.subagentManager.clearSessionSubagents(sessionId);
     if (sessionId) {
+      HARNI_ACP_MCP_BRIDGE.unregisterBySessionId(sessionId);
+      void AGY_ACP_SESSION_POOL.evictBySessionId(sessionId);
       this.cancelTask(sessionId);
       this.schedulerService.cancelSessionSchedules(sessionId, true);
       this.swarmBoardService.clearSession(sessionId);
@@ -923,6 +938,8 @@ export class AgentCoreEngine extends EventEmitter {
         this.tasksBySession.delete(sessionId);
       }
     } else {
+      void HARNI_ACP_MCP_BRIDGE.close();
+      void AGY_ACP_SESSION_POOL.shutdown();
       this.cancelTask();
       this.swarmBoardService.clearSession();
       this.subagentApprovalQueues.clear();
@@ -968,6 +985,8 @@ export class AgentCoreEngine extends EventEmitter {
       worktreeTimeoutMs?: number;
       enableCheckpoint?: boolean;
       subagentsEnabled?: boolean;
+      modelTierMap?: Partial<Record<SubagentModelTier, string>>;
+      strictOrchestration?: boolean;
       antigravityMode?: AntigravityExecutionMode;
       contextWindow?: number;
     } = {},
@@ -1001,6 +1020,7 @@ export class AgentCoreEngine extends EventEmitter {
 
     if (options.autoApprove !== undefined) {
       this.autoApprove = options.autoApprove;
+      this.subagentManager.setAutoApprove(this.autoApprove);
     }
 
     const mode = normalizeAgentMode(options.mode ?? sessionTask?.taskState.mode);
@@ -1016,6 +1036,10 @@ export class AgentCoreEngine extends EventEmitter {
       options.subagentsEnabled !== undefined
         ? options.subagentsEnabled
         : this.subagentsEnabled;
+    const effectiveStrictOrchestration =
+      options.strictOrchestration !== undefined
+        ? options.strictOrchestration
+        : this.strictOrchestration;
 
     const abortController = new AbortController();
     const taskId = sessionTask ? sessionTask.taskState.id : `task_${Date.now()}`;
@@ -1035,6 +1059,8 @@ export class AgentCoreEngine extends EventEmitter {
         isWorktree: false,
         worktreeBranch: undefined,
         subagentsEnabled: effectiveSubagents,
+        strictOrchestration: effectiveStrictOrchestration,
+        modelTierMap: options.modelTierMap,
         anthropicOAuth: options.anthropicOAuth,
         openaiOAuth: options.openaiOAuth,
         openaiAccountId: options.openaiAccountId,
@@ -1090,6 +1116,8 @@ export class AgentCoreEngine extends EventEmitter {
       sessionTask.cachedExperiences = undefined;
       sessionTask.experienceSaved = false;
       sessionTask.subagentsEnabled = effectiveSubagents;
+      sessionTask.strictOrchestration = effectiveStrictOrchestration;
+      sessionTask.modelTierMap = options.modelTierMap;
       sessionTask.anthropicOAuth = options.anthropicOAuth;
       sessionTask.openaiOAuth = options.openaiOAuth;
       sessionTask.openaiAccountId = options.openaiAccountId;
@@ -1228,11 +1256,55 @@ export class AgentCoreEngine extends EventEmitter {
         model: model || undefined,
         thinkingDepth: options.thinkingDepth,
         antigravityMode: options.antigravityMode,
+        autoApprove: this.autoApprove,
         anthropicOAuth: options.anthropicOAuth,
         openaiOAuth: options.openaiOAuth,
         openaiAccountId: options.openaiAccountId,
         workspaceRoot: sessionTask.workspaceRoot,
         sessionId: sessionTask.sessionId,
+        executeAcpTool: async (name, args, meta) => {
+          const activeTask = this.tasksBySession.get(sessionId) ?? sessionTask;
+          const activeProvider = activeTask.lastProvider ?? provider;
+          const taskSignal = activeTask.abortController?.signal;
+          const mergedController = new AbortController();
+          const onTaskAbort = () => mergedController.abort();
+          const onMetaAbort = () => mergedController.abort();
+
+          if (
+            activeTask.taskState.status === 'cancelled' ||
+            taskSignal?.aborted ||
+            meta.signal?.aborted
+          ) {
+            mergedController.abort();
+          } else {
+            taskSignal?.addEventListener('abort', onTaskAbort, { once: true });
+            meta.signal?.addEventListener('abort', onMetaAbort, { once: true });
+          }
+
+          try {
+            const normalized = normalizeToolCall(name, args);
+            const toolCall: ToolCall = {
+              id: meta.toolCallId,
+              name: normalized.name,
+              arguments: normalized.arguments,
+            };
+            const activePluginCtx = this.createPluginContext(
+              activeTask,
+              mergedController.signal,
+              activeProvider,
+            );
+            return await this.executeAcpBridgedToolCall(
+              activeTask,
+              activeProvider,
+              activePluginCtx,
+              toolCall,
+              mergedController.signal,
+            );
+          } finally {
+            taskSignal?.removeEventListener('abort', onTaskAbort);
+            meta.signal?.removeEventListener('abort', onMetaAbort);
+          }
+        },
         requestApproval: async (req) => {
           if (this.autoApprove) {
             return { approved: true };
@@ -1296,6 +1368,7 @@ export class AgentCoreEngine extends EventEmitter {
         customInstructions: this.customInstructions,
         tools: allDefinitions,
         pluginSections,
+        strictOrchestration: sessionTask.strictOrchestration && sessionTask.subagentsEnabled,
       });
 
       // 6. Call LLM with streaming
@@ -1309,6 +1382,53 @@ export class AgentCoreEngine extends EventEmitter {
             this.emitEvent('chat:token', { text: chunk.content, sessionId, taskId: sessionTask.taskState.id });
           } else if (chunk.type === 'thinking') {
             this.emitEvent('chat:thinking', { thought: chunk.thought, sessionId, taskId: sessionTask.taskState.id });
+          } else if (chunk.type === 'acp_tool' && chunk.name === 'invoke_subagent') {
+            const rawArgs = chunk.arguments || {};
+            const subList = Array.isArray(rawArgs.subagents) ? rawArgs.subagents : [rawArgs];
+            const firstSub =
+              subList[0] && typeof subList[0] === 'object' && !Array.isArray(subList[0])
+                ? (subList[0] as Record<string, unknown>)
+                : {};
+            const rawTypeName =
+              firstSub.typeName ??
+              firstSub.TypeName ??
+              firstSub.type ??
+              rawArgs.TypeName ??
+              rawArgs.typeName;
+            const rawRole = firstSub.role ?? firstSub.Role ?? rawArgs.Role ?? rawArgs.role;
+            const rawPrompt =
+              firstSub.prompt ?? firstSub.Prompt ?? rawArgs.Prompt ?? rawArgs.prompt;
+            const rawModel = firstSub.model ?? firstSub.Model ?? rawArgs.Model ?? rawArgs.model;
+
+            const statusLower = chunk.status.toLowerCase();
+            let mappedStatus: SubagentStatus = 'running';
+            if (statusLower === 'pending') {
+              mappedStatus = 'pending';
+            } else if (statusLower === 'completed') {
+              mappedStatus = 'completed';
+            } else if (statusLower === 'failed' || statusLower === 'error') {
+              mappedStatus = 'error';
+            } else if (statusLower === 'cancelled' || statusLower === 'canceled') {
+              mappedStatus = 'cancelled';
+            }
+
+            this.subagentManager.upsertExternalSubagent({
+              id: chunk.toolCallId,
+              sessionId,
+              parentId: sessionTask.taskState.id,
+              typeName: typeof rawTypeName === 'string' && rawTypeName.trim() ? rawTypeName.trim() : undefined,
+              role: typeof rawRole === 'string' && rawRole.trim() ? rawRole.trim() : undefined,
+              prompt: typeof rawPrompt === 'string' && rawPrompt.trim() ? rawPrompt.trim() : undefined,
+              model: typeof rawModel === 'string' && rawModel.trim() ? rawModel.trim() : undefined,
+              status: mappedStatus,
+              result: mappedStatus === 'completed' ? chunk.output : undefined,
+              error: mappedStatus === 'error' || mappedStatus === 'cancelled' ? chunk.output : undefined,
+              currentToolSummary:
+                mappedStatus === 'running' || mappedStatus === 'pending'
+                  ? chunk.title || 'Running native ACP subagent'
+                  : undefined,
+            });
+            this.syncTaskState(sessionTask);
           } else if (chunk.type === 'tool_call') {
             const mcpTool = this.mcpManager.getTool(chunk.name);
             const request: ToolCallRequest = {
@@ -1393,234 +1513,9 @@ export class AgentCoreEngine extends EventEmitter {
       // 9. Execute tool calls through plugin middleware pipeline
       for (const toolCall of result.toolCalls) {
         if (sessionTask.abortController?.signal.aborted) break;
-
-        const tool = this.toolRegistry.getTool(toolCall.name);
-        const mcpTool = this.mcpManager.getTool(toolCall.name);
-        const canonicalToolName = this.toolRegistry.resolveToolName(toolCall.name);
-        const requiresApproval =
-          (mcpTool?.requiresApproval ?? tool?.requiresApproval ?? false) && !this.autoApprove;
-
-        const mcpToolAllowedReadOnly = mcpTool
-          ? this.mcpManager.isToolAllowedForReadOnly(toolCall.name)
-          : true;
-
-        const toolCtx: ToolCallMiddlewareContext = {
-          toolCall,
-          canonicalToolName,
-          requiresApproval,
-          isMcpTool: Boolean(mcpTool),
-          mcpToolAllowedReadOnly,
-          metadata: {},
-        };
-
-        const execContext: ToolExecutionContext = {
-          workspaceRoot: sessionTask.workspaceRoot,
-          sessionId: sessionTask.sessionId,
-          taskId: sessionTask.taskState.id,
-          depth: 0,
-          provider: sessionTask.taskState.provider,
-          model: sessionTask.taskState.model,
-          apiKey: provider.getApiKey() || this.apiKey,
-          baseURL: provider.getBaseURL() || this.baseURL,
-          anthropicOAuth: sessionTask.anthropicOAuth,
-          openaiOAuth: sessionTask.openaiOAuth,
-          openaiAccountId: sessionTask.openaiAccountId,
-          subagentManager: this.subagentManager,
-          schedulerService: this.schedulerService,
-          swarmBoardService: this.swarmBoardService,
-          getSessionMessages: () => sessionTask.contextManager.getMessages(),
-          resolveForkMessages: (source: string) =>
-            this.subagentManager.resolveForkMessages(
-              sessionTask.sessionId,
-              source,
-              () => sessionTask.contextManager.getMessages(),
-            ),
-          parentSignal: sessionTask.abortController?.signal,
-          skipInlineDiagnostics: this.pluginManager.hasPlugin('harni.syntax-diagnostics'),
-          onCodeModified: () => {
-            sessionTask.codeModified = true;
-            sessionTask.hasModifiedCodeInTask = true;
-          },
-          onFileDiff: (diff: FileDiff) => {
-            this.emitEvent('file:diff', { ...diff, sessionId, taskId: sessionTask.taskState.id });
-          },
-          onDiagnostics: (diag) => {
-            this.emitEvent('file:diagnostics', {
-              ...diag,
-              sessionId,
-              taskId: sessionTask.taskState.id,
-            });
-          },
-          onTerminalData: (data: string) => {
-            this.emitEvent('terminal:data', { data, sessionId });
-          },
-          executeTerminalCommand: this.executeTerminalCommand,
-          askQuestion: async (params) => {
-            this.setStatus(sessionTask, 'waiting_user_input');
-            this.emitEvent('question:ask', {
-              toolCallId: toolCall.id,
-              question: params.question,
-              options: params.options,
-              isMultiSelect: params.isMultiSelect,
-              allowCustomInput: params.allowCustomInput ?? true,
-              sessionId,
-              taskId: sessionTask.taskState.id,
-            });
-
-            const answer = await new Promise<{ answers: string[]; customInput?: string }>(
-              (resolve) => {
-                sessionTask.pendingQuestion = {
-                  toolCallId: toolCall.id,
-                  resolve: (ans) => resolve(ans),
-                };
-              },
-            );
-
-            sessionTask.pendingQuestion = null;
-            this.setStatus(sessionTask, 'executing_tool');
-            return answer;
-          },
-          runContrastiveProbe: async (probeParams: ContrastiveProbeParams): Promise<ContrastiveProbeResult> => {
-            const llmCaller = async (promptText: string): Promise<string> => {
-              const comp = await provider.streamCompletion(
-                [
-                  {
-                    id: `msg_probe_${Date.now()}`,
-                    role: 'user',
-                    content: promptText,
-                    timestamp: Date.now(),
-                  },
-                ],
-                'You are an expert evaluator assessing and comparing code solution candidates.',
-                [],
-                () => {},
-                sessionTask.abortController?.signal,
-              );
-              return comp.text;
-            };
-
-            const probeResult = await ContrastiveProbeRunner.evaluateCandidates({
-              taskDescription: probeParams.taskDescription,
-              candidates: probeParams.candidates,
-              llmCaller,
-            });
-            this.emitEvent('probe:result', {
-              sessionId,
-              taskId: sessionTask.taskState.id,
-              result: probeResult,
-            });
-            return probeResult;
-          },
-        };
-
-        const coreExecutor = async (): Promise<ToolResult> => {
-          this.setStatus(sessionTask, 'executing_tool');
-          if (mcpTool) {
-            return await this.mcpManager.callTool(
-              toolCall.name,
-              toolCall.arguments as Record<string, unknown>,
-            );
-          } else {
-            return await this.toolRegistry.executeTool(
-              toolCall.name,
-              toolCall.arguments,
-              execContext,
-            );
-          }
-        };
-
-        let toolResult: ToolResult;
-        try {
-          toolResult = await this.pluginManager.executeToolWithMiddleware(
-            pluginCtx,
-            toolCtx,
-            async () => {
-              try {
-                return await coreExecutor();
-              } catch (toolErr: unknown) {
-                const errText = toolErr instanceof Error ? toolErr.message : String(toolErr);
-                return {
-                  toolCallId: toolCall.id,
-                  isError: true,
-                  output: `工具執行失敗 (${toolCall.name}): ${errText}`,
-                  summary: `Error executing ${toolCall.name}`,
-                };
-              }
-            },
-          );
-        } catch (toolErr: unknown) {
-          const errText = toolErr instanceof Error ? toolErr.message : String(toolErr);
-          toolResult = {
-            toolCallId: toolCall.id,
-            isError: true,
-            output: `工具執行失敗 (${toolCall.name}): ${errText}`,
-            summary: `Error executing ${toolCall.name}`,
-          };
-        }
-
-        toolResult.toolCallId = toolCall.id;
-
-        // Keep sessionTask tracking in sync
-        if (!toolResult.isError) {
-          const toolSummary =
-            toolResult.summary || `${toolCall.name} executed successfully`;
-          sessionTask.successfulActions.push(toolSummary);
-          if (sessionTask.successfulActions.length > 15) {
-            sessionTask.successfulActions.shift();
-          }
-
-          if (
-            canonicalToolName === 'write_file' ||
-            canonicalToolName === 'edit_file' ||
-            canonicalToolName === 'write_to_file' ||
-            canonicalToolName === 'replace_file_content'
-          ) {
-            const targetPath = String(
-              toolCall.arguments.path ??
-                toolCall.arguments.TargetFile ??
-                toolCall.arguments.AbsolutePath ??
-                '',
-            );
-            if (targetPath) {
-              sessionTask.modifiedFiles.add(targetPath);
-            }
-            if (AutoTestRunner.isCodeFile(targetPath)) {
-              sessionTask.codeModified = true;
-              sessionTask.hasModifiedCodeInTask = true;
-            }
-          }
-        } else {
-          const errSummary =
-            toolResult.summary ||
-            (typeof toolResult.output === 'string'
-              ? toolResult.output.slice(0, 200)
-              : `Error executing ${toolCall.name}`);
-          sessionTask.encounteredErrors.push(errSummary);
-          if (sessionTask.encounteredErrors.length > 5) {
-            sessionTask.encounteredErrors.shift();
-          }
-        }
-
-        // Emit tool result event
-        this.emitEvent('tool:result', { ...toolResult, sessionId, taskId: sessionTask.taskState.id });
-
-        const toolOutputStr =
-          typeof toolResult.output === 'string'
-            ? toolResult.output
-            : JSON.stringify(toolResult.output);
-
-        // Record Tool message
-        const toolMsg: ChatMessage = {
-          id: `msg_tool_${Date.now()}`,
-          role: 'tool',
-          name: toolCall.name,
-          content: toolOutputStr,
-          toolCallId: toolCall.id,
-          toolResult,
-          timestamp: Date.now(),
-        };
-        sessionTask.contextManager.addMessage(toolMsg);
-        this.syncTaskState(sessionTask);
+        await this.executeSingleToolCall(sessionTask, provider, pluginCtx, toolCall, {
+          recordToolMessage: true,
+        });
       }
     }
 
@@ -1654,6 +1549,284 @@ export class AgentCoreEngine extends EventEmitter {
     if (expPlugin) {
       await expPlugin.awaitPendingSaves(sessionId);
     }
+  }
+
+  private async executeAcpBridgedToolCall(
+    sessionTask: SessionTask,
+    provider: BaseLLMProvider,
+    pluginCtx: WorkflowPluginContext,
+    toolCall: ToolCall,
+    signal?: AbortSignal,
+  ): Promise<ToolResult> {
+    const mcpTool = this.mcpManager.getTool(toolCall.name);
+    const tool = this.toolRegistry.getTool(toolCall.name);
+    const requiresApproval =
+      (mcpTool?.requiresApproval ?? tool?.requiresApproval ?? false) && !this.autoApprove;
+    this.emitEvent('tool:request', {
+      id: toolCall.id,
+      name: toolCall.name,
+      arguments: toolCall.arguments,
+      requiresApproval,
+      sessionId: sessionTask.sessionId,
+      taskId: sessionTask.taskState.id,
+    });
+    return await this.executeSingleToolCall(sessionTask, provider, pluginCtx, toolCall, {
+      recordToolMessage: false,
+      restoreStatusAfter: 'thinking',
+      signal,
+    });
+  }
+
+  private async executeSingleToolCall(
+    sessionTask: SessionTask,
+    provider: BaseLLMProvider,
+    pluginCtx: WorkflowPluginContext,
+    toolCall: ToolCall,
+    options?: {
+      recordToolMessage?: boolean;
+      restoreStatusAfter?: AgentStatus;
+      signal?: AbortSignal;
+    },
+  ): Promise<ToolResult> {
+    const { sessionId } = sessionTask;
+    const effectiveSignal = options?.signal ?? sessionTask.abortController?.signal;
+    const tool = this.toolRegistry.getTool(toolCall.name);
+    const mcpTool = this.mcpManager.getTool(toolCall.name);
+    const canonicalToolName = this.toolRegistry.resolveToolName(toolCall.name);
+    const requiresApproval =
+      (mcpTool?.requiresApproval ?? tool?.requiresApproval ?? false) && !this.autoApprove;
+
+    const mcpToolAllowedReadOnly = mcpTool
+      ? this.mcpManager.isToolAllowedForReadOnly(toolCall.name)
+      : true;
+
+    const toolCtx: ToolCallMiddlewareContext = {
+      toolCall,
+      canonicalToolName,
+      requiresApproval,
+      isMcpTool: Boolean(mcpTool),
+      mcpToolAllowedReadOnly,
+      metadata: {},
+    };
+
+    const execContext: ToolExecutionContext = {
+      workspaceRoot: sessionTask.workspaceRoot,
+      sessionId: sessionTask.sessionId,
+      taskId: sessionTask.taskState.id,
+      depth: 0,
+      provider: sessionTask.taskState.provider,
+      model: sessionTask.taskState.model,
+      modelTierMap: sessionTask.modelTierMap,
+      apiKey: provider.getApiKey() || this.apiKey,
+      baseURL: provider.getBaseURL() || this.baseURL,
+      anthropicOAuth: sessionTask.anthropicOAuth,
+      openaiOAuth: sessionTask.openaiOAuth,
+      openaiAccountId: sessionTask.openaiAccountId,
+      subagentManager: this.subagentManager,
+      schedulerService: this.schedulerService,
+      swarmBoardService: this.swarmBoardService,
+      getSessionMessages: () => sessionTask.contextManager.getMessages(),
+      resolveForkMessages: (source: string) =>
+        this.subagentManager.resolveForkMessages(
+          sessionTask.sessionId,
+          source,
+          () => sessionTask.contextManager.getMessages(),
+        ),
+      parentSignal: effectiveSignal,
+      skipInlineDiagnostics: this.pluginManager.hasPlugin('harni.syntax-diagnostics'),
+      onCodeModified: () => {
+        sessionTask.codeModified = true;
+        sessionTask.hasModifiedCodeInTask = true;
+      },
+      onFileDiff: (diff: FileDiff) => {
+        this.emitEvent('file:diff', { ...diff, sessionId, taskId: sessionTask.taskState.id });
+      },
+      onDiagnostics: (diag) => {
+        this.emitEvent('file:diagnostics', {
+          ...diag,
+          sessionId,
+          taskId: sessionTask.taskState.id,
+        });
+      },
+      onTerminalData: (data: string) => {
+        this.emitEvent('terminal:data', { data, sessionId });
+      },
+      executeTerminalCommand: this.executeTerminalCommand,
+      askQuestion: async (params) => {
+        this.setStatus(sessionTask, 'waiting_user_input');
+        this.emitEvent('question:ask', {
+          toolCallId: toolCall.id,
+          question: params.question,
+          options: params.options,
+          isMultiSelect: params.isMultiSelect,
+          allowCustomInput: params.allowCustomInput ?? true,
+          sessionId,
+          taskId: sessionTask.taskState.id,
+        });
+
+        const answer = await new Promise<{ answers: string[]; customInput?: string }>(
+          (resolve) => {
+            sessionTask.pendingQuestion = {
+              toolCallId: toolCall.id,
+              resolve: (ans) => resolve(ans),
+            };
+          },
+        );
+
+        sessionTask.pendingQuestion = null;
+        this.setStatus(sessionTask, 'executing_tool');
+        return answer;
+      },
+      runContrastiveProbe: async (probeParams: ContrastiveProbeParams): Promise<ContrastiveProbeResult> => {
+        const llmCaller = async (promptText: string): Promise<string> => {
+          const comp = await provider.streamCompletion(
+            [
+              {
+                id: `msg_probe_${Date.now()}`,
+                role: 'user',
+                content: promptText,
+                timestamp: Date.now(),
+              },
+            ],
+            'You are an expert evaluator assessing and comparing code solution candidates.',
+            [],
+            () => {},
+            effectiveSignal,
+          );
+          return comp.text;
+        };
+
+        const probeResult = await ContrastiveProbeRunner.evaluateCandidates({
+          taskDescription: probeParams.taskDescription,
+          candidates: probeParams.candidates,
+          llmCaller,
+        });
+        this.emitEvent('probe:result', {
+          sessionId,
+          taskId: sessionTask.taskState.id,
+          result: probeResult,
+        });
+        return probeResult;
+      },
+    };
+
+    const coreExecutor = async (): Promise<ToolResult> => {
+      this.setStatus(sessionTask, 'executing_tool');
+      if (mcpTool) {
+        return await this.mcpManager.callTool(
+          toolCall.name,
+          toolCall.arguments as Record<string, unknown>,
+        );
+      } else {
+        return await this.toolRegistry.executeTool(
+          toolCall.name,
+          toolCall.arguments,
+          execContext,
+        );
+      }
+    };
+
+    let toolResult: ToolResult;
+    try {
+      toolResult = await this.pluginManager.executeToolWithMiddleware(
+        pluginCtx,
+        toolCtx,
+        async () => {
+          try {
+            return await coreExecutor();
+          } catch (toolErr: unknown) {
+            const errText = toolErr instanceof Error ? toolErr.message : String(toolErr);
+            return {
+              toolCallId: toolCall.id,
+              isError: true,
+              output: `工具執行失敗 (${toolCall.name}): ${errText}`,
+              summary: `Error executing ${toolCall.name}`,
+            };
+          }
+        },
+      );
+    } catch (toolErr: unknown) {
+      const errText = toolErr instanceof Error ? toolErr.message : String(toolErr);
+      toolResult = {
+        toolCallId: toolCall.id,
+        isError: true,
+        output: `工具執行失敗 (${toolCall.name}): ${errText}`,
+        summary: `Error executing ${toolCall.name}`,
+      };
+    }
+
+    toolResult.toolCallId = toolCall.id;
+
+    // Keep sessionTask tracking in sync
+    if (!toolResult.isError) {
+      const toolSummary =
+        toolResult.summary || `${toolCall.name} executed successfully`;
+      sessionTask.successfulActions.push(toolSummary);
+      if (sessionTask.successfulActions.length > 15) {
+        sessionTask.successfulActions.shift();
+      }
+
+      if (
+        canonicalToolName === 'write_file' ||
+        canonicalToolName === 'edit_file' ||
+        canonicalToolName === 'write_to_file' ||
+        canonicalToolName === 'replace_file_content'
+      ) {
+        const targetPath = String(
+          toolCall.arguments.path ??
+            toolCall.arguments.TargetFile ??
+            toolCall.arguments.AbsolutePath ??
+            '',
+        );
+        if (targetPath) {
+          sessionTask.modifiedFiles.add(targetPath);
+        }
+        if (AutoTestRunner.isCodeFile(targetPath)) {
+          sessionTask.codeModified = true;
+          sessionTask.hasModifiedCodeInTask = true;
+        }
+      }
+    } else {
+      const errSummary =
+        toolResult.summary ||
+        (typeof toolResult.output === 'string'
+          ? toolResult.output.slice(0, 200)
+          : `Error executing ${toolCall.name}`);
+      sessionTask.encounteredErrors.push(errSummary);
+      if (sessionTask.encounteredErrors.length > 5) {
+        sessionTask.encounteredErrors.shift();
+      }
+    }
+
+    // Emit tool result event
+    this.emitEvent('tool:result', { ...toolResult, sessionId, taskId: sessionTask.taskState.id });
+
+    if (options?.recordToolMessage !== false) {
+      const toolOutputStr =
+        typeof toolResult.output === 'string'
+          ? toolResult.output
+          : JSON.stringify(toolResult.output);
+
+      // Record Tool message
+      const toolMsg: ChatMessage = {
+        id: `msg_tool_${Date.now()}`,
+        role: 'tool',
+        name: toolCall.name,
+        content: toolOutputStr,
+        toolCallId: toolCall.id,
+        toolResult,
+        timestamp: Date.now(),
+      };
+      sessionTask.contextManager.addMessage(toolMsg);
+    }
+
+    this.syncTaskState(sessionTask);
+
+    if (options?.restoreStatusAfter && sessionTask.taskState.status === 'executing_tool') {
+      this.setStatus(sessionTask, options.restoreStatusAfter);
+    }
+
+    return toolResult;
   }
 
   /**

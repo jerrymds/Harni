@@ -7,6 +7,7 @@ export interface ToolExecutionContext {
   taskId?: string;
   provider?: import('@harni/types').LLMProviderType;
   model?: string;
+  modelTierMap?: Partial<Record<import('@harni/types').SubagentModelTier, string>>;
   apiKey?: string;
   baseURL?: string;
   subagentManager?: import('../subagents/subagentManager.js').SubagentManager;

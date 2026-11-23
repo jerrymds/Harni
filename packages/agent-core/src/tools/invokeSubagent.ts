@@ -117,6 +117,7 @@ export class InvokeSubagentTool extends BaseTool<InvokeSubagentParams> {
       depth: (context.depth ?? 0) + 1,
       model: s.model,
       parentModel: context.model,
+      modelTierMap: context.modelTierMap,
       provider: context.provider,
       apiKey: context.apiKey,
       baseURL: context.baseURL,

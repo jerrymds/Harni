@@ -197,13 +197,17 @@ export class HarnirulesParser {
       const existing = definitions.get(rule.name.toLowerCase());
       if (existing) {
         // Update existing definition with specified model, role, instructions, tools, budgets
-        if (rule.model) existing.model = rule.model;
+        if (rule.model) {
+          existing.model = rule.model;
+        } else if (rule.modelTier) {
+          existing.model = undefined;
+        }
         if (rule.modelTier) existing.modelTier = rule.modelTier;
         if (rule.role) existing.role = rule.role;
         if (rule.allowedTools && rule.allowedTools.length > 0) {
           existing.allowedTools = rule.allowedTools;
         }
-        if (rule.systemPrompt) {
+        if (rule.systemPrompt && !existing.systemPrompt.includes(rule.systemPrompt)) {
           existing.systemPrompt = `${existing.systemPrompt}\n\n[Project Custom Instructions (.harnirules)]:\n${rule.systemPrompt}`;
         }
         if (rule.maxTurns) existing.maxTurns = rule.maxTurns;

@@ -40,8 +40,25 @@ export class ToolGuardPlugin implements WorkflowPlugin {
 
   private defaultReadOnlySubagents = new Set(['researcher', 'architect']);
 
+  private strictOrchestrationBlockedTools = new Set([
+    'read_file',
+    'list_files',
+    'search_files',
+    'write_file',
+    'edit_file',
+    'run_command',
+  ]);
+
   private isAskMode(ctx: WorkflowPluginContext): boolean {
     return !ctx.isSubagent && ctx.taskState?.mode === 'ask';
+  }
+
+  private isStrictOrchestrationActive(ctx: WorkflowPluginContext): boolean {
+    return (
+      !ctx.isSubagent &&
+      ctx.isSubagentsEnabled?.() !== false &&
+      ctx.isStrictOrchestrationEnabled?.() === true
+    );
   }
 
   private isReadOnlySubagent(ctx: WorkflowPluginContext, typeName: string): boolean {
@@ -71,6 +88,12 @@ export class ToolGuardPlugin implements WorkflowPlugin {
         }
         return true;
       });
+    }
+
+    if (this.isStrictOrchestrationActive(ctx)) {
+      resolved = resolved.filter(
+        (t) => !this.strictOrchestrationBlockedTools.has(resolveCanonicalToolName(t.name)),
+      );
     }
 
     return resolved;
@@ -157,6 +180,29 @@ export class ToolGuardPlugin implements WorkflowPlugin {
         isError: true,
         output: `Subagent orchestration tool '${toolCtx.toolCall.name}' is disabled in settings. Please solve the task directly without spawning subagents.`,
         summary: `Disabled tool ${toolCtx.toolCall.name}`,
+      };
+    }
+
+    // 2.5. Strict orchestration mode guardrails (coordinator must delegate direct read/write/exec tools)
+    if (
+      this.isStrictOrchestrationActive(ctx) &&
+      this.strictOrchestrationBlockedTools.has(toolCtx.canonicalToolName)
+    ) {
+      const delegateTarget =
+        toolCtx.canonicalToolName === 'read_file' ||
+        toolCtx.canonicalToolName === 'list_files' ||
+        toolCtx.canonicalToolName === 'search_files'
+          ? 'typeName: "researcher" (read-only codebase exploration)'
+          : toolCtx.canonicalToolName === 'write_file' ||
+              toolCtx.canonicalToolName === 'edit_file'
+            ? 'typeName: "coder" (code implementation & file edits)'
+            : 'typeName: "reviewer" (running test suites & verification) or "coder" (build/fix commands)';
+
+      return {
+        toolCallId: toolCtx.toolCall.id,
+        isError: true,
+        output: `Tool '${toolCtx.toolCall.name}' is disabled for the primary coordinator in strict orchestration mode. Delegate this work via invoke_subagent using ${delegateTarget}.`,
+        summary: `Blocked in strict orchestration mode: ${toolCtx.toolCall.name}`,
       };
     }
 

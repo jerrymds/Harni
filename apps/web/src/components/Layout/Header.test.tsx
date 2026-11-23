@@ -78,6 +78,8 @@ describe('Header Component', () => {
             { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' },
             { id: 'gemini-3.8-flash-high', name: 'Gemini 3.8 Flash (High)' },
             { id: 'gemini-3.8-flash-low', name: 'Gemini 3.8 Flash (Low)' },
+            { id: 'gemini-3.8-pro-xhigh', name: 'Gemini 3.8 Pro (XHigh)' },
+            { id: 'gemini-pro-orchestrator-v1', name: 'Gemini Pro Orchestrator V1' },
             { id: 'claude-sonnet-5-5:acp', name: 'Claude 3.5 Sonnet (ACP)' },
             { id: 'gpt-oss-120b-medium:acp', name: 'GPT-OSS 120B (ACP Mode)' },
           ],
@@ -87,12 +89,14 @@ describe('Header Component', () => {
 
     render(<Header />);
 
-    // gemini-3.8-flash-high and gemini-3.8-flash-low should be filtered out
+    // gemini-3.8-flash-high, gemini-3.8-flash-low, gemini-3.8-pro-xhigh should be filtered out
     expect(screen.queryByRole('option', { name: 'Gemini 3.8 Flash (High)' })).toBeNull();
     expect(screen.queryByRole('option', { name: 'Gemini 3.8 Flash (Low)' })).toBeNull();
+    expect(screen.queryByRole('option', { name: 'Gemini 3.8 Pro (XHigh)' })).toBeNull();
 
-    // Cleaned display names
+    // Cleaned display names & preserved orchestrator
     expect(screen.getByRole('option', { name: 'Gemini 3.8 Flash' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'Gemini Pro Orchestrator V1' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'Claude 3.5 Sonnet (ACP)' })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: 'GPT-OSS 120B (ACP)' })).toBeInTheDocument();
   });

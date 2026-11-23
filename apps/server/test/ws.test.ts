@@ -5,7 +5,6 @@ import { WebSocket } from 'ws';
 import { MockProvider } from '@harni/agent-core';
 import type { ClientMessage, ServerMessage } from '@harni/types';
 import { createApp } from '../src/server.js';
-import { AntigravityBridgeManager } from '../src/services/antigravityBridgeManager.js';
 
 describe('Server WebSocket Protocol & Agent Flow', () => {
   const tempDir = path.resolve('temp_server_test_ws');
@@ -278,7 +277,6 @@ describe('Server WebSocket Protocol & Agent Flow', () => {
     const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
     await new Promise<void>((resolve) => ws.on('open', () => resolve()));
 
-    const checkHealthSpy = vi.spyOn(AntigravityBridgeManager.prototype, 'checkHealth').mockResolvedValue(true);
     const startTaskSpy = vi.spyOn(app.engine, 'startTask').mockImplementation(async () => {});
 
     try {
@@ -306,7 +304,83 @@ describe('Server WebSocket Protocol & Agent Flow', () => {
       expect(calledOptions?.model).toBe('gemini-3.8-flash-high');
       expect(calledOptions?.thinkingDepth).toBe('high');
     } finally {
-      checkHealthSpy.mockRestore();
+      startTaskSpy.mockRestore();
+      ws.close();
+    }
+  });
+
+  it('forwards sanitized modelTierMap and strictOrchestration from user:prompt and falls back to DB settings', async () => {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    await new Promise<void>((resolve) => ws.on('open', () => resolve()));
+
+    const startTaskSpy = vi.spyOn(app.engine, 'startTask').mockImplementation(async () => {});
+
+    try {
+      // 1. Explicit payload with extra invalid keys and blank values -> sanitized
+      ws.send(
+        JSON.stringify({
+          type: 'user:prompt',
+          payload: {
+            sessionId: 'sess_tier_ws_1',
+            prompt: 'test explicit tier map',
+            provider: 'openrouter',
+            model: 'anthropic/claude-3.5-sonnet',
+            strictOrchestration: true,
+            modelTierMap: {
+              fast: '  google/gemini-2.5-flash  ',
+              reasoning: '   ',
+              invalidKey: 'should-be-stripped',
+            },
+          },
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(startTaskSpy).toHaveBeenCalledTimes(1);
+      });
+
+      const firstOpts = startTaskSpy.mock.calls[0]?.[1];
+      expect(firstOpts?.strictOrchestration).toBe(true);
+      expect(firstOpts?.modelTierMap).toEqual({ fast: 'google/gemini-2.5-flash' });
+
+      // 2. Omitted payload fields -> fallback to SQLite settings
+      app.dbService.setSetting(
+        'subagent_model_tier_maps',
+        JSON.stringify({
+          openrouter: {
+            fast: 'meta-llama/llama-3.3-70b',
+            reasoning: 'openai/o3-mini',
+          },
+        }),
+      );
+      app.dbService.setSetting('strict_orchestration', 'true');
+      startTaskSpy.mockClear();
+
+      ws.send(
+        JSON.stringify({
+          type: 'user:prompt',
+          payload: {
+            sessionId: 'sess_tier_ws_2',
+            prompt: 'test db fallback',
+            provider: 'openrouter',
+            model: 'anthropic/claude-3.5-sonnet',
+          },
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(startTaskSpy).toHaveBeenCalledTimes(1);
+      });
+
+      const secondOpts = startTaskSpy.mock.calls[0]?.[1];
+      expect(secondOpts?.strictOrchestration).toBe(true);
+      expect(secondOpts?.modelTierMap).toEqual({
+        fast: 'meta-llama/llama-3.3-70b',
+        reasoning: 'openai/o3-mini',
+      });
+    } finally {
+      app.dbService.setSetting('subagent_model_tier_maps', '{}');
+      app.dbService.setSetting('strict_orchestration', 'false');
       startTaskSpy.mockRestore();
       ws.close();
     }

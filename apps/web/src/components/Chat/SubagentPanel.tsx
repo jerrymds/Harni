@@ -16,7 +16,8 @@ import {
   HelpCircle,
 } from 'lucide-react';
 import type { SubagentInstanceInfo, SubagentStatus } from '@harni/types';
-import { useAgentStore } from '../../store/useAgentStore.js';
+import { useAgentStore, useShallow } from '../../store/useAgentStore.js';
+import { cleanChangedFilePath } from '../../store/utils.js';
 
 const getRoleIcon = (typeName: string) => {
   switch (typeName.toLowerCase()) {
@@ -87,9 +88,24 @@ const getStatusBadge = (status: SubagentStatus) => {
 };
 
 export const SubagentPanel: React.FC = () => {
-  const currentSessionId = useAgentStore((s) => s.currentSessionId);
-  const subagentsMap = useAgentStore((s) => s.subagents);
-  const killSubagent = useAgentStore((s) => s.killSubagent);
+  const { currentSessionId, subagentsMap, killSubagent, sessions, folders, activeFolderId, workspaceInfo } =
+    useAgentStore(
+      useShallow((s) => ({
+        currentSessionId: s.currentSessionId,
+        subagentsMap: s.subagents,
+        killSubagent: s.killSubagent,
+        sessions: s.sessions,
+        folders: s.folders,
+        activeFolderId: s.activeFolderId,
+        workspaceInfo: s.workspaceInfo,
+      })),
+    );
+
+  const currentSession = (sessions || []).find((s) => s.id === currentSessionId);
+  const currentFolder = (folders || []).find(
+    (f) => f.id === (currentSession?.folderId || activeFolderId),
+  );
+  const baseWorkspaceRoot = currentFolder?.path || workspaceInfo?.rootPath;
 
   const subagents: SubagentInstanceInfo[] = subagentsMap[currentSessionId] || [];
   const [isPanelOpen, setIsPanelOpen] = useState(true);
@@ -143,6 +159,22 @@ export const SubagentPanel: React.FC = () => {
             const isExpanded =
               expandedSubagents[sub.id] ??
               (sub.status === 'running' || sub.status === 'waiting_for_input');
+            const subWorkspaceRoot = sub.worktreePath || baseWorkspaceRoot;
+            const cleanedModifiedFiles = Array.from(
+              new Set(
+                (sub.structuredReport?.modifiedFiles || [])
+                  .map((file) => cleanChangedFilePath(file, subWorkspaceRoot))
+                  .filter((file): file is string => file !== null),
+              ),
+            );
+            const hasVisibleStructuredReport = Boolean(
+              sub.structuredReport &&
+                (cleanedModifiedFiles.length > 0 ||
+                  sub.structuredReport.verification ||
+                  (sub.structuredReport.findings && sub.structuredReport.findings.length > 0) ||
+                  (sub.structuredReport.openQuestions &&
+                    sub.structuredReport.openQuestions.length > 0)),
+            );
 
             return (
               <div
@@ -263,19 +295,19 @@ export const SubagentPanel: React.FC = () => {
                     )}
 
                     {/* Structured Report Chips & Details */}
-                    {sub.structuredReport && (
+                    {hasVisibleStructuredReport && sub.structuredReport && (
                       <div className="space-y-2 p-2.5 rounded bg-zinc-950/50 border border-zinc-800">
                         {/* Modified Files Chips */}
-                        {sub.structuredReport.modifiedFiles && sub.structuredReport.modifiedFiles.length > 0 && (
+                        {cleanedModifiedFiles.length > 0 && (
                           <div>
                             <div className="text-zinc-400 font-medium mb-1 flex items-center gap-1">
                               <FileText className="w-3.5 h-3.5 text-emerald-400" />
-                              <span>修改檔案 ({sub.structuredReport.modifiedFiles.length}):</span>
+                              <span>修改檔案 ({cleanedModifiedFiles.length}):</span>
                             </div>
                             <div className="flex flex-wrap gap-1.5">
-                              {sub.structuredReport.modifiedFiles.map((file, idx) => (
+                              {cleanedModifiedFiles.map((file) => (
                                 <span
-                                  key={idx}
+                                  key={file}
                                   className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 font-mono"
                                 >
                                   <Code2 className="w-3 h-3" />

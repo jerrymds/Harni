@@ -44,6 +44,19 @@ import { getProviderConfig, resolveAllProviders } from './Models/providerRegistr
 
 type SettingsTab = 'models' | 'tools' | 'skills' | 'mcp' | 'appearance';
 
+function getDefaultTierPlaceholder(provider: string, tier: 'fast' | 'reasoning'): string {
+  if (provider === 'antigravity') {
+    return tier === 'fast' ? '預設: gemini-3.8-flash' : '預設: gemini-3.8-pro';
+  }
+  if (provider === 'anthropic') {
+    return tier === 'fast' ? '預設: claude-3-5-haiku-latest' : '預設: claude-3-7-sonnet-latest';
+  }
+  if (provider === 'openai') {
+    return tier === 'fast' ? '預設: gpt-4o-mini' : '預設: o3-mini';
+  }
+  return '預設: 沿用主模型 (可自訂任何 Model ID)';
+}
+
 export const SettingsModal: React.FC = () => {
   const {
     isSettingsOpen,
@@ -76,6 +89,10 @@ export const SettingsModal: React.FC = () => {
     setAutoTestCommand,
     subagentsEnabled,
     setSubagentsEnabled,
+    subagentModelTierMaps,
+    setSubagentModelTierMap,
+    strictOrchestration,
+    setStrictOrchestration,
     theme,
     setTheme,
     fontSize,
@@ -115,8 +132,6 @@ export const SettingsModal: React.FC = () => {
     rollbackCheckpoint,
     isRevertingCheckpoint,
     currentSessionId,
-    antigravityMode,
-    setAntigravityMode,
     workflowPlugins,
     isLoadingPlugins,
     fetchWorkflowPlugins,
@@ -157,12 +172,14 @@ export const SettingsModal: React.FC = () => {
       setWorktreeIsolationEnabled: s.setWorktreeIsolationEnabled,
       subagentsEnabled: s.subagentsEnabled,
       setSubagentsEnabled: s.setSubagentsEnabled,
+      subagentModelTierMaps: s.subagentModelTierMaps,
+      setSubagentModelTierMap: s.setSubagentModelTierMap,
+      strictOrchestration: s.strictOrchestration,
+      setStrictOrchestration: s.setStrictOrchestration,
       checkpoints: s.checkpoints,
       rollbackCheckpoint: s.rollbackCheckpoint,
       isRevertingCheckpoint: s.isRevertingCheckpoint,
       currentSessionId: s.currentSessionId,
-      antigravityMode: s.antigravityMode,
-      setAntigravityMode: s.setAntigravityMode,
       theme: s.theme,
       setTheme: s.setTheme,
       fontSize: s.fontSize,
@@ -232,6 +249,13 @@ export const SettingsModal: React.FC = () => {
   const [gitCheckpointEnabledInput, setGitCheckpointEnabledInput] = useState(gitCheckpointEnabled);
   const [worktreeIsolationEnabledInput, setWorktreeIsolationEnabledInput] = useState(worktreeIsolationEnabled);
   const [subagentsEnabledInput, setSubagentsEnabledInput] = useState(subagentsEnabled);
+  const [strictOrchestrationInput, setStrictOrchestrationInput] = useState(Boolean(strictOrchestration));
+  const [tierFastInput, setTierFastInput] = useState(
+    (subagentModelTierMaps || {})[selectedProvider]?.fast || '',
+  );
+  const [tierReasoningInput, setTierReasoningInput] = useState(
+    (subagentModelTierMaps || {})[selectedProvider]?.reasoning || '',
+  );
   const [themeInput, setThemeInput] = useState(theme);
   const [fontSizeInput, setFontSizeInput] = useState(fontSize);
   const [codeFontInput, setCodeFontInput] = useState(codeFont);
@@ -270,6 +294,10 @@ export const SettingsModal: React.FC = () => {
       setGitCheckpointEnabledInput(gitCheckpointEnabled);
       setWorktreeIsolationEnabledInput(worktreeIsolationEnabled);
       setSubagentsEnabledInput(subagentsEnabled);
+      setStrictOrchestrationInput(Boolean(strictOrchestration));
+      const activeTierMap = (subagentModelTierMaps || {})[selectedProvider] || {};
+      setTierFastInput(activeTierMap.fast || '');
+      setTierReasoningInput(activeTierMap.reasoning || '');
       setThemeInput(theme);
       setFontSizeInput(fontSize);
       setCodeFontInput(codeFont);
@@ -371,6 +399,9 @@ export const SettingsModal: React.FC = () => {
     setCustomModelInput(nextModel);
     const existingCtx = nextModel ? latestState.modelContextWindows[nextModel] : undefined;
     setContextInput(existingCtx ? String(existingCtx) : '');
+    const nextTierMap = (latestState.subagentModelTierMaps || {})[newProvider] || {};
+    setTierFastInput(nextTierMap.fast || '');
+    setTierReasoningInput(nextTierMap.reasoning || '');
 
     if (newProvider === 'anthropic') {
       fetchAnthropicAuthStatus();
@@ -462,6 +493,11 @@ export const SettingsModal: React.FC = () => {
     setGitCheckpointEnabled(gitCheckpointEnabledInput);
     setWorktreeIsolationEnabled(worktreeIsolationEnabledInput);
     setSubagentsEnabled(subagentsEnabledInput);
+    setStrictOrchestration?.(strictOrchestrationInput);
+    setSubagentModelTierMap?.(selectedProvider, {
+      ...(tierFastInput.trim() ? { fast: tierFastInput.trim() } : {}),
+      ...(tierReasoningInput.trim() ? { reasoning: tierReasoningInput.trim() } : {}),
+    });
     setTheme(themeInput);
     setFontSize(fontSizeInput);
     setCodeFont(codeFontInput);
@@ -679,7 +715,7 @@ tools: run_command, read_file, edit_file
                                 ? 'Ollama 協定'
                                 : activeProviderConfig.protocol === 'cline'
                                   ? 'Cline Pass API'
-                                  : 'Antigravity Bridge'}
+                                  : 'Antigravity ACP 直連'}
                         </span>
                         {isProviderConfigured(selectedProvider) && (
                           <span className="inline-flex items-center space-x-1 rounded-full bg-emerald-50 border border-emerald-200 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
@@ -736,78 +772,66 @@ tools: run_command, read_file, edit_file
                   </div>
                 )}
 
-                {/* 2. Provider Config: Antigravity Bridge URL, or OAuth + Base URL & API Key */}
+                {/* 2. Provider Config: Antigravity ACP Direct, or OAuth + Base URL & API Key */}
                 {selectedProvider === 'antigravity' ? (
                   <div className="space-y-4">
-                    <div className="rounded-2xl border border-ag-border bg-ag-panel p-4 space-y-2 shadow-soft">
-                      <div className="flex items-center space-x-2">
-                        <Globe className="h-4 w-4 text-ag-blue" />
-                        <span className="text-xs font-semibold text-slate-800">外部 Antigravity Bridge URL (選填)</span>
+                    <div className="rounded-2xl border border-blue-200 bg-gradient-to-r from-blue-50/80 via-indigo-50/50 to-slate-50/60 p-4 space-y-3 shadow-soft">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="flex items-start space-x-3">
+                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-white border border-blue-200 shadow-soft text-lg">
+                            <Terminal className="h-5 w-5 text-ag-blue" />
+                          </div>
+                          <div className="space-y-1">
+                            <div className="flex items-center flex-wrap gap-2">
+                              <span className="text-xs font-semibold text-slate-900">
+                                Antigravity ACP 本機直連 (Zed Client 模式)
+                              </span>
+                              <span className="rounded-full bg-blue-100 text-blue-800 border border-blue-200 px-2 py-0.5 text-[10px] font-medium">
+                                agy acp stdio
+                              </span>
+                            </div>
+                            <p className="text-[11px] text-slate-600 leading-relaxed">
+                              直接透過本機 <code className="rounded bg-white/80 px-1 py-0.5 font-mono text-[10px] border border-slate-200">agy acp</code> 標準輸入輸出（模擬 Zed Client）進行雙向通訊，無需啟動外部 Python Bridge。
+                            </p>
+                          </div>
+                        </div>
                       </div>
-                      <p className="text-[11px] text-slate-500 leading-relaxed">
-                        若要使用自建的 Antigravity Bridge 服務，請在此填入其 URL。
-                      </p>
-                      <input
-                        type="text"
-                        value={baseUrlInput}
-                        onChange={(e) => setBaseUrlInput(e.target.value)}
-                        placeholder="例如: http://localhost:8000"
-                        className="w-full rounded-xl border border-ag-border bg-white px-3.5 py-2 font-mono text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-ag-blue shadow-soft"
-                      />
-                    </div>
 
-                    {/* Antigravity 執行模式 (Execution Mode) */}
-                    <div className="rounded-2xl border border-ag-border bg-ag-panel p-4 space-y-3 shadow-soft">
-                      <div className="flex items-center space-x-2">
-                        <Cpu className="h-4 w-4 text-ag-blue" />
-                        <span className="text-xs font-semibold text-slate-800">Antigravity 執行模式 (Execution Mode)</span>
-                      </div>
-                      <p className="text-[11px] text-slate-500 leading-relaxed">
-                        選擇 Bridge 與 Antigravity CLI 溝通的底層執行機制。
-                      </p>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
-                        <button
-                          type="button"
-                          onClick={() => setAntigravityMode('acp')}
-                          className={`flex flex-col text-left p-3 rounded-xl border transition-all ${
-                            antigravityMode === 'acp'
-                              ? 'border-ag-blue bg-blue-50/50 shadow-sm'
-                              : 'border-ag-border bg-white hover:border-slate-300'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between w-full mb-1">
-                            <span className="font-semibold text-xs text-slate-800">ACP 模式 (agy acp)</span>
-                            {antigravityMode === 'acp' && (
-                              <span className="rounded-full bg-ag-blue text-white text-[10px] px-2 py-0.5 font-medium">
-                                預設推薦
-                              </span>
-                            )}
-                          </div>
-                          <span className="text-[11px] text-slate-500 leading-snug">
-                            啟用原生 ACP 工具與雙向通訊協定，支援即時工具執行與完整互動性。
+                      <div className="rounded-xl border border-slate-200/80 bg-white/80 p-3 space-y-2 text-[11px] text-slate-600">
+                        <div className="flex items-start space-x-2">
+                          <Key className="h-3.5 w-3.5 text-ag-blue shrink-0 mt-0.5" />
+                          <span>
+                            直接使用 <code className="font-mono text-[10px] bg-slate-100 px-1 py-0.5 rounded">agy</code> CLI 內建的 Google OAuth 登入工作階段（無需另外於 Harni 登入帳號或填寫 API Key；若本機尚未登入，請於終端機執行{' '}
+                            <code className="font-mono text-[10px] bg-slate-100 px-1 py-0.5 rounded text-slate-800">agy acp --login</code>）。
                           </span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setAntigravityMode('direct')}
-                          className={`flex flex-col text-left p-3 rounded-xl border transition-all ${
-                            antigravityMode === 'direct'
-                              ? 'border-ag-blue bg-blue-50/50 shadow-sm'
-                              : 'border-ag-border bg-white hover:border-slate-300'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between w-full mb-1">
-                            <span className="font-semibold text-xs text-slate-800">Direct 模式 (agy -p)</span>
-                            {antigravityMode === 'direct' && (
-                              <span className="rounded-full bg-slate-700 text-white text-[10px] px-2 py-0.5 font-medium">
-                                已選取
+                        </div>
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1 border-t border-slate-100">
+                          <div className="flex items-center space-x-2">
+                            <ShieldCheck className={`h-3.5 w-3.5 shrink-0 ${autoApproveInput ? 'text-emerald-600' : 'text-amber-600'}`} />
+                            <span>
+                              工具執行權限動態跟隨 Harni 的<strong>全自動審批 (Auto-Approve)</strong>設定：
+                              <span className={`ml-1 font-semibold ${autoApproveInput ? 'text-emerald-700' : 'text-amber-700'}`}>
+                                {autoApproveInput ? '已開啟（自動核准）' : '已關閉（每次執行需手動確認）'}
                               </span>
-                            )}
+                            </span>
                           </div>
-                          <span className="text-[11px] text-slate-500 leading-snug">
-                            單次提示詞串流模式（注意：尾綴帶 :acp 的模型仍會自動使用 ACP 模式）。
-                          </span>
-                        </button>
+                          <div className="flex items-center space-x-2 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => setAutoApproveInput(!autoApproveInput)}
+                              className="rounded-lg border border-ag-border bg-white px-2.5 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+                            >
+                              {autoApproveInput ? '關閉全自動審批' : '開啟全自動審批'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setActiveTab('tools')}
+                              className="rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-100 cursor-pointer"
+                            >
+                              前往工具設定
+                            </button>
+                          </div>
+                        </div>
                       </div>
                     </div>
 
@@ -1287,6 +1311,7 @@ tools: run_command, read_file, edit_file
 
                   <button
                     type="button"
+                    aria-label="切換 多子代理人協同"
                     onClick={() => setSubagentsEnabledInput(!subagentsEnabledInput)}
                     className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
                       subagentsEnabledInput ? 'bg-purple-600 shadow-glow-primary' : 'bg-ag-borderHover'
@@ -1299,6 +1324,134 @@ tools: run_command, read_file, edit_file
                     />
                   </button>
                 </div>
+
+                {subagentsEnabledInput && (
+                  <div className="pt-3 border-t border-purple-400/25 space-y-3.5">
+                    {/* Strict Orchestration Toggle */}
+                    <div className="flex items-center justify-between gap-3 rounded-xl border border-purple-400/25 bg-ag-panel/70 p-3">
+                      <div className="space-y-0.5 max-w-[82%]">
+                        <div className="flex items-center space-x-2 text-xs font-semibold text-ag-textPrimary">
+                          <span>強制調度模式 (Strict Orchestration)</span>
+                          {strictOrchestrationInput && (
+                            <span className="rounded-full bg-amber-500/15 border border-amber-500/30 px-2 py-0.5 font-mono text-[9.5px] text-amber-700 dark:text-amber-300 font-semibold">
+                              強制分派
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[11px] text-ag-textSecondary leading-relaxed">
+                          開啟後，主代理人將停用直接讀寫與終端執行工具，強制由主代理人協調規劃並拆派給 Researcher、Coder、Reviewer 等子代理人執行（子代理人本身不受限制）。
+                        </p>
+                      </div>
+
+                      <button
+                        type="button"
+                        aria-label="切換 強制調度模式"
+                        onClick={() => setStrictOrchestrationInput(!strictOrchestrationInput)}
+                        className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                          strictOrchestrationInput ? 'bg-amber-500 shadow-soft' : 'bg-ag-borderHover'
+                        }`}
+                      >
+                        <span
+                          className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
+                            strictOrchestrationInput ? 'translate-x-4' : 'translate-x-0'
+                          }`}
+                        />
+                      </button>
+                    </div>
+
+                    {/* Per-Provider Model Tier Map */}
+                    <div className="rounded-xl border border-purple-400/25 bg-ag-panel/70 p-3 space-y-2.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center space-x-1.5 text-xs font-semibold text-ag-textPrimary">
+                          <Cpu className="h-3.5 w-3.5 text-purple-500" />
+                          <span>子代理人模型分層設定 ({activeProviderConfig.name})</span>
+                        </div>
+                        <span className="font-mono text-[10px] text-ag-textMuted">
+                          支援任意 Provider · coder / self 預設沿用主模型
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        {/* Fast Tier */}
+                        <div className="space-y-1">
+                          <label
+                            htmlFor="subagent-tier-fast-input"
+                            className="flex items-center justify-between text-[11px] font-medium text-ag-textPrimary"
+                          >
+                            <span>快速探索層 (fast · researcher)</span>
+                            {tierFastInput && (
+                              <button
+                                type="button"
+                                onClick={() => setTierFastInput('')}
+                                className="text-[10px] text-ag-textMuted hover:text-rose-500 cursor-pointer"
+                              >
+                                清除
+                              </button>
+                            )}
+                          </label>
+                          <input
+                            id="subagent-tier-fast-input"
+                            aria-label="快速層模型 (fast)"
+                            type="text"
+                            list="subagent-tier-fast-models"
+                            value={tierFastInput}
+                            onChange={(e) => setTierFastInput(e.target.value)}
+                            placeholder={getDefaultTierPlaceholder(selectedProvider, 'fast')}
+                            className="w-full rounded-xl border border-ag-border bg-ag-panel px-3 py-1.5 font-mono text-xs text-ag-textPrimary placeholder-ag-textMuted outline-none focus:border-purple-500 shadow-xs"
+                          />
+                        </div>
+
+                        {/* Reasoning Tier */}
+                        <div className="space-y-1">
+                          <label
+                            htmlFor="subagent-tier-reasoning-input"
+                            className="flex items-center justify-between text-[11px] font-medium text-ag-textPrimary"
+                          >
+                            <span>深度推理層 (reasoning · reviewer / architect)</span>
+                            {tierReasoningInput && (
+                              <button
+                                type="button"
+                                onClick={() => setTierReasoningInput('')}
+                                className="text-[10px] text-ag-textMuted hover:text-rose-500 cursor-pointer"
+                              >
+                                清除
+                              </button>
+                            )}
+                          </label>
+                          <input
+                            id="subagent-tier-reasoning-input"
+                            aria-label="推理層模型 (reasoning)"
+                            type="text"
+                            list="subagent-tier-reasoning-models"
+                            value={tierReasoningInput}
+                            onChange={(e) => setTierReasoningInput(e.target.value)}
+                            placeholder={getDefaultTierPlaceholder(selectedProvider, 'reasoning')}
+                            className="w-full rounded-xl border border-ag-border bg-ag-panel px-3 py-1.5 font-mono text-xs text-ag-textPrimary placeholder-ag-textMuted outline-none focus:border-purple-500 shadow-xs"
+                          />
+                        </div>
+                      </div>
+
+                      <datalist id="subagent-tier-fast-models">
+                        {liveModels.map((m) => (
+                          <option key={`fast-${m.id}`} value={m.id}>
+                            {m.name || m.id}
+                          </option>
+                        ))}
+                      </datalist>
+                      <datalist id="subagent-tier-reasoning-models">
+                        {liveModels.map((m) => (
+                          <option key={`reasoning-${m.id}`} value={m.id}>
+                            {m.name || m.id}
+                          </option>
+                        ))}
+                      </datalist>
+
+                      <p className="text-[10.5px] text-ag-textMuted leading-relaxed">
+                        可直接從下拉建議選取或輸入任何 Model ID；留空則使用該 Provider 的內建分層預設或自動沿用主對話模型。
+                      </p>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Checkpoints History Card */}

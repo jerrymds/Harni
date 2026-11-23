@@ -1,4 +1,15 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { AgyBinaryResolver } from '@harni/agent-core';
 import type { LLMProviderType, ModelInfo } from '@harni/types';
+
+const execFileAsync = promisify(execFile);
+const AGY_MODELS_CACHE_TTL_MS = 5 * 60_000;
+
+interface AgyModelsCache {
+  models: ModelInfo[];
+  cachedAt: number;
+}
 
 export interface FetchModelsOptions {
   provider: LLMProviderType;
@@ -196,6 +207,106 @@ const PRESET_DEFAULT_BASE_URLS: Record<string, string> = {
 };
 
 export class ModelService {
+  private static agyCliModelsCache: AgyModelsCache | null = null;
+
+  public static clearAgyCliModelsCache(): void {
+    this.agyCliModelsCache = null;
+  }
+
+  private static inferAgyModelContextWindow(modelId: string): number {
+    const lower = modelId.toLowerCase();
+    if (lower.includes('gemini-4') || lower.includes('pro') || lower.includes('orchestrator')) {
+      return 2097152;
+    }
+    if (lower.includes('claude')) {
+      return 200000;
+    }
+    if (lower.includes('gpt')) {
+      return 131072;
+    }
+    return 1048576;
+  }
+
+  /**
+   * Parses `<id>\t<displayName>` lines from `agy models` CLI output.
+   */
+  public static parseAgyModelsOutput(rawOutput: string): ModelInfo[] {
+    if (!rawOutput || typeof rawOutput !== 'string') {
+      return [];
+    }
+
+    const lines = rawOutput
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    const parsed: ModelInfo[] = [];
+
+    for (const line of lines) {
+      if (/^fetching\b/i.test(line) || /^[-=]+$/.test(line)) continue;
+
+      const parts = line.includes('\t')
+        ? line.split('\t').map((p) => p.trim())
+        : line.split(/\s{2,}/).map((p) => p.trim());
+
+      if (parts.length < 2) continue;
+
+      const rawId = parts[0] || '';
+      if (!rawId || /\s/.test(rawId) || /^[-=]+$/.test(rawId)) continue;
+
+      const rawName = parts[1] || rawId;
+      if (rawId.toLowerCase() === 'id' && rawName.toLowerCase().includes('name')) {
+        continue;
+      }
+
+      const lowerId = rawId.toLowerCase();
+      const shouldTagAcp =
+        (lowerId.startsWith('claude-') || lowerId.startsWith('gpt-oss-')) &&
+        !lowerId.endsWith(':acp');
+      const id = shouldTagAcp ? `${rawId}:acp` : rawId;
+
+      parsed.push({
+        id,
+        name: rawName,
+        provider: 'antigravity',
+        contextWindow: this.inferAgyModelContextWindow(rawId),
+        isCustom: false,
+      });
+    }
+
+    return parsed;
+  }
+
+  /**
+   * Queries `agy models` via local CLI with a 5-minute TTL cache.
+   */
+  public static async fetchAgyCliModels(forceRefresh = false): Promise<ModelInfo[]> {
+    const now = Date.now();
+    if (
+      !forceRefresh &&
+      this.agyCliModelsCache &&
+      now - this.agyCliModelsCache.cachedAt < AGY_MODELS_CACHE_TTL_MS
+    ) {
+      return this.agyCliModelsCache.models;
+    }
+
+    try {
+      const binary = await AgyBinaryResolver.resolve();
+      const { stdout } = await execFileAsync(binary, ['models'], {
+        timeout: 10_000,
+        windowsHide: true,
+      });
+      const models = this.parseAgyModelsOutput(stdout);
+      if (models.length > 0) {
+        this.agyCliModelsCache = { models, cachedAt: now };
+      }
+      return models;
+    } catch (err: unknown) {
+      console.info(`[ModelService] agy models discovery skipped: ${getErrorMessage(err)}`);
+      return [];
+    }
+  }
+
   /**
    * Queries the provider's /models endpoint to retrieve all live available models.
    * For Cline API, prioritizes the 13 official Cline Pass models at the top.
@@ -204,7 +315,7 @@ export class ModelService {
     const { provider, apiKey, baseURL } = options;
 
     try {
-      // 0. Antigravity Python Bridge Models
+      // 0. Antigravity Direct CLI Models (`agy models`)
       if (provider === 'antigravity') {
         let cleanApiKey: string | undefined;
         if (apiKey) {
@@ -221,20 +332,9 @@ export class ModelService {
           }
         }
 
-        const bridgeUrl = (baseURL || process.env.ANTIGRAVITY_BRIDGE_URL || 'http://127.0.0.1:8123').replace(/\/+$/, '');
-        try {
-          const bridgeQuery = cleanApiKey ? `?apiKey=${encodeURIComponent(cleanApiKey)}` : '';
-          const res = await fetch(`${bridgeUrl}/api/models${bridgeQuery}`, {
-            signal: AbortSignal.timeout(3000),
-          });
-          if (res.ok) {
-            const data = (await res.json()) as { models?: ModelInfo[] };
-            if (Array.isArray(data.models) && data.models.length > 0) {
-              return this.mergeAntigravityModels(data.models, ANTIGRAVITY_OFFICIAL_MODELS);
-            }
-          }
-        } catch {
-          // Bridge may still be starting or offline; proceed to direct fallback
+        const cliModels = await this.fetchAgyCliModels();
+        if (cliModels.length > 0) {
+          return this.mergeAntigravityModels(cliModels, ANTIGRAVITY_OFFICIAL_MODELS);
         }
 
         // Direct fallback: if a valid Gemini API key (starts with AIza) is provided, query Google Gemini models API directly
@@ -524,15 +624,18 @@ export class ModelService {
 
   /**
    * Normalizes an Antigravity model ID by stripping thinking level suffixes.
-   * Special exception: gpt-oss-120b-medium preserves '-medium'.
+   * Special exceptions: gpt-oss-120b-medium and gemini-pro-orchestrator-* preserve their names.
    */
   public static normalizeAntigravityModelId(rawId: string): string {
     const trimmed = (rawId || '').trim();
     const hasAcp = trimmed.toLowerCase().endsWith(':acp');
     let base = hasAcp ? trimmed.slice(0, -4) : trimmed;
 
-    if (base.toLowerCase() !== 'gpt-oss-120b-medium') {
-      base = base.replace(/-(low|medium|high)$/i, '');
+    if (
+      base.toLowerCase() !== 'gpt-oss-120b-medium' &&
+      !/^gemini-pro-orchestrator-/i.test(base)
+    ) {
+      base = base.replace(/-(low|medium|high|xhigh)$/i, '');
     }
 
     return hasAcp ? `${base}:acp` : base;
@@ -540,14 +643,14 @@ export class ModelService {
 
   /**
    * Normalizes an Antigravity model display name:
-   * - Strips (Low), (Medium), (High), (Antigravity), (ACP Mode).
+   * - Strips (Low), (Medium), (High), (XHigh), (Antigravity), (ACP Mode).
    * - Ensures pure ACP models end with '(ACP)', while dual-mode models have no suffix.
    */
   public static normalizeAntigravityModelName(rawName?: string, normalizedId?: string): string {
     let name = (rawName || normalizedId || '').trim();
     name = name
-      .replace(/\s*\((?:low|medium|high)\)/gi, '')
-      .replace(/\s*-\s*(?:low|medium|high)$/gi, '')
+      .replace(/\s*\((?:low|medium|high|xhigh)\)/gi, '')
+      .replace(/\s*-\s*(?:low|medium|high|xhigh)$/gi, '')
       .replace(/\s*\(antigravity\)/gi, '')
       .replace(/\s*\(acp\s+mode\)/gi, '')
       .trim();

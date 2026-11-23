@@ -5,11 +5,21 @@ import type {
   ThinkingDepth,
   TokenUsage,
   ToolDefinition,
+  ToolResult,
 } from '@harni/types';
 
 export type StreamChunk =
   | { type: 'token'; content: string }
   | { type: 'thinking'; thought: string }
+  | {
+      type: 'acp_tool';
+      toolCallId: string;
+      name: string;
+      title: string;
+      status: string;
+      arguments?: Record<string, unknown>;
+      output?: string;
+    }
   | {
       type: 'tool_call';
       id: string;
@@ -27,18 +37,25 @@ export interface ProviderOptions {
   thinkingDepth?: ThinkingDepth;
   workspaceRoot?: string;
   sessionId?: string;
+  subagentId?: string;
   /** The `anthropic` provider's apiKey is a Claude Pro/Max OAuth token (Bearer + oauth beta header). */
   anthropicOAuth?: boolean;
   /** OpenAI access token issued by the Codex ChatGPT subscription OAuth flow. */
   openaiOAuth?: boolean;
   openaiAccountId?: string;
   antigravityMode?: AntigravityExecutionMode;
+  autoApprove?: boolean;
   requestApproval?: (request: {
     toolCallId: string;
     name: string;
     arguments: Record<string, unknown>;
     title?: string;
   }) => Promise<{ approved: boolean; feedback?: string }>;
+  executeAcpTool?: (
+    name: string,
+    args: Record<string, unknown>,
+    meta: { toolCallId: string; signal?: AbortSignal },
+  ) => Promise<ToolResult>;
 }
 
 export interface ProviderCompletionResult {
@@ -65,13 +82,20 @@ export abstract class BaseLLMProvider {
   protected maxTokens: number;
   protected thinkingDepth: ThinkingDepth;
   protected workspaceRoot?: string;
+  protected subagentId?: string;
   protected antigravityMode?: AntigravityExecutionMode;
+  protected autoApprove?: boolean;
   protected requestApproval?: (request: {
     toolCallId: string;
     name: string;
     arguments: Record<string, unknown>;
     title?: string;
   }) => Promise<{ approved: boolean; feedback?: string }>;
+  protected executeAcpTool?: (
+    name: string,
+    args: Record<string, unknown>,
+    meta: { toolCallId: string; signal?: AbortSignal },
+  ) => Promise<ToolResult>;
 
   constructor(options: ProviderOptions = {}) {
     this.apiKey = options.apiKey;
@@ -82,8 +106,15 @@ export abstract class BaseLLMProvider {
     this.thinkingDepth = options.thinkingDepth ?? 'medium';
     this.workspaceRoot = options.workspaceRoot;
     this.sessionId = options.sessionId;
+    this.subagentId = options.subagentId;
     this.antigravityMode = options.antigravityMode;
+    this.autoApprove = options.autoApprove;
     this.requestApproval = options.requestApproval;
+    this.executeAcpTool = options.executeAcpTool;
+  }
+
+  public setWorkspaceRoot(workspaceRoot: string): void {
+    this.workspaceRoot = workspaceRoot;
   }
 
   public getApiKey(): string | undefined {

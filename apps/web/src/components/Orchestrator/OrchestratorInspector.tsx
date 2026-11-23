@@ -16,6 +16,8 @@ import type {
   SwarmBoardState,
   WakeupEventInfo,
 } from '@harni/types';
+import { cleanChangedFilePath } from '../../store/utils.js';
+import { useAgentStore, useShallow } from '../../store/useAgentStore.js';
 
 type InspectorTab = 'files' | 'swarm' | 'schedules';
 
@@ -41,6 +43,14 @@ export const OrchestratorInspector: React.FC<OrchestratorInspectorProps> = ({
   onOpenChangedFile,
 }) => {
   const [activeTab, setActiveTab] = useState<InspectorTab>('files');
+  const { folders, activeFolderId, workspaceInfo, subagents } = useAgentStore(
+    useShallow((s) => ({
+      folders: s.folders,
+      activeFolderId: s.activeFolderId,
+      workspaceInfo: s.workspaceInfo,
+      subagents: s.subagents,
+    })),
+  );
 
   const targetSessionIds = selectedSessionId
     ? [selectedSessionId]
@@ -48,6 +58,7 @@ export const OrchestratorInspector: React.FC<OrchestratorInspectorProps> = ({
         new Set([
           ...sessions.map((s) => s.id),
           ...Object.keys(sessionChangedFiles),
+          ...Object.keys(subagents || {}),
           ...Object.keys(swarmBoards),
           ...Object.keys(sessionSchedules),
           ...Object.keys(wakeupLogs),
@@ -57,13 +68,76 @@ export const OrchestratorInspector: React.FC<OrchestratorInspectorProps> = ({
   const getSessionTitle = (sid: string) =>
     sessions.find((s) => s.id === sid)?.title || sid;
 
-  const aggregatedFiles = targetSessionIds.flatMap((sid) =>
-    (sessionChangedFiles[sid] || []).map((file) => ({
+  const aggregatedFiles = targetSessionIds.flatMap((sid) => {
+    const targetSession = sessions.find((s) => s.id === sid);
+    const targetFolder = (folders || []).find(
+      (f) => f.id === (targetSession?.folderId || activeFolderId),
+    );
+    const baseWorkspaceRoot = targetFolder?.path || workspaceInfo?.rootPath;
+    const sessionSubs = (subagents || {})[sid] || [];
+    const byPath = new Map<string, SessionChangedFile>();
+
+    const normalizeEntry = (entry: SessionChangedFile): SessionChangedFile | null => {
+      const matchedSub = entry.subagentId
+        ? sessionSubs.find((sub) => sub.id === entry.subagentId)
+        : undefined;
+      const workspaceRoot = matchedSub?.worktreePath || baseWorkspaceRoot;
+      const cleanedPath = cleanChangedFilePath(entry.path, workspaceRoot);
+      if (!cleanedPath) return null;
+      return {
+        ...entry,
+        path: cleanedPath,
+      };
+    };
+
+    for (const rawFile of sessionChangedFiles[sid] || []) {
+      const normalized = normalizeEntry(rawFile);
+      if (!normalized) continue;
+      const existing = byPath.get(normalized.path);
+      if (!existing) {
+        byPath.set(normalized.path, normalized);
+      } else if (normalized.diff && !existing.diff) {
+        byPath.set(normalized.path, {
+          ...existing,
+          ...normalized,
+          updatedAt: Math.max(existing.updatedAt, normalized.updatedAt),
+        });
+      } else if (
+        Boolean(normalized.diff) === Boolean(existing.diff) &&
+        normalized.updatedAt > existing.updatedAt
+      ) {
+        byPath.set(normalized.path, {
+          ...existing,
+          ...normalized,
+        });
+      }
+    }
+
+    for (const sub of sessionSubs) {
+      const reportedFiles = sub.structuredReport?.modifiedFiles;
+      if (!Array.isArray(reportedFiles)) continue;
+      const fallbackUpdatedAt = sub.completedAt || sub.updatedAt || sub.createdAt;
+      for (const rawPath of reportedFiles) {
+        const normalized = normalizeEntry({
+          path: rawPath,
+          updatedAt: fallbackUpdatedAt,
+          source: 'subagent',
+          subagentId: sub.id,
+          subagentRole: sub.role,
+        });
+        if (!normalized) continue;
+        if (!byPath.has(normalized.path)) {
+          byPath.set(normalized.path, normalized);
+        }
+      }
+    }
+
+    return Array.from(byPath.values()).map((file) => ({
       sessionId: sid,
       sessionTitle: getSessionTitle(sid),
       file,
-    })),
-  );
+    }));
+  });
   aggregatedFiles.sort((a, b) => b.file.updatedAt - a.file.updatedAt);
 
   const activeBoards = targetSessionIds
@@ -240,9 +314,14 @@ export const OrchestratorInspector: React.FC<OrchestratorInspectorProps> = ({
                         <span
                           key={m.subagentId}
                           className="inline-flex items-center gap-1 rounded-lg border border-ag-border bg-ag-panel px-2 py-0.5 text-[11px] text-ag-textSecondary"
-                          title={`${m.role}${m.forkedFrom ? ` (forked from ${m.forkedFrom})` : ''}`}
+                          title={`${m.role}${m.model ? ` · 模型: ${m.model}` : ''}${m.forkedFrom ? ` (forked from ${m.forkedFrom})` : ''}`}
                         >
                           <span className="font-mono font-semibold text-ag-primary">@{m.name}</span>
+                          {m.model && (
+                            <span className="font-mono text-[10px] text-indigo-500 dark:text-indigo-300">
+                              · {m.model}
+                            </span>
+                          )}
                           <span className="text-ag-textMuted">({m.status})</span>
                         </span>
                       ))}

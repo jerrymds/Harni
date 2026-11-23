@@ -3,7 +3,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { AntigravityProvider } from '../src/providers/antigravityProvider.js';
-import { normalizeToolCall, resolveCanonicalToolName } from '../src/tools/toolAdapter.js';
+import { normalizeToolArguments, normalizeToolCall, resolveCanonicalToolName } from '../src/tools/toolAdapter.js';
 import { ToolRegistry } from '../src/tools/toolRegistry.js';
 
 describe('toolAdapter & ToolRegistry agy compatibility', () => {
@@ -170,6 +170,38 @@ describe('toolAdapter & ToolRegistry agy compatibility', () => {
     expect(subCall.name).toBe('invoke_subagent');
     expect(subCall.arguments.subagents).toEqual([
       { typeName: 'agy-worker', role: 'Implementer', prompt: 'Fix bug' },
+    ]);
+  });
+
+  it('strips mcp_harni_ prefix without touching mcp__other__tool and normalizes flat/extended invoke_subagent args', () => {
+    expect(resolveCanonicalToolName('mcp_harni_invoke_subagent')).toBe('invoke_subagent');
+    expect(resolveCanonicalToolName('mcp_harni_view_file')).toBe('read_file');
+    expect(resolveCanonicalToolName('mcp__other__tool')).toBe('mcp__other__tool');
+
+    const flat = normalizeToolArguments('invoke_subagent', {
+      TypeName: 'researcher',
+      Role: 'Scout',
+      Prompt: 'Find bugs',
+      Background: true,
+      Workspace: 'worktree',
+      Fork: 'coordinator',
+      timeout_ms: 12000,
+      max_tokens_budget: 5000,
+      auto_merge_worktree: false,
+    });
+
+    expect(flat.subagents).toEqual([
+      {
+        typeName: 'researcher',
+        role: 'Scout',
+        prompt: 'Find bugs',
+        background: true,
+        isolation: 'worktree',
+        fork: 'coordinator',
+        timeoutMs: 12000,
+        maxTokensBudget: 5000,
+        autoMergeWorktree: false,
+      },
     ]);
   });
 });
